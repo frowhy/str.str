@@ -10,6 +10,25 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
 
 ---
 
+## [Unreleased] — 0.5.0
+
+对应规范 **v1.11.0**。
+
+### 变更
+
+- **`[uuid]` 缺省目标从 ROOT 细化为「当前节点」**：`[dir]` 为 bundle 根时省略 `<uuid>` 仍为 ROOT
+  （v1.9.0 行为不变）；`[dir]` 指向 bundle 内某分支目录（或其内部子目录）时，省略 `<uuid>` 的
+  `show` / `ls` / `context` / `norm` / `meta set` / `entry set` / `author add|rm` / `ref add` /
+  `branch add` / `branch rm` 全部以**该分支**为目标 —— 在分支目录内执行
+  `str branch add --title SUB` 即挂到当前分支下，`str branch rm --force` 即删除当前分支本身
+  （父级 `entries[]` 由全树扫描同步修复）。实现上 `open()` 会向上解析真正的 bundle 根
+  （`.str` 硬边界不被穿越），显式给出 `[uuid]` 的旧调用不受影响（规范 §9 条文，DoD 第 27 项）。
+- **`node add` 在分支目录下执行 → 带原因拒绝**：独立节点只能挂 ROOT，报错指引改用
+  `branch add`（避免「在分支里执行 node add 却把节点加到了 ROOT」的静默意外）。
+- `SPEC_VERSION` 1.10.0 → **1.11.0**；`str --version` 现在输出 `str 0.5.0`。
+
+---
+
 ## [Unreleased] — 0.4.0
 
 对应规范 **v1.10.0**。

@@ -17,7 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 |
 | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.10.0 | 0.4.0 | 0.3.1 |
+| 工作区（未发布） | — | 1.11.0 | 0.5.0 | 0.3.2 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
@@ -25,6 +25,21 @@
 
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
+
+---
+
+## [Unreleased] — 目标 tag `v0.5.0`
+
+### 变更
+
+- **规范 1.10.0 → 1.11.0**：§9 的 `[uuid]` 缺省目标从 ROOT 细化为「当前节点」—— `[dir]` 指向
+  分支目录时，省略 `<uuid>` 的命令以该分支为目标（`branch add` 挂靠、`branch rm` 自删并修复
+  父级清单）；工具须以整份 bundle 为扫描视角，`.str` 硬边界不被向上穿越。详见
+  [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
+- **CLI 0.4.0 → 0.5.0**：`[uuid]` 缺省当前节点 + `node add` 在分支目录下的带原因拒绝。详见
+  [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.3.1 → 0.3.2**：`[uuid]` 缺省说明更新为「当前节点」语义。
+- `release.yml` 的 `workflow_dispatch` 默认 tag 更新为 `v0.5.0`。
 
 ---
 

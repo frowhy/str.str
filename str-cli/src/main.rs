@@ -75,7 +75,7 @@ enum Cmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// `--uuid` 选项形式（等价于位置参数，保留兼容）
         #[arg(long = "uuid", conflicts_with = "uuid")]
@@ -89,7 +89,7 @@ enum Cmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 附带 payload 正文
         #[arg(long)]
@@ -156,7 +156,7 @@ enum Cmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 输出目标：`-` 为 stdout（缺省），其余为文件路径
         #[arg(long)]
@@ -167,7 +167,7 @@ enum Cmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 下钻层数
         #[arg(long, default_value_t = 2)]
@@ -227,7 +227,7 @@ enum BranchCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 锚点分支 id（缺省为 ROOT；但 ROOT 的直接子分支应改用 `node add`）
+        /// 锚点分支 id（缺省为当前节点；真 ROOT 的直接子分支应改用 `node add`）
         anchor: Option<String>,
         /// 类型
         #[arg(long = "type")]
@@ -265,7 +265,7 @@ enum RefCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 源分支 id（缺省为 ROOT）
+        /// 源分支 id（缺省为当前节点）
         uuid: Option<String>,
         /// 目标分支 id
         #[arg(long)]
@@ -303,7 +303,7 @@ enum MetaCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 实体类型，如 crm.customer（空串移除）
         #[arg(long = "type")]
@@ -330,7 +330,7 @@ enum EntryCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 条目所在分支 id（缺省为 ROOT）
+        /// 条目所在分支 id（缺省为当前节点）
         uuid: Option<String>,
         /// 条目路径（单段名，与子项目录名/文件名一致）
         #[arg(long = "path")]
@@ -360,7 +360,7 @@ enum AuthorCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 稳定标识符（SSO sub / 邮箱 hash；禁止用显示名）
         #[arg(long)]
@@ -380,7 +380,7 @@ enum AuthorCmd {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
         dir: PathBuf,
-        /// 分支 id（缺省为 ROOT）
+        /// 分支 id（缺省为当前节点：`[dir]` 即 bundle 根时为 ROOT，指向分支目录时为该分支）
         uuid: Option<String>,
         /// 稳定标识符
         #[arg(long)]

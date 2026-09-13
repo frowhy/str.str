@@ -1,6 +1,6 @@
 # STR 格式规范精要
 
-> 本文是 `STR-FORMAT-PROMPT.md`（**唯一真源**，v1.10.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
+> 本文是 `STR-FORMAT-PROMPT.md`（**唯一真源**，v1.11.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
 > 本文件描述**规范要求**；命令面与实现细节见 `cli-reference.md`，两者已逐步对齐（残留的规范内部不一致在该文「规范内部不一致」一节列出）。
 
 ## 1. 一句话模型
@@ -186,7 +186,7 @@ TOML 要求裸键写在任何表头之前，因此书写顺序固定：
 ## 9. AI 读取与写入协议（§8）
 
 **渐进式披露**：① 读 `ROOT/._meta` 的 `name/title/summary` + `entries[role=node]` → ② 按 `type/tags/title/summary` 选目标分支 → ③ 读该分支 `._meta` → ④ 仅在需要时下钻 `entries[role=branch]` 或读 `payload` → ⑤ 需要横向关系时读 `refs[]`。
-**禁止**未经筛选地递归读取整个 bundle 的所有 payload。裁剪上下文用 `str context [dir] [uuid] --depth n --budget c`（`[uuid]` 缺省为 ROOT）。
+**禁止**未经筛选地递归读取整个 bundle 的所有 payload。裁剪上下文用 `str context [dir] [uuid] --depth n --budget c`（`[uuid]` 缺省为当前节点：`[dir]` 为 bundle 根时即 ROOT，指向分支目录时即该分支）。
 
 **写入约束**：① 不得修改/新建 UUID 目录名；② 在已有子目录内创建 `._meta` 会使其成为关联分支，必须同步把父级 `entries[]` 该项 `role` 由 `dir` 改为 `branch` 并补 `id`/`kind`；③ 可在任意深度新增文件/文件夹，但必须同步登记进 `entries[]`（或随后 `str sync`）；④ 修改后必须 `revision + 1`、更新 `updated_at`、按 §4.9 键序重排；⑤ 不得把深度 ≥2 的分支「提升」为独立节点；⑥ 删除他人 `owner` 的分支前必须显式确认；⑦ 字段语义不明时**必须提问**，禁止发明新字段（`ext` 除外）。
 

@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.10.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.11.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-09-14 |
 | 文档定位 | **本文件即提示词（Prompt）**，整份可直接投喂给 AI 开发代理；第 1 章为指令主体，第 2~13 章为规范性附录（即指令的「事实来源」） |
@@ -26,6 +26,7 @@
 | **v1.8.0** | 2026-09-14 | **实现对齐驱动修订**：以「让工具真正执行规范」为目标消解规范 ↔ 实现的落差。① **4.9 排序细则明确化**：数组表按 `(order, path\|id)` 排序、`order` 缺省视为最大（原措辞「无 `order` 者保持既有相对顺序」与本章标题「确定性序列化」自相矛盾，改为与 4.6 同源的可判定规则）；② **6.1.1 新增「`E_REVISION_STALE` 的可判定性」**：历史相关条件须由写入端登记基线（`._cache/revisions.json`，派生数据）方能判定，并明确「`sync` 只在 `revision` 前进时推进基线」；③ **9 章命令面补齐**：`str ls <dir> [uuid]`、`str ref rm <dir> <ref-uuid>`（位置参数），并新增 `str meta set` / `str entry set` / `str author add\|rm` 四个字段写入命令 —— 从此 `type` / `title` / `summary` / `note` / `tags` / `authors[]` **不再需要手改 `._meta`**；④ 明确「写出的 `._meta` 一律是 4.9 规范形式」与「`str tree` 呈现顺序与落盘顺序同源」；⑤ DoD 增补 21~23 项；⑥ **删除 `policies.unknown_entry`**（与 4.8 `manifest` 语义重叠、从未被 Schema 与实现采纳；先例见 v1.5.0 删 `branch_min_depth`）；⑦ 9 章「写操作须先通过校验」改述为可判定的「产出的 `._meta` 必须自身合法且规范」，避免与「新增文件 → `str sync`」的正常流程自锁。 |
 | **v1.9.0** | 2026-09-14 | **统一 `<UUID>` 缺省语义 + 补齐 `spec` 写入命令**。① §9 命令表中 `show` / `branch add` / `branch rm` / `ref add` / `norm` / `context` 的 `<uuid>` / `<anchor-uuid>` 一律改为 **`[uuid]`** —— **省略即默认 ROOT**，与既有的 `ls` / `meta set` / `entry set` / `author add\|rm` 对齐（`norm` 此前「§9 写必填、实现已可选」的落差随之消失）。规则是**放宽**，旧调用全部仍然合法；ROOT 上非法的两个操作不再靠「参数缺失」挡住，而是在解析出 ROOT 后给出**带原因**的拒绝 —— `branch add` 指引改用 `node add`（ROOT 的直接子分支是 `node`），`branch rm` 明确 `不能删除 ROOT`；并把这条缺省规则写成 §9 的**规范条文**（此后新增命令一律适用），DoD 增补第 24 项。② **新增 `str spec set <dir> <VERSION>`**：`spec` 此前是唯一「没有 CLI 写入命令、只能手改 `._meta`」的字段（v1.8.0 的「无例外」因此留了个洞）；该命令递归改写整份 bundle 的 `spec`（子 bundle 除外，§3.5）、只改有差异的分支（幂等）、任一份 `._meta` 解析失败即整体拒绝，DoD 增补第 25 项 —— 至此「不得手改 `._meta`」不再有例外。 |
 | **v1.10.0** | 2026-09-14 | **统一 `<dir>` 缺省语义**。§9 命令表全部命令的 `<dir>` 位置参数统一放宽为 **`[dir]`** —— **省略即当前工作目录**（`str <cmd>` 等价于 `str <cmd> .`），与 v1.9.0 的 `[uuid]` 缺省 ROOT 同构，并写成 §9 的**规范条文**。`init` 是唯一例外：省略时以当前路径为基准目标，仍按「未以 `.str` 结尾则追加 `.str`」定名（在 `foo/` 里执行 `str init` 创建兄弟目录 `foo.str`）。连带：可选 `[dir]` 不得排在必填位置参数之前（clap 等解析器的硬约束），`spec set` 的签名随之调整为 `str spec set <VERSION> [dir]`。规则是**放宽**，旧调用（显式给出路径）全部仍然合法，DoD 增补第 26 项。 |
+| **v1.11.0** | 2026-09-14 | **`[uuid]` 缺省目标从 ROOT 细化为「当前节点」**。v1.9.0 的「省略即 ROOT」在 `[dir]` 指向 bundle 内部分支目录时语义缺失（用户在分支目录内操作时仍被迫显式给出 id，或被「ROOT 的直接子分支」误拒）。v1.11.0 规定：`[uuid]` 省略时目标为**当前节点** —— `[dir]` 为 bundle 根即 ROOT，指向分支目录（或其内部子目录）即该分支；工具 MUST 以**整份 bundle** 为扫描视角（`[dir]` 向上解析 bundle 根，不穿越 `.str` 硬边界），保证写操作能同步修复父级 `entries[]`。连带：`node add` 在分支目录下执行时 MUST 带原因拒绝（独立节点只能挂 ROOT）。规则是**放宽 + 寻址细化**，显式给出 `[uuid]` 的旧调用不受影响，DoD 增补第 27 项。 |
 
 ---
 
@@ -638,13 +639,13 @@ A.str/
 
 **`[uuid]` 的缺省规则（规范条文）**：
 
-- 命令签名中凡以 **`[uuid]`** 书写的位置参数（含 `[anchor-uuid]`）一律**可选**，**省略时目标为 ROOT**；`<uuid>` 表示仍然必填（目前只有 `str ref add --target`）。工具 MUST 接受省略形式，MUST NOT 以「参数缺失」拒绝。
-- 该缺省值只解决**寻址**，不改变命令语义：若某操作在 ROOT 上没有意义或不允许（`branch add` 的锚点、`branch rm` 的目标），工具 MUST 解析出 ROOT 后以 `BadArg` **拒绝并说明原因**（前者指引改用 `node add`，后者提示 `不能删除 ROOT`），MUST NOT 静默改写成别的操作。
-- 新增命令时一律沿用本条：凡取单个分支为目标的命令，其 `<UUID>` 位置参数都应写作 `[uuid]` 并缺省 ROOT。
+- 命令签名中凡以 **`[uuid]`** 书写的位置参数（含 `[anchor-uuid]`）一律**可选**，**省略时目标为当前节点**：`[dir]` 为 bundle 根时即 ROOT，`[dir]` 指向 bundle 内某分支目录（或其内部子目录）时即**该分支**；工具 MUST 以**整份 bundle** 为扫描视角（`[dir]` 的向上解析不得穿越 `.str` 硬边界），因此写操作（如 `branch rm` 删除当前节点）能同步修复父级 `entries[]`。`<uuid>` 表示仍然必填（目前只有 `str ref add --target`）。工具 MUST 接受省略形式，MUST NOT 以「参数缺失」拒绝。
+- 该缺省值只解决**寻址**，不改变命令语义：若某操作在解析出的目标上没有意义或不允许（真 ROOT 上 `branch add` 的锚点、`branch rm` 的目标；分支目录上 `node add`），工具 MUST 解析出目标后以 `BadArg` **拒绝并说明原因**（前两者指引改用 `node add` / 提示 `不能删除 ROOT`，后者指引改用 `branch add`），MUST NOT 静默改写成别的操作。
+- 新增命令时一律沿用本条：凡取单个分支为目标的命令，其 `<UUID>` 位置参数都应写作 `[uuid]` 并缺省当前节点。
 
 **`[dir]` 的缺省规则（规范条文）**：
 
-- 命令签名中凡以 **`[dir]`** 书写的位置参数一律**可选**，**省略时目标为当前工作目录**（`str <cmd>` 等价于 `str <cmd> .`）。工具 MUST 接受省略形式，MUST NOT 以「参数缺失」拒绝。
+- 命令签名中凡以 **`[dir]`** 书写的位置参数一律**可选**，**省略时目标为当前工作目录**（`str <cmd>` 等价于 `str <cmd> .`）。工具 MUST 接受省略形式，MUST NOT 以「参数缺失」拒绝。`[dir]` 指向 bundle 内部分支目录时，命令的 bundle 视角仍为**整份 bundle**（解析出的扫描根不因 `[dir]` 层级而缩小，见 `[uuid]` 缺省规则）。
 - `init` 是唯一以「新建目录」为目标的命令：省略 `[dir]` 时以**当前路径**为基准目标，仍按「未以 `.str` 结尾则追加 `.str`」定名 —— 在 `foo/` 里执行 `str init` 创建的是**兄弟目录** `foo.str`；当前目录已以 `.str` 结尾时目标即自身，通常已存在而报错。
 - 位置参数顺序上，可选的 `[dir]` MUST NOT 排在必填位置参数之前（clap 等解析器的硬约束）：`spec set` 因此自本版起写作 `str spec set <VERSION> [dir]`。
 - 新增命令时一律沿用本条：凡取 bundle 为目标的命令，其 `<dir>` 位置参数都应写作 `[dir]` 并缺省当前工作目录。
@@ -1074,7 +1075,8 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 21 | 字段写入闭环 | `str meta set` / `str entry set` / `str author add\|rm` 能写入 `type` / `title` / `summary` / `note` / `tags` / `authors[]`，且写后 `str validate --strict` → 0 errors；空串能移除字段 |
 | 22 | 排序确定性 | 同一组 `entries` 无论物理书写顺序如何，`str fmt` 后字节一致；`str fmt --check` 幂等返回 0 |
 | 23 | 修订历史可判定 | 绕过 CLI 只改 `updated_at` 不推进 `revision` → `str validate` 报 `E_REVISION_STALE`，且该结论跨 `str sync` 持续可见，直到 `revision` 真正前进 |
-| 24 | **`[uuid]` 缺省 ROOT** | `str show` / `str context` / `str norm` / `str ref add` / `str branch add` / `str branch rm` 省略 `<UUID>` 时目标为 ROOT；`show` / `context` / `norm` / `ref add` 落到 ROOT 正常工作，`branch add` / `branch rm` 以 `BadArg` 拒绝**并给出原因**（不得退化为「参数缺失」） |
+| 24 | **`[uuid]` 缺省当前节点** | `[dir]` 为 bundle 根时，`str show` / `str context` / `str norm` / `str ref add` / `str branch add` / `str branch rm` 省略 `<UUID>` 目标为 ROOT；`branch add` / `branch rm` 在真 ROOT 上以 `BadArg` 拒绝**并给出原因**（不得退化为「参数缺失」） |
+| 27 | **`[uuid]` 缺省跟随 `[dir]`** | `[dir]` 指向分支目录时：`str show [dir]` 打印该分支；`str branch add [分支目录]` 把新分支挂到该分支下；`str branch rm [分支目录] --force` 删除该分支本身且父级 `entries[]` 被同步修复（写后 `str validate --strict` → 0 errors）；`str node add [分支目录]` → `BadArg` 指引改用 `branch add`；`.str` 硬边界不被向上穿越（子 bundle 内解析止于子 bundle 根） |
 | 25 | **`spec` 可经 CLI 写入** | `str spec set <VERSION> [dir]` 改写整份 bundle 的 `spec`（子 bundle 除外）且**幂等**（第二次输出「已更新 0 份」）；写后 `str validate --strict` → 0 errors；非法版本串（`2.0.0` / `1.9` / 空串）→ `BadArg`；任一份 `._meta` 解析失败则**整体拒绝**、不写出部分结果 |
 | 26 | **`[dir]` 缺省当前目录** | 在 bundle 内省略 `<dir>` 执行 `str tree` / `str show` / `str validate` / `str sync` / `str fmt --check` / `str spec set <VERSION>` 等全部命令 → 与显式 `.` 等价；`init` 缺省在当前路径旁创建 `<目录名>.str`；显式给出路径的旧调用不受影响 |
 
@@ -1092,7 +1094,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 1. **只有 `str` 主版本号**需要工具显式支持；`spec` 用于人类追溯。
 2. 一切厂商/实验性扩展必须放 `ext`（键名 `vendor.feature`），不得占用顶层字段。
-3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定；⑥ v1.7.0 引入 `.str` 子 bundle 硬边界与 `role = "bundle"`、扩展元数据豁免至 VCS、修正 `W_ROOT_STRAY` 与 schema/policy 冲突；⑦ v1.8.0 把「排序细则」「`E_REVISION_STALE` 可判定性」写实、补齐字段写入命令（`meta set` / `entry set` / `author`）使「必须经 CLI 操作 `._meta`」成为无例外的规则，另删除从未实现的 `policies.unknown_entry`、并把「写前校验」改述为可判定的「产出即合法且规范」；若已有实现，只需按 4.7 的删除说明去掉对 `unknown_entry` 的读取，并用 4.9 的排序细则替换原「无 `order` 者保持既有相对顺序」的写法（首次规范化会有一次性条目重排，属预期）；⑧ v1.9.0 把 §9 中 `show` / `branch add` / `branch rm` / `ref add` / `norm` / `context` 的 `<uuid>` 统一放宽为 `[uuid]`（省略即 ROOT）并写成规范条文 —— 纯放宽，旧调用不受影响，已有实现只需接受省略形式并在 ROOT 上对 `branch add` / `branch rm` 给出带原因的拒绝；同时新增 `str spec set`，把此前**唯一只能手改**的字段 `spec` 也纳入 CLI 写入路径（递归整份 bundle、幂等）—— 实现该命令不需要格式语义变更，纯属补齐工具面；⑨ v1.10.0 把 §9 中全部命令的 `<dir>` 统一放宽为 `[dir]`（省略即当前工作目录，`init` 缺省以当前路径为基准目标）并写成规范条文 —— 纯放宽，已有实现只需接受省略形式；因可选位置参数不得排在必填位置参数之前，`spec set` 的签名调整为 `<VERSION> [dir]`（旧参数顺序的实现应同步调整并在版本串非法时提示新顺序）。
+3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定；⑥ v1.7.0 引入 `.str` 子 bundle 硬边界与 `role = "bundle"`、扩展元数据豁免至 VCS、修正 `W_ROOT_STRAY` 与 schema/policy 冲突；⑦ v1.8.0 把「排序细则」「`E_REVISION_STALE` 可判定性」写实、补齐字段写入命令（`meta set` / `entry set` / `author`）使「必须经 CLI 操作 `._meta`」成为无例外的规则，另删除从未实现的 `policies.unknown_entry`、并把「写前校验」改述为可判定的「产出即合法且规范」；若已有实现，只需按 4.7 的删除说明去掉对 `unknown_entry` 的读取，并用 4.9 的排序细则替换原「无 `order` 者保持既有相对顺序」的写法（首次规范化会有一次性条目重排，属预期）；⑧ v1.9.0 把 §9 中 `show` / `branch add` / `branch rm` / `ref add` / `norm` / `context` 的 `<uuid>` 统一放宽为 `[uuid]`（省略即 ROOT）并写成规范条文 —— 纯放宽，旧调用不受影响，已有实现只需接受省略形式并在 ROOT 上对 `branch add` / `branch rm` 给出带原因的拒绝；同时新增 `str spec set`，把此前**唯一只能手改**的字段 `spec` 也纳入 CLI 写入路径（递归整份 bundle、幂等）—— 实现该命令不需要格式语义变更，纯属补齐工具面；⑨ v1.10.0 把 §9 中全部命令的 `<dir>` 统一放宽为 `[dir]`（省略即当前工作目录，`init` 缺省以当前路径为基准目标）并写成规范条文 —— 纯放宽，已有实现只需接受省略形式；因可选位置参数不得排在必填位置参数之前，`spec set` 的签名调整为 `<VERSION> [dir]`（旧参数顺序的实现应同步调整并在版本串非法时提示新顺序）；⑩ v1.11.0 把 `[uuid]` 的缺省目标从「恒为 ROOT」细化为「当前节点」（`[dir]` 为 bundle 根即 ROOT，指向分支目录即该分支），工具须以整份 bundle 为扫描视角（向上解析 `[dir]`，不穿越 `.str` 硬边界）—— 显式 `[uuid]` 的旧调用不受影响。
 
 ---
 

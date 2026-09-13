@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://str-format.local/schema/v1/root-meta.schema.json",
   "title": "STR root `._meta`（ROOT 元数据）",
-  "description": "对应 STR 规范 v1.10.0 第 4 章。校验对象是 `._meta`（TOML）归一化后的规范 JSON（见规范 4.1 / 4.9）。",
+  "description": "对应 STR 规范 v1.11.0 第 4 章。校验对象是 `._meta`（TOML）归一化后的规范 JSON（见规范 4.1 / 4.9）。",
   "type": "object",
   "required": ["str", "spec", "kind", "id", "name", "revision", "created_at", "updated_at"],
   "additionalProperties": false,

@@ -77,6 +77,57 @@ fn dir_argument_defaults_to_current_directory() {
 }
 
 #[test]
+fn uuid_argument_defaults_to_current_branch_in_branch_directory() {
+    let base = tmp("curbranch");
+    let cwd = base.join("proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let (code, out) = run(&cwd, &["init"]);
+    assert_eq!(code, 0, "{out}");
+    let bundle = base.join("proj.str");
+
+    // 建一个节点，然后**在该节点目录内**执行命令（不传任何 id）
+    let (code, out) = run(
+        &bundle,
+        &["node", "add", "--type", "a.b", "--title", "NODE", "--summary", "s"],
+    );
+    assert_eq!(code, 0, "{out}");
+    let node = {
+        let text = std::fs::read_to_string(bundle.join("._meta")).unwrap();
+        text.lines()
+            .find_map(|l| l.strip_prefix("path = \"").map(|s| s.trim_end_matches('"').to_string()))
+            .filter(|p| p.starts_with("019") || p.len() == 36)
+            .expect("ROOT entries 应含新节点 id")
+    };
+    let node_dir = bundle.join(&node);
+
+    // `branch add` 省略锚点 → 挂在当前节点下；`show` 省略 uuid → 打印当前节点
+    let (code, out) = run(&node_dir, &["branch", "add", "--title", "SUB"]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = run(&node_dir, &["show"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("NODE"), "`show` 应落在当前节点：{out}");
+
+    // 子分支目录内 `branch rm`（省略 uuid）→ 删除当前分支本身
+    let sub = {
+        let text = std::fs::read_to_string(node_dir.join("._meta")).unwrap();
+        text.lines()
+            .find_map(|l| l.strip_prefix("path = \"").map(|s| s.trim_end_matches('"').to_string()))
+            .filter(|p| p != &node)
+            .expect("节点 entries 应含子分支 id")
+    };
+    let (code, out) = run(&node_dir.join(&sub), &["branch", "rm", "--force"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!node_dir.join(&sub).exists(), "{out}");
+
+    // 回到 bundle 根：`validate --strict` 仍干净（父级 entries 已修复）
+    let (code, out) = run(&bundle, &["validate", "--strict"]);
+    assert_eq!(code, 0, "{out}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn init_without_dir_in_a_str_named_directory_is_rejected() {
     let base = tmp("initstr");
     let cwd = base.join("already.str");

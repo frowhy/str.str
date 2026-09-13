@@ -13,9 +13,40 @@ use crate::{SPEC_VERSION, STR_MAJOR};
 
 // ─────────────────────────── 公共辅助 ───────────────────────────
 
-/// 打开 bundle。
+/// 打开 bundle：`<dir>` 可为 bundle 根，也可为其内部的分支/内容目录。
+///
+/// 解析规则（见 [`bundle_root_of`]）：向上找到真正持有这份 bundle 的根目录再整体扫描 ——
+/// 因此 `str <cmd> <bundle>/<分支>` 与在分支目录内执行 `str <cmd>` 等价，
+/// `[uuid]` 的缺省目标随之成为「当前节点」（见 [`target_branch`]）。
 pub fn open(dir: &Path) -> Result<Bundle> {
-    Bundle::new(dir.to_path_buf())
+    Bundle::new(bundle_root_of(dir)?)
+}
+
+/// 从 `<dir>` 向上解析 bundle 根：停在**第一个**满足下列条件之一的目录（含自身）——
+///
+/// 1. 目录名以 `.str` 结尾（规范 §3.5：`.str` 目录是 bundle 硬边界）；
+/// 2. 其父目录不含 `._meta`（元数据链顶端；兼容无 `.str` 后缀的 bundle 与文件系统根）。
+///
+/// 由此子 bundle 边界不会被向上穿越（`examples/客户运营.str` 内部解析到它自身为止）。
+fn bundle_root_of(dir: &Path) -> Result<PathBuf> {
+    let mut cur = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+    loop {
+        let name = cur
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let parent_has_meta = cur
+            .parent()
+            .map(|p| p.join(util::META_FILE).is_file())
+            .unwrap_or(false);
+        if name.ends_with(".str") || !parent_has_meta {
+            return Ok(cur);
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => return Ok(cur),
+        }
+    }
 }
 
 /// 定位某 uuid 对应的 visit 下标。
@@ -130,18 +161,33 @@ fn save_meta(bundle: &Bundle, dir: &Path, meta: &Meta) -> Result<()> {
     Ok(())
 }
 
-/// 取目标分支下标：给了 `uuid` 就解析，缺省为 ROOT。
+/// 取目标分支下标：给了 `uuid` 就解析；缺省目标为**当前节点**。
 ///
-/// 规范 §9：命令签名中凡 `[uuid]` 形式的位置参数均**可选**，缺省目标一律为 ROOT。
+/// 规范 §9（v1.11.0 起）：`[uuid]` 省略时，`[dir]` 为 bundle 根即 ROOT，
+/// `[dir]` 指向 bundle 内部时为其所属分支（`<dir>` 本身或最近含 `._meta` 的祖先）。
 /// 本函数是这条规则的唯一实现点 —— 新增命令时复用它，不要各自内联缺省逻辑。
-fn target_branch(scan: &Scan, uuid: Option<&str>) -> Result<usize> {
+fn target_branch(bundle: &Bundle, scan: &Scan, dir: &Path, uuid: Option<&str>) -> Result<usize> {
     match uuid {
         Some(u) => {
             locate(scan, u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))
         }
-        None => scan
-            .root_index
-            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into())),
+        None => {
+            let mut probe = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+            loop {
+                if let Some(i) = scan.visits.iter().position(|v| v.dir == probe) {
+                    return Ok(i);
+                }
+                match probe.parent() {
+                    // `probe` 已到 bundle 根仍无 visit（根缺 `._meta`）→ 交由 root_index 报因
+                    Some(p) if probe != bundle.root => probe = p.to_path_buf(),
+                    _ => {
+                        return scan
+                            .root_index
+                            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into()));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -374,7 +420,7 @@ fn render_children(
 pub fn ls(dir: &Path, uuid: Option<String>, raw: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let v = &scan.visits[idx];
     println!("{}  （{}）", v.rel, if raw { "磁盘原始" } else { "清单" });
     if raw {
@@ -406,11 +452,11 @@ pub fn ls(dir: &Path, uuid: Option<String>, raw: bool) -> Result<()> {
     Ok(())
 }
 
-/// 打印某分支的 `._meta`（归一化 JSON）。（规范 §9：`<UUID>` 缺省为 ROOT。）
+/// 打印某分支的 `._meta`（归一化 JSON）。（规范 §9：`<UUID>` 缺省为当前节点。）
 pub fn show(dir: &Path, uuid: Option<String>, full: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let v = &scan.visits[idx];
     let Some(meta) = v.meta.as_ref() else {
         return Err(Error::BadArg(format!("{} 的 `._meta` 解析失败", v.rel)));
@@ -434,7 +480,7 @@ pub fn show(dir: &Path, uuid: Option<String>, full: bool) -> Result<()> {
 
 // ─────────────────────────── node / branch ───────────────────────────
 
-/// 新增独立节点（深度 1）。
+/// 新增独立节点（深度 1，只能登记在 ROOT 下）。
 pub fn node_add(
     dir: &Path,
     type_: Option<String>,
@@ -442,6 +488,16 @@ pub fn node_add(
     summary: Option<String>,
 ) -> Result<()> {
     let bundle = open(dir)?;
+    // `[dir]` 指向分支/内容目录时明确拒绝 —— 独立节点只能挂在 ROOT，避免「在分支里
+    // 执行 node add 却把节点加到了 ROOT」的静默意外（规范 §9：拒绝必须带原因）。
+    let cur = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+    if cur != bundle.root {
+        return Err(Error::BadArg(
+            "当前目录不是 bundle 根：`node add` 只能向 ROOT 新增深度 1 的独立节点；\
+             在分支下新增请改用 `branch add`"
+                .into(),
+        ));
+    }
     let root = match bundle.read_meta(&bundle.root)? {
         MetaLoad::Ok(m, _) => m,
         MetaLoad::Failed(_) => {
@@ -495,8 +551,9 @@ pub fn node_add(
 
 /// 在指定分支下新增关联分支（任意深度）。
 ///
-/// 规范 §9：`<ANCHOR-UUID>` 缺省为 ROOT；但 ROOT 的直接子分支是 `node` 而非 `branch`，
-/// 因此缺省/显式给出 ROOT 时由下方的深度判据拒绝并指引到 `str node add`。
+/// 规范 §9：`<ANCHOR-UUID>` 缺省为**当前节点**（`[dir]` 即 bundle 根时为 ROOT）；但真 ROOT 的
+/// 直接子分支是 `node` 而非 `branch`，因此缺省/显式落到真 ROOT 时由下方的深度判据拒绝并指引到
+/// `str node add`。
 pub fn branch_add(
     dir: &Path,
     anchor: Option<String>,
@@ -507,7 +564,7 @@ pub fn branch_add(
 ) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, anchor.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, anchor.as_deref())?;
     if scan.visits[idx].depth == 0 {
         return Err(Error::BadArg(
             "ROOT 的直接子分支应使用 `str node add`（role = node）；\
@@ -566,16 +623,19 @@ pub fn branch_add(
 
 /// 删除关联分支（含其全部下级）。
 ///
-/// 规范 §9：`<UUID>` 缺省为 ROOT；而 ROOT 不可删除，故缺省调用会得到明确拒绝
-/// （而不是靠「参数缺失」这种不含原因的错误挡住）。
+/// 规范 §9：`<UUID>` 缺省为**当前节点** —— `[dir]` 指向某分支目录时即删除该分支本身
+/// （父级 `entries[]` 由全树扫描修复）；`[dir]` 为 bundle 根时目标为 ROOT，而 ROOT 不可删除，
+/// 故缺省调用会得到明确拒绝（而不是靠「参数缺失」这种不含原因的错误挡住）。
 pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let v = &scan.visits[idx];
     if v.depth == 0 {
         return Err(Error::BadArg(
-            "不能删除 ROOT（`<UUID>` 缺省即为 ROOT，请显式给出要删除的分支 id）".into(),
+            "不能删除 ROOT（`[dir]` 为 bundle 根时 `<UUID>` 缺省即 ROOT；\
+             要删除某个分支，把 `[dir]` 指向它或显式给出其 id）"
+                .into(),
         ));
     }
     if !force {
@@ -613,7 +673,7 @@ pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
 
 // ─────────────────────────── ref ───────────────────────────
 
-/// 新增跨枝关联线。（规范 §9：源分支 `<UUID>` 缺省为 ROOT；`--target` 仍必填。）
+/// 新增跨枝关联线。（规范 §9：源分支 `<UUID>` 缺省为当前节点；`--target` 仍必填。）
 pub fn ref_add(
     dir: &Path,
     uuid: Option<String>,
@@ -624,7 +684,7 @@ pub fn ref_add(
 ) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     if locate(&scan, target).is_none() {
         return Err(Error::BadArg(format!("找不到目标分支 id `{target}`")));
     }
@@ -645,7 +705,7 @@ pub fn ref_add(
     });
     meta.touch();
     save_meta(&bundle, &src_dir, &meta)?;
-    // 源分支可能是缺省来的 ROOT（其 `id` 与目录名无关），故打印解析后的真实 `id`
+    // 源分支可能是缺省来的 ROOT / 当前节点（其 `id` 与目录名无关），故打印解析后的真实 `id`
     let src_id = meta
         .id
         .clone()
@@ -750,7 +810,7 @@ pub fn meta_set(
     )?;
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let target_dir = scan.visits[idx].dir.clone();
     let rel = scan.visits[idx].rel.clone();
     let mut meta = read_target_meta(&bundle, &target_dir)?;
@@ -816,7 +876,7 @@ pub fn entry_set(dir: &Path, uuid: Option<String>, path: &str, patch: &EntryPatc
     )?;
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let target_dir = scan.visits[idx].dir.clone();
     let rel = scan.visits[idx].rel.clone();
     let mut meta = read_target_meta(&bundle, &target_dir)?;
@@ -878,7 +938,7 @@ pub fn author_add(
 
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let target_dir = scan.visits[idx].dir.clone();
     let rel = scan.visits[idx].rel.clone();
     let mut meta = read_target_meta(&bundle, &target_dir)?;
@@ -902,7 +962,7 @@ pub fn author_add(
 pub fn author_rm(dir: &Path, uuid: Option<String>, id: &str) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let target_dir = scan.visits[idx].dir.clone();
     let rel = scan.visits[idx].rel.clone();
     let mut meta = read_target_meta(&bundle, &target_dir)?;
@@ -1202,11 +1262,11 @@ pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
 /// 输出归一化 JSON。
 ///
 /// `--out -`（或缺省）写 stdout；给路径则写文件（规范 §9）。
-/// `<UUID>` 缺省为 ROOT。
+/// `<UUID>` 缺省为当前节点。
 pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let Some(meta) = scan.visits[idx].meta.as_ref() else {
         return Err(Error::BadArg("`._meta` 解析失败".into()));
     };
@@ -1215,11 +1275,11 @@ pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()>
     emit(&text, out.as_deref())
 }
 
-/// 生成供 AI 使用的上下文片段。（规范 §9：`<UUID>` 缺省为 ROOT。）
+/// 生成供 AI 使用的上下文片段。（规范 §9：`<UUID>` 缺省为当前节点。）
 pub fn context(dir: &Path, uuid: Option<String>, depth: usize, budget: usize) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = target_branch(&scan, uuid.as_deref())?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
     let mut out = String::new();
     out.push_str(&format!("# STR 上下文：{}\n\n", bundle.name()));
     render_context(&scan, idx, depth, &mut out, 0);

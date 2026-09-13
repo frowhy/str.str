@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.10.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.4.0`）。
+> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.11.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.5.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -125,7 +125,7 @@ demo.str  2 nodes / 1 branches / 5 entries  depth=2
 
 ### 3.5 `str show [--full] <DIR> [UUID]`
 
-打印该分支 `._meta` 的**归一化 JSON**（含 `ext: {}`、空表补 `[]`）。`[UUID]` 缺省为 ROOT。
+打印该分支 `._meta` 的**归一化 JSON**（含 `ext: {}`、空表补 `[]`）。`[UUID]` 缺省为**当前节点**（`[dir]` 为 bundle 根时即 ROOT，指向分支目录时即该分支，v1.11.0）。
 
 `--full` 会在 JSON 之后追加各 `payload` / `asset` 的正文，形如：
 
@@ -141,17 +141,17 @@ hello
 ### 3.7 `str branch add [--type T] [--title X] [--summary S] [--order N] <DIR> [ANCHOR]`
 
 在锚点分支下新增**关联分支**（`kind = "branch"`，深度 ≥ 2）。
-锚点必须是 `node`/`branch`（深度 ≥ 1）；**`[ANCHOR]` 缺省为 ROOT**，而 ROOT 不是合法锚点，故省略时（与显式传 ROOT 一样）报 `参数错误：ROOT 的直接子分支应使用 \`str node add\`（role = node）；\`branch add\` 的锚点须是深度 ≥ 1 的分支`（exit 2）。`--order` 缺省为同级最大 `order + 1`。
+锚点必须是 `node`/`branch`（深度 ≥ 1）；**`[ANCHOR]` 缺省为当前节点** —— `[dir]` 指向分支目录时即该分支（v1.11.0），`[dir]` 为 bundle 根时即 ROOT，而 ROOT 不是合法锚点，故此时省略（与显式传 ROOT 一样）报 `参数错误：ROOT 的直接子分支应使用 \`str node add\`（role = node）；\`branch add\` 的锚点须是深度 ≥ 1 的分支`（exit 2）。`--order` 缺省为同级最大 `order + 1`。
 
 ### 3.8 `str branch rm --force [--recursive] <DIR> [UUID]`
 
 - **删除总是递归**（`remove_dir_all`，含全部下级）；`--recursive` 为兼容规范 §9 的写法而接受，与缺省行为一致。
-- 不加 `--force` 会以 exit 2 拒绝（提示会移除全部下级）；**`[UUID]` 缺省为 ROOT，而 ROOT 不可删除** —— 省略时以 `参数错误：不能删除 ROOT（\`<UUID>\` 缺省即为 ROOT，请显式给出要删除的分支 id）` 拒绝。
+- 不加 `--force` 会以 exit 2 拒绝（提示会移除全部下级）；**`[UUID]` 缺省为当前节点** —— `[dir]` 指向某分支目录时省略即删除**该分支本身**（父级 `entries[]` 同步修复，v1.11.0）；`[dir]` 为 bundle 根时省略即 ROOT，而 ROOT 不可删除，报 `参数错误：不能删除 ROOT（\`[dir]\` 为 bundle 根时 \`<UUID>\` 缺省即 ROOT；要删除某个分支，把 \`[dir]\` 指向它或显式给出其 id）` 拒绝。
 - 删除后会自动从父级 `entries[]` 移除该条目，父级 `revision + 1`；同时重扫一遍以清理该分支在 `._cache/revisions.json` 中的基线条目。
 
 ### 3.9 `str ref add --target <TARGET> [--rel R] [--title X] [--note N] <DIR> [UUID]`
 
-在**源分支** `[UUID]`（缺省为 ROOT —— ROOT 持有 `refs[]` 是合法的）的 `._meta.refs[]` 追加一条关联线。`--rel` 缺省 `related`。
+在**源分支** `[UUID]`（缺省为当前节点 —— `[dir]` 为 bundle 根时即 ROOT，ROOT 持有 `refs[]` 是合法的）的 `._meta.refs[]` 追加一条关联线。`--rel` 缺省 `related`。
 `[UUID]` 与 `<TARGET>` 都必须能在本 bundle 内解析，否则 exit 2。新 `refs[].id` 为 UUIDv7。
 
 合法 `rel`（Schema 正则）：`related`、`depends_on`、`instance_of`、`derived_from`、`ref`、`x-<小写字母数字连字符>`。
@@ -174,7 +174,7 @@ hello
 
 ### 3.12 `str entry set --path <P> [--type T] [--title X] [--summary S] [--note N] [--order N] <DIR> [UUID]`
 
-写入**某分支** `entries[]` 中 `path == P` 那条目的字段；`[UUID]` 是**条目所在的分支**（缺省 ROOT）。空串表示移除该字段；找不到该 `path` 或一个字段都不给则 exit 2。
+写入**某分支** `entries[]` 中 `path == P` 那条目的字段；`[UUID]` 是**条目所在的分支**（缺省当前节点）。空串表示移除该字段；找不到该 `path` 或一个字段都不给则 exit 2。
 
 典型用途：补 `str sync` 补登行的 `type` / `title` / `summary`，或调整同层排序键 `--order`（改完落盘的条目顺序随之变化）。
 
@@ -233,7 +233,7 @@ $S spec set 9.9.9 demo.str                  # exit 2：major 必须是 1
 
 ### 3.17 `str norm [--out <PATH|->] <DIR> [UUID]`
 
-打印归一化 JSON（2 空格缩进，含 `ext: {}`、空表补 `[]`）。缺省为 ROOT。
+打印归一化 JSON（2 空格缩进，含 `ext: {}`、空表补 `[]`）。缺省为当前节点。
 `--out -`（或省略）写 stdout；给路径则写文件。
 
 ### 3.18 `str context <DIR> [UUID] [--depth N] [--budget C]`
@@ -252,7 +252,7 @@ $S spec set 9.9.9 demo.str                  # exit 2：major 必须是 1
     2026-09 跟进
 ```
 
-`--depth` 缺省 `2`，`--budget` 缺省 `8000`（字符）。`[UUID]` 缺省为 ROOT（即从 ROOT 起按深度展开整棵树）。超预算时截断并追加 `…（已按 --budget 截断）`。
+`--depth` 缺省 `2`，`--budget` 缺省 `8000`（字符）。`[UUID]` 缺省为当前节点（`[dir]` 为 bundle 根时即 ROOT，从 ROOT 起按深度展开整棵树）。超预算时截断并追加 `…（已按 --budget 截断）`。
 
 ### 3.19 `str export [--format json|toml] [--out <PATH|->] [--depth N] <DIR>`
 

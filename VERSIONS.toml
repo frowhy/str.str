@@ -28,7 +28,7 @@
 [release]
 # 发行 tag = "v" + cli.version（锚定规则，由门禁强制）。
 # status = "released" 表示该 tag 已推送；"unreleased" 表示工作区领先于已发布版本。
-tag = "v0.4.0"
+tag = "v0.5.0"
 status = "unreleased"
 # 最近一次真正发布出去的 tag，用于对照「工作区领先了哪些内容」。
 last_published = "v0.3.0"
@@ -38,7 +38,7 @@ last_published = "v0.3.0"
 #   STR-FORMAT-PROMPT.md 头部表、仓库根 ._meta 的 `spec`、str-cli/src/lib.rs 的
 #   SPEC_VERSION、README.md 的「规范版本」、._schema/*.json 的 description、
 #   scripts/build-example.sh 的生成模板、examples/客户运营.str 的 ._meta。
-version = "1.10.0"
+version = "1.11.0"
 # 格式主版本：写入每份 `._meta` 的 `str` 字段。工具只强校验这一个值（规范 §13 规则 1），
 # `spec` 仅供人类追溯。
 major = 1
@@ -47,7 +47,7 @@ major = 1
 # crate `str-format` 的版本。必须同时等于：
 #   str-cli/Cargo.toml、Cargo.lock、str-skill/scripts/ensure-str.sh 的 DEFAULT_VERSION，
 #   以及技能包文档中 `str --version` 的示例输出。
-version = "0.4.0"
+version = "0.5.0"
 min_rust = "1.88"
 # 本实现对应的规范主版本（= spec.major）
 implements_spec_major = 1
@@ -56,7 +56,7 @@ implements_spec_major = 1
 # 技能包自身的版本（str-skill/SKILL.md frontmatter 的 `version`）。
 # **与 release.tag / cli.version 无绑定关系**：技能包只在自己内容变化时升版，
 # 因此三者常常不相等 —— 这是设计，不是漂移。
-version = "0.3.1"
+version = "0.3.2"
 # 技能包能正常工作的最低 CLI 版本（SKILL.md 会用到的命令自该版本起可用）。
 requires_cli = ">=0.3.0"
 # SkillHub 发布身份，键名与 SKILL.md frontmatter 一致（平台只认这两个名字）。

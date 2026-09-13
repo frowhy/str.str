@@ -401,6 +401,42 @@ fn uuid_argument_defaults_to_root() {
     cmd::branch_rm(&root, Some(sub), true).unwrap();
 }
 
+/// 规范 §9（v1.11.0）：`[uuid]` 缺省目标 = **当前节点** —— `[dir]` 指向分支目录时，
+/// `branch add` / `branch rm` / `show` 等命令的缺省目标即该分支，而非整份 bundle 的 ROOT。
+#[test]
+fn uuid_argument_defaults_to_current_branch() {
+    let (root, aaa, _) = two_nodes("curbranch");
+    let node_dir = root.join(&aaa);
+
+    // `branch add`：`[dir]` 指向分支目录 + 省略锚点 → 新分支挂在该分支下
+    cmd::branch_add(&node_dir, None, Some("a.sub".into()), Some("SUB".into()), None, None).unwrap();
+    let sub = {
+        let bundle = Bundle::new(root.clone()).unwrap();
+        let scan = bundle.scan().unwrap();
+        let p = scan.resolve(&aaa).unwrap();
+        scan.visits
+            .iter()
+            .find(|v| v.parent == Some(p))
+            .map(|v| v.dir.file_name().unwrap().to_string_lossy().to_string())
+            .expect("子分支应登记在 AAA 下")
+    };
+    assert_eq!(report(&root).0, 0);
+
+    // `branch rm`：`[dir]` 指向子分支目录 + 省略 uuid → 删除**当前分支本身**（父级 entries 同步修复）
+    cmd::branch_rm(&node_dir.join(&sub), None, true).unwrap();
+    assert!(!node_dir.join(&sub).exists());
+    assert_eq!(report(&root).0, 0, "父级 entries 必须被同步修复");
+
+    // 读类命令：`[dir]` 指向分支目录 → 目标为该分支（而非 ROOT）
+    cmd::show(&node_dir, None, false).unwrap();
+    cmd::ls(&node_dir, None, false).unwrap();
+    cmd::context(&node_dir, None, 1, 8000).unwrap();
+
+    // `node add` 在分支目录下 → 带原因拒绝（独立节点只能挂 ROOT）
+    let err = cmd::node_add(&node_dir, None, None, None).unwrap_err().to_string();
+    assert!(err.contains("branch add"), "应指引到 `branch add`，实际：{err}");
+}
+
 /// 规范 §9：`str spec set` 覆盖整份 bundle 的 `spec`，**幂等**，且只接受 `1.<minor>.<patch>`。
 #[test]
 fn spec_set_rewrites_whole_bundle_and_is_idempotent() {
