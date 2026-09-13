@@ -7,11 +7,11 @@ kind = "root"
 id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
 name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
-summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle 与 Rust 参考实现；本仓库自身即一个 .str bundle（自举）。"
+summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 1
+revision = 2
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-14T01:26:52+08:00
+updated_at = 2026-09-14T02:12:32+08:00
 
 [policies]
 id_version = 7
@@ -47,5 +47,10 @@ title = "示例 bundle 目录"
 path = "scripts"
 role = "dir"
 title = "辅助脚本"
+
+[[entries]]
+path = "str-skill"
+role = "dir"
+title = "AI Agent 技能包（强制经 str CLI 操作 .str）"
 
 [ext]
