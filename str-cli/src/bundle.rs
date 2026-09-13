@@ -83,6 +83,9 @@ impl Bundle {
                 root.display()
             )));
         }
+        // 归一化为绝对路径：否则以 `.` / `..` 形式传入时取不到目录名，
+        // 会误报 `W_BUNDLE_SUFFIX`（`str validate .` 的实际场景）。
+        let root = std::fs::canonicalize(&root).map_err(|e| Error::io(&root, e))?;
         Ok(Self { root })
     }
 

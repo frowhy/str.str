@@ -571,6 +571,23 @@ fn w_bundle_suffix() {
 }
 
 #[test]
+fn dod_relative_path_keeps_bundle_name() {
+    // `str validate .` 的形式：路径以 `.` 结尾时也必须能取到目录名
+    let root = baseline("relpath");
+    let dotted = root.join(".");
+    let bundle = Bundle::new(dotted).unwrap();
+    let report = validate(&bundle).unwrap();
+    assert!(
+        !report
+            .issues
+            .iter()
+            .any(|i| i.code == "W_BUNDLE_SUFFIX"),
+        "以 `.` 结尾的相对路径不应误报 W_BUNDLE_SUFFIX：\n{}",
+        report.to_text()
+    );
+}
+
+#[test]
 fn w_dotfile_and_root_stray() {
     // 真正的“其它点文件” → W_DOTFILE
     let root = baseline("dotfile");
