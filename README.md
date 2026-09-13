@@ -185,7 +185,6 @@ str validate .
 - [ ] 规范评审 → `APPROVED` / `IMPLEMENTED`
 - [ ] 领域词汇表：`work.*` / `art.*` / `video.*` / `lit.*` / `code.*` 逐领域定稿
 - [ ] GUI 编辑器（思维导图视图，读 ROOT 一层即可渲染）
-- [ ] 多语言读写库（TypeScript / Python）
 - [ ] 公开生态：bundle 模板市场、跨 bundle 引用、发布与校验流水线
 
 ---
