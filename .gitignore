@@ -9,9 +9,9 @@ desktop.ini
 **/._cache/
 **/.lock
 
-# ── 实现产物（实现栈确定后按需精简）──────────────────────
+# ── 实现产物（str-cli/ 为 Rust 工程根）────────────────────
 # Rust
-/target/
+str-cli/target/
 # Node
 node_modules/
 dist/

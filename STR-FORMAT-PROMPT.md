@@ -79,14 +79,16 @@
 
 | 目录 / 文件 | 说明 |
 | --- | --- |
-| `src/{meta,meta_edit}.rs` | `._meta` 模型、提取、归一化、保注释写回、模板渲染 |
-| `src/bundle.rs` | 分支树遍历、`id` 索引、懒加载 |
-| `src/validate.rs` | 规范第 6 章全部错误码 |
-| `src/cmd.rs` / `src/main.rs` | CLI 子命令 / clap 定义与退出码 |
-| `schema/*.json` | 三份档位 JSON Schema（2020-12），`str init` 会复制进 `._schema/` |
-| `examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
-| `scripts/build-example.sh` | 幂等重建示例 bundle |
-| `tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
+| `STR-FORMAT-PROMPT.md` | **本规范（唯一真源）**，位于仓库根，与实现解耦 |
+| `str-cli/` | 参考实现（Rust 工程根，`cargo` 在此目录执行） |
+| `str-cli/src/{meta,meta_edit}.rs` | `._meta` 模型、提取、归一化、保注释写回、模板渲染 |
+| `str-cli/src/bundle.rs` | 分支树遍历、`id` 索引、懒加载 |
+| `str-cli/src/validate.rs` | 规范第 6 章全部错误码 |
+| `str-cli/src/cmd.rs` / `str-cli/src/main.rs` | CLI 子命令 / clap 定义与退出码 |
+| `str-cli/schema/*.json` | 三份档位 JSON Schema（2020-12），`str init` 会复制进 `._schema/` |
+| `str-cli/examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
+| `str-cli/scripts/build-example.sh` | 幂等重建示例 bundle |
+| `str-cli/tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
 
 ### 1.3 硬性约束（违反即失败）
 
@@ -637,8 +639,9 @@ A.str/
 
 > 注意：深度 2 的「跟进记录」与深度 3 的「2026-09 会议纪要」**都在承载真实数据**，这正是 v1.1.0 明确允许的形态。
 
-> **本节的 6 份 `._meta` 与 `examples/客户运营.str/` 逐字一致**（`size` / `sha256` 为真实计算值，
-> 非占位符），可用 `scripts/build-example.sh` 重新生成，并用 `str validate examples/客户运营.str --strict` 验证。
+> **本节的 6 份 `._meta` 与 `str-cli/examples/客户运营.str/` 逐字一致**（`size` / `sha256` 为真实计算值，
+> 非占位符），可用 `str-cli/scripts/build-example.sh` 重新生成，并用
+> `str validate str-cli/examples/客户运营.str --strict` 验证。
 
 
 ### 10.2 `客户运营.str/._meta`
@@ -883,7 +886,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 ### 10.8 导图渲染结果
 
-实际执行 `str tree examples/客户运营.str --show-refs` 的输出（`⇢` 即跨枝关联线）：
+实际执行 `str tree str-cli/examples/客户运营.str --show-refs` 的输出（`⇢` 即跨枝关联线）：
 
 ```
 客户运营.str
@@ -996,6 +999,8 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 15 | TOML 校验链 | `._meta` → 归一化 JSON → JSON Schema 校验全链路通过；归一化后的键序/表序与 4.9 完全一致；`refs` / `entries` 缺省时补 `[]` |
 | 16 | 注释保真 | 在 `._meta` 里加 `#` 注释 → 经 `str sync`/`str fmt` 写回后注释仍在；`str fmt --strip-comments` 时才可丢弃 |
 | 17 | 强制指纹 | 删除任 `payload`/`asset` 条目的 `sha256` 或 `size` → `E_MANIFEST_DIGEST_MISSING` |
+| 18 | 错误码覆盖率 | `str-cli/tests/validate_codes.rs` 中 6.1 的**全部 35 个错误码**各有 ≥1 个故意破坏用例，且断言精确到码 |
+| 19 | 幂等 | `str sync` 连续执行两次，第二次输出「已更新 0 份」且无文件差异；`str fmt --check` 返回 0 |
 
 ---
 
