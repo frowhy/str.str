@@ -1,0 +1,26 @@
+# ── 操作系统噪声 ─────────────────────────────────────────
+.DS_Store
+._*
+**/._*
+Thumbs.db
+desktop.ini
+
+# ── STR bundle 内部约定（规范 §7.4）──────────────────────
+**/._cache/
+**/.lock
+
+# ── 实现产物（实现栈确定后按需精简）──────────────────────
+# Rust
+/target/
+# Node
+node_modules/
+dist/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+# 编辑器
+.idea/
+.vscode/
+*.swp
