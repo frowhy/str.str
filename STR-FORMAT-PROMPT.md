@@ -192,7 +192,7 @@
 | 保留名 | 以 **`._`** 开头（`._meta` / `._schema` / `._cache` / 未来扩展）；业务条目**不得**以 `._` 开头 | `E_RESERVED_NAME` |
 | 锁文件 | `.lock`（可选，短生命周期，不得提交） | — |
 | 其它点文件 | 仅 `._meta` / `.lock` 合法，其余告警 | `W_DOTFILE` |
-| 操作系统 / 工具元数据 | `._*` 形式的**普通文件**（macOS AppleDouble 伴生文件）、`.DS_Store`、`Thumbs.db`、`desktop.ini`，以及**版本控制元数据**（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.hgignore`、`.svn/`）**一律忽略**：不视为保留名、不参与清单比对、不报任何错 | —（豁免） |
+| 操作系统 / 工具元数据 | `._*` 形式的**普通文件**（macOS AppleDouble 伴生文件）、`.DS_Store`、`Thumbs.db`、`desktop.ini`，以及**版本控制 / 托管平台元数据**（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.hgignore`、`.svn/`、`.github/`）**一律忽略**：不视为保留名、不参与清单比对、不报任何错 | —（豁免） |
 
 ### 3.5 `.str` 目录是 bundle 硬边界
 
@@ -482,7 +482,7 @@ A.str/
 | `E_REVISION_STALE` | error | `updated_at` 变化但 `revision` 未前进，或 `revision` 非递增整数 |
 | `E_SCHEMA_FAIL` | error | payload 不满足其声明的 JSON Schema |
 | `W_BUNDLE_SUFFIX` | warn | 根目录名未以 `.str` 结尾 |
-| `W_DOTFILE` | warn | 出现非 `._meta` / `.lock` 的点文件（`._*` **普通文件**、`.DS_Store` 与**版本控制元数据** `.git/` `.gitignore` 等属操作系统/工具元数据，必须豁免） |
+| `W_DOTFILE` | warn | 出现非 `._meta` / `.lock` 的点文件（`._*` **普通文件**、`.DS_Store` 与**版本控制 / 托管平台元数据** `.git/` `.gitignore` `.github/` 等属操作系统/工具元数据，必须豁免） |
 | `W_ROOT_STRAY` | warn | ROOT 下出现**既非 UUID 命名的分支目录、又未登记进 `entries`** 的散落条目（已登记的 ROOT 内容属合法，见 3.3） |
 | `W_NO_SUMMARY` | warn | `node`/`branch` 缺 `summary`（削弱 AI 检索能力） |
 | `W_NO_TYPE` | warn | `node`/`branch` 缺 `type` |

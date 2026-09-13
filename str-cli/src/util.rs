@@ -98,10 +98,12 @@ pub fn is_lock_file(name: &str) -> bool {
     name == LOCK_FILE
 }
 
-/// 是否为操作系统 / 工具（VCS）元数据：一律豁免，不参与校验（规范 3.4）。
+/// 是否为操作系统 / 工具元数据：一律豁免，不参与校验（规范 3.4）。
 ///
 /// - `._*` 形式的**普通文件**是 macOS AppleDouble 伴生文件（`._meta` 本身不是噪声）；
-/// - `.git` / `.gitignore` / `.hg` / `.svn` 等是版本控制元数据 —— 真实项目必然存在。
+/// - `.git` / `.gitignore` / `.hg` / `.svn` 等是版本控制元数据 —— 真实项目必然存在；
+/// - `.github/` 是代码托管平台的元数据：GitHub Actions 的工作流**必须**位于
+///   `.github/workflows/`（路径不可改名），同属「工具元数据」，故一并豁免。
 pub fn is_os_noise(name: &str) -> bool {
     matches!(
         name,
@@ -113,6 +115,7 @@ pub fn is_os_noise(name: &str) -> bool {
             | ".gitattributes"
             | ".gitmodules"
             | ".gitkeep"
+            | ".github"
             | ".hg"
             | ".hgignore"
             | ".svn"

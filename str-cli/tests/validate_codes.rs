@@ -602,6 +602,13 @@ fn w_dotfile_and_root_stray() {
     assert!(!set.contains("W_DOTFILE"), "VCS 元数据应豁免：\n{report}");
     assert!(!set.contains("E_MANIFEST_MISSING"), "VCS 元数据应豁免：\n{report}");
 
+    // 托管平台元数据豁免：`.github/`（Actions 工作流的强制位置）同样不报任何码
+    let root = baseline("github");
+    w(&root, ".github/workflows/release.yml", "name: release\n");
+    let (set, report) = codes(&root);
+    assert!(!set.contains("W_DOTFILE"), "`.github/` 应豁免：\n{report}");
+    assert!(!set.contains("E_MANIFEST_MISSING"), "`.github/` 应豁免：\n{report}");
+
     // ROOT 未登记的散落内容 → W_ROOT_STRAY
     let root = baseline("rootstray");
     w(&root, "notes.md", "x");
