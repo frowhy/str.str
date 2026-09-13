@@ -79,7 +79,7 @@ cat > "$OUT/._meta" <<EOF
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "root"
 id = "$ROOT_ID"
 name = "客户运营"
@@ -155,7 +155,7 @@ TAGS_SIZE=$(size_of "$OUT/$N3/tags.json");         TAGS_HASH=$(hash_of "$OUT/$N3
 
 cat > "$OUT/$N1/._meta" <<EOF
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "node"
 id = "$N1"
 type = "crm.customer"
@@ -211,7 +211,7 @@ EOF
 cat > "$OUT/$N1/$L1/._meta" <<EOF
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "branch"
 id = "$L1"
 type = "crm.followup_log"
@@ -243,7 +243,7 @@ EOF
 
 cat > "$OUT/$N1/$L1/$L2/._meta" <<EOF
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "branch"
 id = "$L2"
 type = "doc.meeting_note"
@@ -266,7 +266,7 @@ EOF
 
 cat > "$OUT/$N2/._meta" <<EOF
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "node"
 id = "$N2"
 type = "crm.order_dataset"
@@ -289,7 +289,7 @@ EOF
 
 cat > "$OUT/$N3/._meta" <<EOF
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "node"
 id = "$N3"
 type = "crm.tag_system"
@@ -310,5 +310,15 @@ sha256 = "$TAGS_HASH"
 [ext]
 EOF
 
+# ── 规范化与自检 ────────────────────────────────────────────────
+# 上面的模板按「人读顺序」手写；规范 §4.9 的键序 / 表序 / `entries` 排序一律由 CLI 收口，
+# 免得示例 bundle 自身就不规范。
+STR="$ROOT/str-cli/target/debug/str"
+if [ ! -x "$STR" ]; then
+  (cd "$ROOT/str-cli" && cargo build) >/dev/null
+fi
+"$STR" fmt "$OUT" >/dev/null
 echo "已生成：$OUT"
-"$ROOT/str-cli/target/debug/str" tree "$OUT" --show-refs || true
+"$STR" tree "$OUT" --show-refs
+"$STR" validate "$OUT" --strict
+"$STR" fmt "$OUT" --check

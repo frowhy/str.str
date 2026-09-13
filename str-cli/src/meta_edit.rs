@@ -8,7 +8,7 @@ use std::path::Path;
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::error::{Error, Result};
-use crate::meta::{Entry, Kind, Meta, RefItem, extract};
+use crate::meta::{Author, Entry, Kind, Meta, RefItem, extract};
 use crate::util;
 
 /// TOML 基本字符串转义。
@@ -47,6 +47,7 @@ pub fn render_root_meta(
     root_id: &str,
     created: &str,
     schema_count: usize,
+    id_version: usize,
 ) -> String {
     let mut s = String::new();
     s.push_str("# ── STR bundle 根元数据 ──────────────────────────────────────────\n");
@@ -68,7 +69,7 @@ pub fn render_root_meta(
     s.push_str(&format!("updated_at = {created}\n"));
     s.push('\n');
     s.push_str("[policies]\n");
-    s.push_str("id_version = 7\n");
+    s.push_str(&format!("id_version = {id_version}\n"));
     s.push_str("max_depth = 32\n");
     s.push_str("manifest = \"strict\"\n");
     s.push_str("sha256 = \"required\"\n");
@@ -181,6 +182,35 @@ pub fn ref_to_table(r: &RefItem) -> Table {
     t
 }
 
+/// `[[authors]]` 元素 → TOML 表（按规范键序）。
+pub fn author_to_table(a: &Author) -> Table {
+    let mut t = Table::new();
+    t.insert("id", value(a.id.clone()));
+    if let Some(v) = &a.name {
+        t.insert("name", value(v.clone()));
+    }
+    t.insert("role", value(a.role.clone()));
+    if let Some(at) = &a.at
+        && let Ok(dt) = at.parse::<toml_edit::Datetime>()
+    {
+        t.insert("at", value(dt));
+    }
+    t
+}
+
+/// 去掉整行 `#` 注释（不处理字符串内的 `#`）；`str fmt --strip-comments` 的唯一入口。
+pub fn strip_line_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 impl Meta {
     /// 写操作后重新同步类型化视图（`doc` 为准）。
     pub fn resync(&mut self) {
@@ -224,6 +254,121 @@ impl Meta {
     pub fn set_str(&mut self, key: &str, v: &str) {
         self.doc.as_table_mut().insert(key, value(v.to_string()));
         self.resync();
+    }
+
+    /// 设置顶层字符串字段；`v` 为空串则**移除**该字段。
+    pub fn set_str_or_remove(&mut self, key: &str, v: &str) {
+        if v.is_empty() {
+            self.doc.as_table_mut().remove(key);
+        } else {
+            self.doc.as_table_mut().insert(key, value(v.to_string()));
+        }
+        self.resync();
+    }
+
+    /// 设置顶层字符串数组字段（如 `tags`）。
+    pub fn set_str_array(&mut self, key: &str, values: &[String]) {
+        let arr: toml_edit::Array = values
+            .iter()
+            .map(|s| toml_edit::Value::from(s.clone()))
+            .collect();
+        self.doc.as_table_mut().insert(key, value(arr));
+        self.resync();
+    }
+
+    /// 按 `id` 插入或替换一条 `[[authors]]`，返回 `true` 表示新增。
+    pub fn upsert_author(&mut self, a: &Author) -> bool {
+        let new_table = author_to_table(a);
+        let mut aot = self
+            .doc
+            .as_table()
+            .get("authors")
+            .and_then(|i| i.as_array_of_tables())
+            .cloned()
+            .unwrap_or_default();
+        let mut replaced = false;
+        for t in aot.iter_mut() {
+            if t.get("id").and_then(|v| v.as_str()) == Some(a.id.as_str()) {
+                *t = new_table.clone();
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            aot.push(new_table);
+        }
+        self.place_table("authors", Item::ArrayOfTables(aot));
+        self.resync();
+        !replaced
+    }
+
+    /// 按 `id` 删除 `[[authors]]`。
+    pub fn remove_author(&mut self, id: &str) -> bool {
+        let Some(aot) = self
+            .doc
+            .as_table_mut()
+            .get_mut("authors")
+            .and_then(|i| i.as_array_of_tables_mut())
+        else {
+            return false;
+        };
+        let before = aot.len();
+        aot.retain(|t| t.get("id").and_then(|v| v.as_str()) != Some(id));
+        let changed = aot.len() != before;
+        if changed {
+            self.resync();
+        }
+        changed
+    }
+
+    /// 在**指定分支**的 `entries[path]` 上设置字符串字段（保注释，键序由规范化收口）。
+    ///
+    /// `key` 限 `ENTRY_KEYS` 中的字符串字段；`v` 为空串则移除该键。
+    /// 返回 `false` 表示该分支没有 `path` 对应的条目。
+    pub fn set_entry_str(&mut self, path: &str, key: &str, v: &str) -> bool {
+        self.with_entry(path, |t| {
+            if v.is_empty() {
+                t.remove(key);
+            } else {
+                t.insert(key, value(v.to_string()));
+            }
+        })
+    }
+
+    /// 在 `entries[path]` 上设置整数字段（如 `order`）。`None` 表示移除。
+    pub fn set_entry_int(&mut self, path: &str, key: &str, v: Option<i64>) -> bool {
+        self.with_entry(path, |t| match v {
+            Some(n) => {
+                t.insert(key, value(n));
+            }
+            None => {
+                t.remove(key);
+            }
+        })
+    }
+
+    /// 对 `entries[path]` 施加一次就地编辑。
+    fn with_entry(&mut self, path: &str, edit: impl FnOnce(&mut Table)) -> bool {
+        let Some(aot) = self
+            .doc
+            .as_table_mut()
+            .get_mut("entries")
+            .and_then(|i| i.as_array_of_tables_mut())
+        else {
+            return false;
+        };
+        let mut hit = false;
+        for t in aot.iter_mut() {
+            if t.get("path").and_then(|v| v.as_str()) == Some(path) {
+                edit(t);
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            self.resync();
+        }
+        hit
     }
 
     /// 插入或替换一条 `[[entries]]`，返回 `true` 表示新增。
@@ -305,12 +450,25 @@ impl Meta {
         changed
     }
 
-    /// 保注释写回磁盘。
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let mut text = self.doc.to_string();
+    /// 规范 §4.9 归一化后的 TOML 文本（键序 / 表序固定，注释保留）。
+    ///
+    /// 属性是只读的派生视图：这里在**副本**上做规范化，不改动 `self.doc`。
+    pub fn canonical_text(&self, strip_comments: bool) -> String {
+        let mut doc = self.doc.clone();
+        crate::meta::canonicalize_doc(&mut doc);
+        let mut text = doc.to_string();
         if !text.ends_with('\n') {
             text.push('\n');
         }
+        if strip_comments {
+            text = strip_line_comments(&text);
+        }
+        text
+    }
+
+    /// 保注释写回磁盘（写出的字节一律是 §4.9 规范形式）。
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = self.canonical_text(false);
         std::fs::write(path, text).map_err(|e| Error::io(path, e))
     }
 }

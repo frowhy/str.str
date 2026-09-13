@@ -1,5 +1,5 @@
 str = 1
-spec = "1.7.0"
+spec = "1.8.0"
 kind = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
 type = "crm.customer"
@@ -20,12 +20,19 @@ order = 1
 note = "跨枝关联：客户档案 ⇢ 订单数据集"
 
 [[entries]]
-path = "profile.json"
-role = "payload"
-media_type = "application/json"
-size = 87
-sha256 = "852fa7846c3b3a70e053cf1b00ad8503a5f04b804cc4d1259404585260b8037f"
-schema = "._schema/customer.schema.json"
+path = "01928f3a-7c4b-7101-8b01-000000000101"
+role = "branch"
+id = "01928f3a-7c4b-7101-8b01-000000000101"
+type = "crm.followup_log"
+title = "跟进记录"
+summary = "按时间的客户跟进日志，含下级会议纪要分支。"
+order = 1
+
+[[entries]]
+path = "attachments"
+role = "dir"
+count = 1
+note = "合同扫描件；普通子目录，纯内容容器"
 
 [[entries]]
 path = "avatar.png"
@@ -35,18 +42,11 @@ size = 70
 sha256 = "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
 
 [[entries]]
-path = "attachments"
-role = "dir"
-count = 1
-note = "合同扫描件；普通子目录，纯内容容器"
-
-[[entries]]
-path = "01928f3a-7c4b-7101-8b01-000000000101"
-role = "branch"
-id = "01928f3a-7c4b-7101-8b01-000000000101"
-type = "crm.followup_log"
-title = "跟进记录"
-summary = "按时间的客户跟进日志，含下级会议纪要分支。"
-order = 1
+path = "profile.json"
+role = "payload"
+media_type = "application/json"
+size = 87
+sha256 = "852fa7846c3b3a70e053cf1b00ad8503a5f04b804cc4d1259404585260b8037f"
+schema = "._schema/customer.schema.json"
 
 [ext]

@@ -17,6 +17,7 @@ pub fn validate(bundle: &Bundle) -> Result<Report> {
     let scan = bundle.scan()?;
     let mut checker = Checker::new(bundle, &scan);
     checker.run();
+    checker.check_revision_history();
     Ok(checker.report)
 }
 
@@ -607,6 +608,55 @@ impl<'a> Checker<'a> {
                 format!(
                     "文件 {real_size} 字节，超过 `large_asset_bytes` = {}",
                     self.policies.large_asset_bytes
+                ),
+            );
+        }
+    }
+
+    /// `E_REVISION_STALE` 的**历史**判定：`updated_at` 变了但 `revision` 没有前进（规范 §6.1）。
+    ///
+    /// 依据 `._cache/revisions.json`（由写入端登记，见 [`crate::baseline`]）。无基线时跳过 ——
+    /// 单份 `._meta` 不含历史，无从判定；`str sync` 会把基线刷到当前状态。
+    fn check_revision_history(&mut self) {
+        let baseline = crate::baseline::load(self.bundle);
+        if baseline.branches.is_empty() {
+            return;
+        }
+        let mut found: Vec<(String, String, i64, i64, String)> = Vec::new();
+        for v in &self.scan.visits {
+            let Some(meta) = v.meta.as_ref() else {
+                continue;
+            };
+            let Some(snap) = baseline.branches.get(&v.rel) else {
+                continue;
+            };
+            let (Some(rev), Some(updated)) = (meta.revision, meta.updated_at.as_deref()) else {
+                continue;
+            };
+            let changed = match (
+                util::parse_rfc3339(&snap.updated_at),
+                util::parse_rfc3339(updated),
+            ) {
+                (Some(a), Some(b)) => a != b,
+                _ => snap.updated_at != updated,
+            };
+            if changed && rev <= snap.revision {
+                found.push((
+                    v.rel.clone(),
+                    snap.updated_at.clone(),
+                    snap.revision,
+                    rev,
+                    updated.to_string(),
+                ));
+            }
+        }
+        for (rel, was, old_rev, new_rev, now) in found {
+            self.err(
+                code::REVISION_STALE,
+                rel,
+                format!(
+                    "`updated_at` 已由 {was} 变为 {now}，但 `revision` 未前进（{old_rev} → {new_rev}）；\
+                     规范 §7.2 要求每次写入同时 +1 并刷新时间"
                 ),
             );
         }

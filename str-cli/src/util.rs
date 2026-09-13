@@ -17,6 +17,16 @@ pub fn new_uuid_v7() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// 按 `policies.id_version` 生成新 id：`4` → UUIDv4，其余（含 `7`）→ UUIDv7。
+///
+/// 目录名必须满足 `E_ID_VERSION`，因此生成端必须服从同一条策略。
+pub fn new_uuid(version: usize) -> String {
+    match version {
+        4 => uuid::Uuid::new_v4().to_string(),
+        _ => new_uuid_v7(),
+    }
+}
+
 /// 解析 UUID，返回版本号。
 pub fn uuid_version(s: &str) -> Option<usize> {
     uuid::Uuid::parse_str(s).ok().map(|u| u.get_version_num())

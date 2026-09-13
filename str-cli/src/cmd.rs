@@ -6,7 +6,7 @@ use serde_json::Value as JValue;
 
 use crate::bundle::{Bundle, Scan};
 use crate::error::{Error, Result, code};
-use crate::meta::{Entry, Kind, MetaLoad, RefItem};
+use crate::meta::{Author, Entry, Kind, Meta, MetaLoad, RefItem};
 use crate::meta_edit::{meta_from_text, render_branch_meta, render_root_meta, toml_str};
 use crate::util::{self, SCHEMA_DIR};
 use crate::{SPEC_VERSION, STR_MAJOR};
@@ -61,7 +61,13 @@ pub fn init(
     name: Option<String>,
     title: Option<String>,
     summary: Option<String>,
+    id_version: usize,
 ) -> Result<()> {
+    if !matches!(id_version, 4 | 7) {
+        return Err(Error::BadArg(format!(
+            "`--id-version` = {id_version} 不受支持（`policies.id_version` 只允许 4 或 7）"
+        )));
+    }
     let target = if dir.extension().map(|e| e == "str").unwrap_or(false) {
         dir.to_path_buf()
     } else {
@@ -84,7 +90,7 @@ pub fn init(
     }
 
     let created = util::now_rfc3339();
-    let root_id = util::new_uuid_v7();
+    let root_id = util::new_uuid(id_version);
     let text = render_root_meta(
         &bundle_name,
         title.as_deref(),
@@ -92,12 +98,15 @@ pub fn init(
         &root_id,
         &created,
         crate::EMBEDDED_SCHEMAS.len(),
+        id_version,
     );
     let meta = meta_from_text(&text)?;
-    meta.save(&target.join(util::META_FILE))?;
+    let meta_path = target.join(util::META_FILE);
+    meta.save(&meta_path)?;
 
     println!("已创建 bundle：{}", target.display());
     println!("  spec = {SPEC_VERSION}  str = {STR_MAJOR}");
+    println!("  policies.id_version = {id_version}");
     println!(
         "  {} 内已写入 {} 份校验 Schema",
         SCHEMA_DIR,
@@ -106,13 +115,87 @@ pub fn init(
     Ok(())
 }
 
+/// ROOT `policies.id_version`（缺省 7）—— 生成端必须产出同版本的 UUID，否则 `E_ID_VERSION`。
+fn root_id_version(bundle: &Bundle) -> usize {
+    match bundle.read_meta(&bundle.root) {
+        Ok(MetaLoad::Ok(m, _)) => m.policies.id_version,
+        _ => 7,
+    }
+}
+
+/// 写回一份 `._meta` 并登记 `E_REVISION_STALE` 的历史基线（见 [`crate::baseline`]）。
+fn save_meta(bundle: &Bundle, dir: &Path, meta: &Meta) -> Result<()> {
+    meta.save(&bundle.meta_path(dir))?;
+    crate::baseline::record(bundle, dir, meta);
+    Ok(())
+}
+
+/// 取目标分支下标：给了 `uuid` 就解析，缺省为 ROOT。
+fn target_branch(scan: &Scan, uuid: Option<&str>) -> Result<usize> {
+    match uuid {
+        Some(u) => {
+            locate(scan, u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))
+        }
+        None => scan
+            .root_index
+            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into())),
+    }
+}
+
+/// `--out` 的统一出口：缺省或 `-` 走 stdout，其余路径写文件。
+fn emit(text: &str, out: Option<&str>) -> Result<()> {
+    match out {
+        None | Some("-") => {
+            print!("{text}");
+            Ok(())
+        }
+        Some(p) => std::fs::write(p, text).map_err(|e| Error::io(p, e)),
+    }
+}
+
+/// `str export` 的产物是派生数据，**不得**写回 bundle 内部（规范 §9）。
+///
+/// 比较前把目标路径的**最深已存在祖先**也 canonicalize：否则 `Bundle::new` 归一化过的
+/// 根路径与未归一化的 `--out`（macOS `/var` → `/private/var` 这类符号链接）会对不上，
+/// 判定形同虚设。
+fn resolve_out_path(bundle: &Bundle, out: &str) -> Result<PathBuf> {
+    let p = abs(out);
+    let probe = match p.parent() {
+        Some(dir) => canonical_ancestor(dir),
+        None => p.clone(),
+    };
+    if probe.starts_with(&bundle.root) {
+        return Err(Error::BadArg(format!(
+            "`--out` 不得指向 bundle 内部（{} 在 {} 内）：export 的产物是派生数据",
+            p.display(),
+            bundle.root.display()
+        )));
+    }
+    Ok(p)
+}
+
+/// `dir` 的最深已存在祖先（canonicalize 后）；一层都不存在时原样返回。
+fn canonical_ancestor(dir: &Path) -> PathBuf {
+    let mut cur = dir.to_path_buf();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&cur) {
+            return resolved;
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent.to_path_buf(),
+            _ => return dir.to_path_buf(),
+        }
+    }
+}
+
 // ─────────────────────────── validate ───────────────────────────
 
 /// 校验整个 bundle。
 pub fn validate(dir: &Path, strict: bool, json: bool, fix_manifest: bool) -> Result<i32> {
     let bundle = open(dir)?;
     if fix_manifest {
-        sync(dir, true)?;
+        // 规范 §9：`--fix-manifest` 是「校验前先修正清单」——必须**真正写盘**。
+        sync(dir, false)?;
     }
     let mut report = crate::validate::validate(&bundle)?;
     if strict {
@@ -137,7 +220,7 @@ pub fn validate(dir: &Path, strict: bool, json: bool, fix_manifest: bool) -> Res
 // ─────────────────────────── tree ───────────────────────────
 
 /// 渲染分支树（含 `refs` 关联线）。
-pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool) -> Result<()> {
+pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool, ascii: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
     println!("{}", bundle.name());
@@ -145,8 +228,42 @@ pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool) -> Result<()>
         println!("  （缺少 `._meta`，无法渲染）");
         return Ok(());
     }
-    render_children(&scan, 0, "", max_depth, show_refs);
+    render_children(&scan, 0, "", max_depth, show_refs, ascii);
     Ok(())
+}
+
+/// 树形符号：`(false)` 为 Unicode 制表符，`(true)` 为纯 ASCII（`--ascii`）。
+fn marks(ascii: bool) -> (&'static str, &'static str, &'static str, &'static str) {
+    if ascii {
+        ("|-- ", "`-- ", "|   ", "    ")
+    } else {
+        ("├─ ", "└─ ", "│  ", "   ")
+    }
+}
+
+/// 子分支下标，顺序取父级 `entries[]` 的 `(order, path)`（规范 §4.6：`order` 为同层排序键）。
+///
+/// 与 §4.9 的落盘顺序同源，因此 `str tree` 的次序与 `._meta` 中的条目次序一致。
+fn ordered_children(scan: &Scan, idx: usize) -> Vec<usize> {
+    let parent = scan.visits[idx].meta.as_ref();
+    let mut children: Vec<(i64, String, usize)> = Vec::new();
+    for (i, v) in scan.visits.iter().enumerate() {
+        if v.parent != Some(idx) {
+            continue;
+        }
+        let name = v
+            .dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let order = parent
+            .and_then(|m| m.entries.iter().find(|e| e.path == name))
+            .and_then(|e| e.order)
+            .unwrap_or(i64::MAX);
+        children.push((order, name, i));
+    }
+    children.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    children.into_iter().map(|(_, _, i)| i).collect()
 }
 
 fn render_children(
@@ -155,24 +272,21 @@ fn render_children(
     prefix: &str,
     max_depth: Option<usize>,
     show_refs: bool,
+    ascii: bool,
 ) {
     let Some(meta) = scan.visits[idx].meta.as_ref() else {
         return;
     };
-    let children: Vec<usize> = scan
-        .visits
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.parent == Some(idx))
-        .map(|(i, _)| i)
-        .collect();
+    let children = ordered_children(scan, idx);
+    let (mid, last_mark, pipe, blank) = marks(ascii);
     if show_refs {
+        let arrow = if ascii { "->" } else { "⇢" };
         for r in &meta.refs {
             let target = scan
                 .resolve(&r.target)
                 .map(|i| scan.visits[i].rel.clone())
                 .unwrap_or_else(|| format!("{}（未解析）", r.target));
-            println!("{prefix}⇢ 关联: {target}  --{}--", r.rel);
+            println!("{prefix}{arrow} 关联: {target}  --{}--", r.rel);
         }
     }
     for (n, ci) in children.iter().enumerate() {
@@ -185,18 +299,18 @@ fn render_children(
             ),
             None => (String::new(), String::new()),
         };
-        let mark = if last { "└─ " } else { "├─ " };
+        let mark = if last { last_mark } else { mid };
         let mut line = format!("{prefix}{mark}[{}] {}", n + 1, title);
         if !type_.is_empty() {
             line.push_str(&format!("  ({type_})"));
         }
         if v.meta.is_none() {
-            line.push_str("  ⚠ 解析失败");
+            line.push_str("  ! 解析失败");
         }
         println!("{line}");
         if max_depth.map(|d| v.depth < d).unwrap_or(true) {
-            let next_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
-            render_children(scan, *ci, &next_prefix, max_depth, show_refs);
+            let next_prefix = format!("{prefix}{}", if last { blank } else { pipe });
+            render_children(scan, *ci, &next_prefix, max_depth, show_refs, ascii);
         }
     }
 }
@@ -281,7 +395,6 @@ pub fn node_add(
     summary: Option<String>,
 ) -> Result<()> {
     let bundle = open(dir)?;
-    let root_meta_path = bundle.meta_path(&bundle.root);
     let root = match bundle.read_meta(&bundle.root)? {
         MetaLoad::Ok(m, _) => m,
         MetaLoad::Failed(_) => {
@@ -291,7 +404,7 @@ pub fn node_add(
     if root.kind != Some(Kind::Root) {
         return Err(Error::BadArg("root `._meta` 的 kind 不是 root".into()));
     }
-    let id = util::new_uuid_v7();
+    let id = util::new_uuid(root.policies.id_version);
     let created = util::now_rfc3339();
     let child_dir = bundle.root.join(&id);
     std::fs::create_dir_all(&child_dir).map_err(|e| Error::io(&child_dir, e))?;
@@ -304,7 +417,7 @@ pub fn node_add(
         &created,
     );
     let child = meta_from_text(&text)?;
-    child.save(&bundle.meta_path(&child_dir))?;
+    save_meta(&bundle, &child_dir, &child)?;
 
     let mut root = root;
     let order = root
@@ -328,7 +441,7 @@ pub fn node_add(
     root.upsert_entry(&entry);
     root.sort_collections();
     root.touch();
-    root.save(&root_meta_path)?;
+    save_meta(&bundle, &bundle.root, &root)?;
     println!("已新增独立节点 {id}（深度 1）");
     Ok(())
 }
@@ -352,13 +465,12 @@ pub fn branch_add(
         ));
     }
     let anchor_dir = scan.visits[idx].dir.clone();
-    let anchor_meta_path = bundle.meta_path(&anchor_dir);
     let mut parent = match bundle.read_meta(&anchor_dir)? {
         MetaLoad::Ok(m, _) => m,
         MetaLoad::Failed(_) => return Err(Error::BadArg("锚点 `._meta` 解析失败".into())),
     };
 
-    let id = util::new_uuid_v7();
+    let id = util::new_uuid(root_id_version(&bundle));
     let created = util::now_rfc3339();
     let child_dir = anchor_dir.join(&id);
     std::fs::create_dir_all(&child_dir).map_err(|e| Error::io(&child_dir, e))?;
@@ -370,7 +482,8 @@ pub fn branch_add(
         summary.as_deref(),
         &created,
     );
-    meta_from_text(&text)?.save(&bundle.meta_path(&child_dir))?;
+    let child = meta_from_text(&text)?;
+    save_meta(&bundle, &child_dir, &child)?;
 
     let order = order.unwrap_or_else(|| {
         parent
@@ -395,7 +508,7 @@ pub fn branch_add(
     parent.upsert_entry(&entry);
     parent.sort_collections();
     parent.touch();
-    parent.save(&anchor_meta_path)?;
+    save_meta(&bundle, &anchor_dir, &parent)?;
     println!("已在 {} 下新增关联分支 {id}（深度 {}）", scan.visits[idx].rel, scan.visits[idx].depth + 1);
     Ok(())
 }
@@ -432,7 +545,11 @@ pub fn branch_rm(dir: &Path, uuid: &str, force: bool) -> Result<()> {
         };
         parent.remove_entry_path(&name);
         parent.touch();
-        parent.save(&bundle.meta_path(&parent_dir))?;
+        save_meta(&bundle, &parent_dir, &parent)?;
+    }
+    // 重扫一遍以丢弃被删分支的基线条目（否则 `E_REVISION_STALE` 基线会残留）
+    if let Ok(after) = bundle.scan() {
+        crate::baseline::record_scan(&bundle, &after);
     }
     println!("已删除 {rel}");
     Ok(())
@@ -471,16 +588,50 @@ pub fn ref_add(
         note,
     });
     meta.touch();
-    meta.save(&bundle.meta_path(&src_dir))?;
+    save_meta(&bundle, &src_dir, &meta)?;
     println!("已新增关联线 {ref_id}：{uuid} → {target}");
     Ok(())
 }
 
 /// 删除关联线。
-pub fn ref_rm(dir: &Path, uuid: &str, ref_id: &str) -> Result<()> {
+///
+/// 规范 §9 的形式是 `str ref rm <dir> <ref-uuid>`：只给关联线 id，由 CLI 在全 bundle 内定位
+/// 它所属的源分支。`--uuid <源分支>` 可把搜索范围钉死在一个分支上（旧版 `--ref` 形式等价）。
+pub fn ref_rm(dir: &Path, uuid: Option<String>, ref_id: &str) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, uuid).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{uuid}`")))?;
+    let has_ref = |i: usize| -> bool {
+        scan.visits[i]
+            .meta
+            .as_ref()
+            .map(|m| m.refs.iter().any(|r| r.id == ref_id))
+            .unwrap_or(false)
+    };
+    let idx = match uuid {
+        Some(u) => {
+            let i = locate(&scan, &u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))?;
+            if !has_ref(i) {
+                return Err(Error::BadArg(format!("分支 `{u}` 内找不到关联线 `{ref_id}`")));
+            }
+            i
+        }
+        None => {
+            let hits: Vec<usize> = (0..scan.visits.len()).filter(|i| has_ref(*i)).collect();
+            match hits.as_slice() {
+                [only] => *only,
+                [] => return Err(Error::BadArg(format!("找不到关联线 `{ref_id}`"))),
+                _ => {
+                    let rels: Vec<String> =
+                        hits.iter().map(|i| scan.visits[*i].rel.clone()).collect();
+                    return Err(Error::BadArg(format!(
+                        "关联线 `{ref_id}` 在多个分支中出现（{}），请用 `--uuid` 指定源分支",
+                        rels.join("、")
+                    )));
+                }
+            }
+        }
+    };
+    let rel = scan.visits[idx].rel.clone();
     let src_dir = scan.visits[idx].dir.clone();
     let mut meta = match bundle.read_meta(&src_dir)? {
         MetaLoad::Ok(m, _) => m,
@@ -490,8 +641,216 @@ pub fn ref_rm(dir: &Path, uuid: &str, ref_id: &str) -> Result<()> {
         return Err(Error::BadArg(format!("找不到关联线 `{ref_id}`")));
     }
     meta.touch();
-    meta.save(&bundle.meta_path(&src_dir))?;
-    println!("已删除关联线 {ref_id}");
+    save_meta(&bundle, &src_dir, &meta)?;
+    println!("已删除关联线 {ref_id}（源分支 {rel}）");
+    Ok(())
+}
+
+// ─────────────────── meta / entry / author（写入既有字段）───────────────────
+
+/// 允许的 `authors[].role`（规范 §4.4 与 `._schema` 枚举一致）。
+const AUTHOR_ROLES: &[&str] = &["owner", "editor", "viewer", "agent"];
+
+/// 读取目标分支的 `._meta`（供字段写入类命令复用）。
+fn read_target_meta(bundle: &Bundle, dir: &Path) -> Result<Meta> {
+    match bundle.read_meta(dir)? {
+        MetaLoad::Ok(m, _) => Ok(*m),
+        MetaLoad::Failed(_) => Err(Error::BadArg(format!(
+            "{} 的 `._meta` 解析失败",
+            bundle.rel(dir)
+        ))),
+    }
+}
+
+/// 至少给出一个字段，否则拒绝执行（避免「无参数空写」把 `revision` 白白推进）。
+fn need_one(given: bool, hint: &str) -> Result<()> {
+    if given {
+        Ok(())
+    } else {
+        Err(Error::BadArg(format!("至少需要指定一个字段（{hint}）")))
+    }
+}
+
+/// `str meta set`：设置分支自身（`._meta` 顶层）的元信息字段。
+///
+/// 空串表示**移除**该字段。字段语义见规范 §4.3。
+pub fn meta_set(
+    dir: &Path,
+    uuid: Option<String>,
+    type_: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    name: Option<String>,
+    tags: Option<Vec<String>>,
+) -> Result<()> {
+    need_one(
+        type_.is_some() || title.is_some() || summary.is_some() || name.is_some() || tags.is_some(),
+        "--type / --title / --summary / --name / --tags",
+    )?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    if let Some(v) = &type_ {
+        meta.set_str_or_remove("type", v);
+    }
+    if let Some(v) = &title {
+        meta.set_str_or_remove("title", v);
+    }
+    if let Some(v) = &summary {
+        meta.set_str_or_remove("summary", v);
+    }
+    if let Some(v) = &name {
+        meta.set_str_or_remove("name", v);
+    }
+    if let Some(v) = &tags {
+        // `--tags ""` → 清空；顺带滤掉空项（否则写出 `tags = [""]` 会被 Schema 拒绝）
+        let cleaned: Vec<String> = v.iter().filter(|s| !s.is_empty()).cloned().collect();
+        meta.set_str_array("tags", &cleaned);
+    }
+
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已更新 {rel} 的元信息");
+    Ok(())
+}
+
+/// `str entry set` 的字段补丁：`None` 表示不改动，`Some("")` 表示移除该键。
+#[derive(Debug, Clone, Default)]
+pub struct EntryPatch {
+    /// 子分支类型。
+    pub type_: Option<String>,
+    /// 展示名。
+    pub title: Option<String>,
+    /// 子分支摘要。
+    pub summary: Option<String>,
+    /// 备注。
+    pub note: Option<String>,
+    /// 同层排序键。
+    pub order: Option<i64>,
+}
+
+impl EntryPatch {
+    /// 是否一个字段都没给。
+    pub fn is_empty(&self) -> bool {
+        self.type_.is_none()
+            && self.title.is_none()
+            && self.summary.is_none()
+            && self.note.is_none()
+            && self.order.is_none()
+    }
+}
+
+/// `str entry set`：设置某分支 `entries[]` 中指定 `path` 条目的字段。
+///
+/// `str sync` 补登出来的行只有 `path` / `role` / `id`，其 `type` / `title` / `summary`
+/// 由此命令补齐 —— 不再需要「手改 `._meta` 的唯一例外」。空串表示移除该字段。
+pub fn entry_set(dir: &Path, uuid: Option<String>, path: &str, patch: &EntryPatch) -> Result<()> {
+    need_one(
+        !patch.is_empty(),
+        "--type / --title / --summary / --note / --order",
+    )?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    let mut applied = false;
+    for (key, val) in [
+        ("type", &patch.type_),
+        ("title", &patch.title),
+        ("summary", &patch.summary),
+        ("note", &patch.note),
+    ] {
+        if let Some(v) = val {
+            applied |= meta.set_entry_str(path, key, v);
+        }
+    }
+    if let Some(n) = patch.order {
+        applied |= meta.set_entry_int(path, "order", Some(n));
+    }
+    if !applied {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 内找不到 `path` = {path:?}"
+        )));
+    }
+
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已更新 {rel} 的条目 {path}");
+    Ok(())
+}
+
+/// `str author add`：按 `id` 新增 / 覆盖一条 `[[authors]]`（规范 §4.4）。
+pub fn author_add(
+    dir: &Path,
+    uuid: Option<String>,
+    id: String,
+    name: Option<String>,
+    role: String,
+    at: Option<String>,
+) -> Result<()> {
+    if !AUTHOR_ROLES.contains(&role.as_str()) {
+        return Err(Error::BadArg(format!(
+            "`--role` = {role:?} 非法（owner / editor / viewer / agent）"
+        )));
+    }
+    let at = match at {
+        Some(v) => {
+            let dt = v.parse::<toml_edit::Datetime>().map_err(|_| {
+                Error::BadArg(format!(
+                    "`--at` = {v:?} 不是合法 offset date-time（如 2026-09-14T10:03:11+08:00）"
+                ))
+            })?;
+            if dt.offset.is_none() {
+                return Err(Error::BadArg(format!("`--at` = {v:?} 缺少时区偏移（规范 4.1）")));
+            }
+            Some(dt.to_string())
+        }
+        None => Some(util::now_rfc3339()),
+    };
+
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    let added = meta.upsert_author(&Author {
+        id: id.clone(),
+        name,
+        role: role.clone(),
+        at,
+    });
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!(
+        "已{} {rel} 的协作者 {id}（role = {role}）",
+        if added { "新增" } else { "更新" }
+    );
+    Ok(())
+}
+
+/// `str author rm`：按 `id` 删除一条 `[[authors]]`。
+pub fn author_rm(dir: &Path, uuid: Option<String>, id: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+    if !meta.remove_author(id) {
+        return Err(Error::BadArg(format!("{rel} 内找不到协作者 `{id}`")));
+    }
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已删除 {rel} 的协作者 {id}");
     Ok(())
 }
 
@@ -604,6 +963,10 @@ pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
     if dry_run {
         println!("（dry-run）将更新 {changed} 份 `._meta`");
     } else {
+        // `sync` 是「与磁盘对齐」的总入口：顺手把 `E_REVISION_STALE` 的基线刷成当前状态。
+        if let Ok(after) = bundle.scan() {
+            crate::baseline::record_scan(&bundle, &after);
+        }
         println!("已更新 {changed} 份 `._meta`");
     }
     Ok(())
@@ -623,7 +986,9 @@ fn guess_file_role(name: &str) -> &'static str {
 
 // ─────────────────────────── fmt ───────────────────────────
 
-/// 按规范键序 / 表序重写 `._meta`（保注释）。
+/// 按规范 §4.9 键序 / 表序重写 `._meta`（保注释）。
+///
+/// 规范化**不触碰** `revision` / `updated_at`，因此不影响 `E_REVISION_STALE` 基线。
 pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
@@ -632,18 +997,11 @@ pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
         if v.meta.is_none() {
             continue;
         }
-        let mut meta = match bundle.read_meta(&v.dir)? {
+        let meta = match bundle.read_meta(&v.dir)? {
             MetaLoad::Ok(m, _) => m,
             MetaLoad::Failed(_) => continue,
         };
-        meta.sort_collections();
-        let mut text = meta.doc.to_string();
-        if !text.ends_with('\n') {
-            text.push('\n');
-        }
-        if strip_comments {
-            text = strip_line_comments(&text);
-        }
+        let text = meta.canonical_text(strip_comments);
         let path = bundle.meta_path(&v.dir);
         let current = std::fs::read_to_string(&path).unwrap_or_default();
         if current != text {
@@ -668,40 +1026,21 @@ pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// 尽力移除整行 `#` 注释（不处理字符串内的 `#`）。
-fn strip_line_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
 // ─────────────────────────── norm / context / export ───────────────────────────
 
 /// 输出归一化 JSON。
-pub fn norm(dir: &Path, uuid: Option<String>) -> Result<()> {
+///
+/// `--out -`（或缺省）写 stdout；给路径则写文件（规范 §9）。
+pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = match uuid {
-        Some(u) => locate(&scan, &u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))?,
-        None => scan
-            .root_index
-            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into()))?,
-    };
+    let idx = target_branch(&scan, uuid.as_deref())?;
     let Some(meta) = scan.visits[idx].meta.as_ref() else {
         return Err(Error::BadArg("`._meta` 解析失败".into()));
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&meta.to_json()).unwrap_or_default()
-    );
-    Ok(())
+    let mut text = serde_json::to_string_pretty(&meta.to_json()).unwrap_or_default();
+    text.push('\n');
+    emit(&text, out.as_deref())
 }
 
 /// 生成供 AI 使用的上下文片段。
@@ -758,13 +1097,7 @@ fn render_context(scan: &Scan, idx: usize, depth: usize, out: &mut String, level
     if level >= depth {
         return;
     }
-    let children: Vec<usize> = scan
-        .visits
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.parent == Some(idx))
-        .map(|(i, _)| i)
-        .collect();
+    let children = ordered_children(scan, idx);
     for c in children {
         render_context(scan, c, depth, out, level + 1);
     }
@@ -781,22 +1114,40 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
 }
 
 /// 导出为单一 JSON / TOML（派生数据，只读）。
-pub fn export(dir: &Path, format: String, depth: Option<usize>) -> Result<()> {
+///
+/// `--out -`（或缺省）写 stdout；给路径则写文件，且**不得**落在 bundle 内部（规范 §9）。
+pub fn export(
+    dir: &Path,
+    format: String,
+    depth: Option<usize>,
+    out: Option<String>,
+) -> Result<()> {
+    if !matches!(format.as_str(), "json" | "toml") {
+        return Err(Error::BadArg(format!(
+            "`--format` = {format:?} 非法（只允许 json / toml）"
+        )));
+    }
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
     let Some(root_idx) = scan.root_index else {
         return Err(Error::BadArg("bundle 缺少 `._meta`".into()));
     };
     let value = export_node(&scan, root_idx, depth);
-    if format == "toml" {
-        println!("{}", toml_from_json(&value, 0));
+    let mut text = if format == "toml" {
+        toml_from_json(&value, 0)
     } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value).unwrap_or_default()
-        );
+        serde_json::to_string_pretty(&value).unwrap_or_default()
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
     }
-    Ok(())
+    match out.as_deref() {
+        None | Some("-") => emit(&text, None),
+        Some(p) => {
+            let path = resolve_out_path(&bundle, p)?;
+            std::fs::write(&path, text).map_err(|e| Error::io(&path, e))
+        }
+    }
 }
 
 fn export_node(scan: &Scan, idx: usize, depth: Option<usize>) -> JValue {
@@ -805,13 +1156,7 @@ fn export_node(scan: &Scan, idx: usize, depth: Option<usize>) -> JValue {
         Some(m) => m.to_json(),
         None => serde_json::json!({ "id": null, "error": "parse_failed" }),
     };
-    let children: Vec<usize> = scan
-        .visits
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.parent == Some(idx))
-        .map(|(i, _)| i)
-        .collect();
+    let children = ordered_children(scan, idx);
     let descend = depth.map(|d| v.depth < d).unwrap_or(true);
     let kids: Vec<JValue> = if descend {
         children.iter().map(|c| export_node(scan, *c, depth)).collect()

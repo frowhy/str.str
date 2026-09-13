@@ -59,6 +59,8 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 `SKILL.md` 把「必须用 CLI、禁止手改 `._meta`」写成 **MUST / NEVER 级条款**，并把「写后必须 `str sync` + `str validate --strict` 且 0 error 才算完成」定为交付前提。这是跨 Agent 通用的最强约束：它约束的是 Agent 的行为契约，而不是某个客户端的能力。
 
+**这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `._meta` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
+
 需要更强（客户端级）约束时，可把 SKILL.md 的 Hard rules 复制进宿主的 always-apply 规则机制，例如 CodeBuddy 的项目规则 `.codebuddy/rules/str/RULE.mdc`（frontmatter `alwaysApply: true`）。
 
 ## 与仓库其它部分的关系
@@ -74,8 +76,15 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 ## 已知边界
 
-- `references/cli-reference.md` 记录了 `str` v0.1.0 与规范 §9 的**多处参数漂移**（如 `norm` 没有 `--out`、`ref rm` 用 `--ref`），以及规范 §6.1 中 `E_REVISION_STALE` 的判定强度在实现里较弱。使用前请以该文为准。
-- CLI 目前无法设置 `entries[].title` / `entries[].summary` / `tags` / `authors[]`，SKILL.md 为这类字段定义了唯一的受限例外流程。
+v1.8.0 的实现对齐已消解此前的落差：§9 参数漂移、§4.9 排序不生效、`--fix-manifest` 不写盘、`E_REVISION_STALE` 判不动、描述性字段只能手改；同时把规范自身最后两处不一致（`policies.unknown_entry`、§9「写前校验」措辞）也一并收口。**当前残留只剩「限制」而非「不一致」**，逐条列在 `references/cli-reference.md` §5：
+
+- **`str validate` 不检查书写顺序**：规范把顺序门禁交给 `str fmt --check`（返回 0），写命令落盘的字节本身已规范。
+- **`E_REVISION_STALE` 依赖基线**：历史判定靠 `._cache/revisions.json`（派生数据，由写命令与 `str sync` 维护）；删掉该目录即关闭这项历史检查。
+- **平台相关**：`str reveal` 依赖 macOS `SetFile`（缺失只提示，不改退出码）；`str export --format toml` 是简易序列化，不是 §4.9 规范形式。
+
+## 版本
+
+技能包与规范同步到 **v1.8.0**（`STR-FORMAT-PROMPT.md`）：排序细则明确化（`order` 缺省视为最大，混排 `._meta` 首次规范化会一次性重排）、`E_REVISION_STALE` 可判定化（§6.1.1）、§9 命令面补齐（`ls` / `ref rm` 位置参数 + 四个字段写入命令）、删除 `policies.unknown_entry`、§9「写前校验」改述为「产出即合法且规范」。
 
 ## 许可
 

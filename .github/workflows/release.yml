@@ -35,9 +35,20 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: 测试（单元 + 集成，34 项）
+      - name: 测试（单元 + 集成，48 项）
         working-directory: str-cli
         run: cargo test --locked --all-targets
+
+      # 规范 §12 DoD 19/20 的门禁：仓库自举与示例 bundle 都必须「校验 0 error」且
+      # 「每个 ._meta 已是 §4.9 规范形式」（确定性序列化）。
+      - name: 自举门禁（仓库自身 + 示例 bundle）
+        run: |
+          cargo build --release --locked --manifest-path str-cli/Cargo.toml
+          S="$PWD/str-cli/target/release/str"
+          "$S" validate . --strict
+          "$S" fmt . --check
+          "$S" validate examples/客户运营.str --strict
+          "$S" fmt examples/客户运营.str --check
 
   build:
     name: build ${{ matrix.target }}

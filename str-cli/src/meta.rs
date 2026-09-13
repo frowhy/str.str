@@ -544,6 +544,121 @@ pub fn extract(doc: DocumentMut, rel: &str) -> (Meta, Vec<Issue>) {
     (meta, cx.issues)
 }
 
+// ─────────────────────────── 规范 4.9：确定性序列化 ───────────────────────────
+
+/// 规范 §4.9 的**全量规范化**：顶层裸键序 → 表序 → 各表内键序 → `entries` / `refs` 集合排序，
+/// 最后重设文档位置使顺序真正落到磁盘字节上。
+///
+/// 只调整**书写顺序**，不改动任何字段值：`toml_edit` 的键/项装饰（注释、空行）随项一起搬运，
+/// 因此注释保真（规范 4.1 / DoD 16）。
+pub fn canonicalize_doc(doc: &mut DocumentMut) {
+    // 1) 顶层：值项（裸键）按 `TOP_BARE_KEYS`，表项按 `TABLE_ORDER`。
+    //    未知的值项排在已知裸键之后、表项之前 —— 否则未知裸键会被排到表头之后，直接产出非法 TOML。
+    let top_rank = |k: &str, it: &Item| -> usize {
+        match it {
+            Item::Table(_) | Item::ArrayOfTables(_) => {
+                TOP_BARE_KEYS.len()
+                    + 1
+                    + TABLE_ORDER
+                        .iter()
+                        .position(|x| *x == k)
+                        .unwrap_or(TABLE_ORDER.len())
+            }
+            _ => TOP_BARE_KEYS
+                .iter()
+                .position(|x| *x == k)
+                .unwrap_or(TOP_BARE_KEYS.len()),
+        }
+    };
+    doc.as_table_mut()
+        .sort_values_by(|k1, i1, k2, i2| top_rank(k1.get(), i1).cmp(&top_rank(k2.get(), i2)));
+
+    // 2) 各表内的键序。
+    for (key, order) in [
+        ("policies", POLICIES_KEYS),
+        ("authors", AUTHOR_KEYS),
+        ("refs", REF_KEYS),
+        ("entries", ENTRY_KEYS),
+    ] {
+        let rank = |k: &str| order.iter().position(|x| *x == k).unwrap_or(usize::MAX);
+        match doc.as_table_mut().get_mut(key) {
+            Some(Item::Table(t)) => {
+                t.sort_values_by(|k1, _, k2, _| rank(k1.get()).cmp(&rank(k2.get())));
+            }
+            Some(Item::ArrayOfTables(a)) => {
+                for t in a.iter_mut() {
+                    t.sort_values_by(|k1, _, k2, _| rank(k1.get()).cmp(&rank(k2.get())));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3) 集合排序（§4.9「各自按 `order` 稳定排序」）。
+    sort_collections_in(doc);
+
+    // 4) 位置重设，见 `renumber_positions_in`。
+    renumber_positions_in(doc);
+}
+
+/// `entries` / `refs` 的排序键：`(order, path|id)`，缺 `order` 视为最大。
+fn collection_sort_key(t: &Table) -> (i64, String) {
+    let order = t
+        .get("order")
+        .and_then(Item::as_integer)
+        .unwrap_or(i64::MAX);
+    let id = t
+        .get("path")
+        .or_else(|| t.get("id"))
+        .and_then(Item::as_str)
+        .unwrap_or("")
+        .to_string();
+    (order, id)
+}
+
+/// 就地重排 `entries` / `refs` 的元素（不改变元素自身的 `doc_position`）。
+fn sort_collections_in(doc: &mut DocumentMut) {
+    for key in ["entries", "refs"] {
+        let Some(aot) = doc
+            .as_table_mut()
+            .get_mut(key)
+            .and_then(Item::as_array_of_tables_mut)
+        else {
+            continue;
+        };
+        let mut items: Vec<Table> = aot.iter().cloned().collect();
+        items.sort_by_key(collection_sort_key);
+        for (slot, table) in aot.iter_mut().zip(items) {
+            *slot = table;
+        }
+    }
+}
+
+/// 依**前序遍历顺序**重设整篇文档每个表的 `doc_position`。
+///
+/// `toml_edit` 的 `DocumentMut::fmt` 会用 `Table::position()` 把表「搬回原始位置」：
+/// 只重排内容而不重设位置，序列化结果仍保持解析时的旧顺序 —— 这正是 `sort_collections()`
+/// 此前「改了等于没改」的根因。前序赋值保证位置序 == 遍历序 ==（规范化后的）书写顺序。
+fn renumber_positions_in(doc: &mut DocumentMut) {
+    fn walk(t: &mut Table, pos: &mut isize) {
+        *pos += 1;
+        t.set_position(Some(*pos));
+        for (_, item) in t.iter_mut() {
+            match item {
+                Item::Table(child) => walk(child, pos),
+                Item::ArrayOfTables(a) => {
+                    for child in a.iter_mut() {
+                        walk(child, pos);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut pos = 0isize;
+    walk(doc.as_table_mut(), &mut pos);
+}
+
 // ─────────────────────────── 归一化（TOML → 规范 JSON）───────────────────────────
 
 impl Meta {
@@ -613,51 +728,15 @@ impl Meta {
         JValue::Object(map)
     }
 
-    /// 按规范键序对 `entries` / `refs` 做稳定排序。
+    /// 按 `(order, path|id)` 重排 `entries` / `refs`，并重设文档位置使新顺序真正落盘。
     pub fn sort_collections(&mut self) {
-        use toml_edit::{ArrayOfTables, Item};
-        for key in ["entries", "refs"] {
-            let Some(aot) = self
-                .doc
-                .as_table()
-                .get(key)
-                .and_then(|i| i.as_array_of_tables())
-            else {
-                continue;
-            };
-            let mut items: Vec<Table> = aot.iter().cloned().collect();
-            let idx = |t: &Table| {
-                t.get("order")
-                    .and_then(|i| i.as_integer())
-                    .unwrap_or(i64::MAX)
-            };
-            items.sort_by(|a, b| {
-                let ka = (
-                    idx(a),
-                    a.get("path")
-                        .or_else(|| a.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                );
-                let kb = (
-                    idx(b),
-                    b.get("path")
-                        .or_else(|| b.get("id"))
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                );
-                ka.cmp(&kb)
-            });
-            let mut new_aot = ArrayOfTables::new();
-            for t in items {
-                new_aot.push(t);
-            }
-            self.doc
-                .as_table_mut()
-                .insert(key, Item::ArrayOfTables(new_aot));
-        }
+        sort_collections_in(&mut self.doc);
+        renumber_positions_in(&mut self.doc);
+    }
+
+    /// 规范 §4.9 全量规范化（顶层键序 + 表序 + 表内键序 + 集合排序）。
+    pub fn canonicalize(&mut self) {
+        canonicalize_doc(&mut self.doc);
     }
 
     /// 校验序号等基础合法性（`E_REVISION_STALE` 的可判定部分）。

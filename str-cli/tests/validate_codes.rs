@@ -241,6 +241,20 @@ fn e_schema_field_unknown_and_wrong_type() {
     assert_code(&root, "E_SCHEMA_FIELD");
 }
 
+/// v1.8.0 裁决：`policies.unknown_entry` 已从规范删除（与 `manifest` 重叠、从未被
+/// Schema 与实现采纳），写入它必须被拒 —— 未登记条目的处理一律由 `manifest` 表达。
+#[test]
+fn policies_unknown_entry_is_rejected() {
+    let root = baseline("policyunknown");
+    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    w(
+        &root,
+        "._meta",
+        &text.replace("[policies]\n", "[policies]\nunknown_entry = \"deny\"\n"),
+    );
+    assert_code(&root, "E_SCHEMA_FIELD");
+}
+
 #[test]
 fn e_id_mismatch() {
     let root = baseline("idmismatch");

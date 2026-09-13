@@ -12,6 +12,7 @@
 //!
 //! `._meta`（TOML）→ 解析 → 归一化为规范 JSON（`meta::Meta::to_json`）→ JSON Schema 2020-12 校验。
 
+pub mod baseline;
 pub mod bundle;
 pub mod cmd;
 pub mod error;
@@ -23,7 +24,7 @@ pub mod validate;
 /// 本实现对应的 `str` 格式主版本。
 pub const STR_MAJOR: i64 = 1;
 /// 本实现对应的规范版本。
-pub const SPEC_VERSION: &str = "1.7.0";
+pub const SPEC_VERSION: &str = "1.8.0";
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。
 ///
 /// 注意：Schema 属**格式规范资产**，位于**仓库根** `schema/`（与 `examples/` 同级），

@@ -23,7 +23,7 @@ sha2 = "0.10"
 thiserror = "2.0.20"
 time = { version = "0.3.55", features = ["formatting", "parsing"] }
 toml_edit = "0.25.15"
-uuid = { version = "1.26.1", features = ["v7"] }
+uuid = { version = "1.26.1", features = ["v4", "v7"] }
 walkdir = "2.5.0"
 
 [profile.release]

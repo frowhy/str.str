@@ -33,6 +33,9 @@ enum Cmd {
         /// 一句话摘要
         #[arg(long)]
         summary: Option<String>,
+        /// `policies.id_version`：生成的 UUID 版本（4 或 7，缺省 7）
+        #[arg(long, default_value_t = 7)]
+        id_version: usize,
     },
     /// 全量校验（规范第 6 章全部错误码）
     Validate {
@@ -58,14 +61,19 @@ enum Cmd {
         /// 显示 `refs` 关联线
         #[arg(long)]
         show_refs: bool,
+        /// 用纯 ASCII 制表符渲染（终端字体缺字时用）
+        #[arg(long)]
+        ascii: bool,
     },
     /// 列出某分支的内容清单
     Ls {
         /// bundle 目录
         dir: PathBuf,
-        /// 指定分支 id（缺省为 ROOT）
-        #[arg(long)]
+        /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
+        /// `--uuid` 选项形式（等价于位置参数，保留兼容）
+        #[arg(long = "uuid", conflicts_with = "uuid")]
+        uuid_opt: Option<String>,
         /// 直接读磁盘而非读清单
         #[arg(long)]
         raw: bool,
@@ -95,6 +103,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RefCmd,
     },
+    /// 分支自身元信息字段（`type` / `title` / `summary` / `name` / `tags`）
+    Meta {
+        #[command(subcommand)]
+        cmd: MetaCmd,
+    },
+    /// `entries[]` 条目字段
+    Entry {
+        #[command(subcommand)]
+        cmd: EntryCmd,
+    },
+    /// `[[authors]]` 协作记录
+    Author {
+        #[command(subcommand)]
+        cmd: AuthorCmd,
+    },
     /// 用磁盘实际状态修正 `entries` 与指纹
     Sync {
         /// bundle 目录
@@ -120,6 +143,9 @@ enum Cmd {
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
+        /// 输出目标：`-` 为 stdout（缺省），其余为文件路径
+        #[arg(long)]
+        out: Option<String>,
     },
     /// 生成供 AI 使用的上下文片段
     Context {
@@ -144,6 +170,9 @@ enum Cmd {
         /// 最大导出深度
         #[arg(long)]
         depth: Option<usize>,
+        /// 输出目标：`-` 为 stdout（缺省），其余为文件路径（不得落在 bundle 内部）
+        #[arg(long)]
+        out: Option<String>,
     },
     /// 平台适配：macOS 设置 bundle 位并让 `._meta` 可见
     Reveal {
@@ -202,6 +231,9 @@ enum BranchCmd {
         /// 确认删除
         #[arg(long)]
         force: bool,
+        /// 递归删除下级（规范 §9 的写法；本命令**始终**递归，该旗标为兼容而接受）
+        #[arg(long)]
+        recursive: bool,
     },
 }
 
@@ -230,11 +262,102 @@ enum RefCmd {
     Rm {
         /// bundle 目录
         dir: PathBuf,
-        /// 源分支 id
-        uuid: String,
-        /// 关联线 id
-        #[arg(long = "ref")]
-        ref_id: String,
+        /// 关联线 id（规范 §9 的位置参数形式）
+        ref_id: Option<String>,
+        /// 源分支 id（缺省：在整棵树上定位该关联线）
+        #[arg(long)]
+        uuid: Option<String>,
+        /// 关联线 id 的选项形式（等价于位置参数，保留兼容）
+        #[arg(long = "ref", conflicts_with = "ref_id")]
+        ref_opt: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetaCmd {
+    /// 设置分支自身的元信息字段（空串表示移除该字段）
+    Set {
+        /// bundle 目录
+        dir: PathBuf,
+        /// 分支 id（缺省为 ROOT）
+        uuid: Option<String>,
+        /// 实体类型，如 crm.customer（空串移除）
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// 标题（空串移除）
+        #[arg(long)]
+        title: Option<String>,
+        /// 摘要（空串移除）
+        #[arg(long)]
+        summary: Option<String>,
+        /// bundle 短名（仅 root 有效，空串移除）
+        #[arg(long)]
+        name: Option<String>,
+        /// 标签（逗号分隔，可重复；空串清空）
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntryCmd {
+    /// 设置某分支 `entries[]` 中一条目的字段（空串表示移除该字段）
+    Set {
+        /// bundle 目录
+        dir: PathBuf,
+        /// 条目所在分支 id（缺省为 ROOT）
+        uuid: Option<String>,
+        /// 条目路径（单段名，与子项目录名/文件名一致）
+        #[arg(long = "path")]
+        path: String,
+        /// 子分支类型（空串移除）
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// 展示名（空串移除）
+        #[arg(long)]
+        title: Option<String>,
+        /// 子分支摘要（空串移除）
+        #[arg(long)]
+        summary: Option<String>,
+        /// 备注（空串移除）
+        #[arg(long)]
+        note: Option<String>,
+        /// 同层排序键（规范 §4.6）
+        #[arg(long)]
+        order: Option<i64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthorCmd {
+    /// 新增 / 覆盖一条 `[[authors]]`（按 id 去重）
+    Add {
+        /// bundle 目录
+        dir: PathBuf,
+        /// 分支 id（缺省为 ROOT）
+        uuid: Option<String>,
+        /// 稳定标识符（SSO sub / 邮箱 hash；禁止用显示名）
+        #[arg(long)]
+        id: String,
+        /// 展示名
+        #[arg(long)]
+        name: Option<String>,
+        /// 角色：owner / editor / viewer / agent
+        #[arg(long)]
+        role: String,
+        /// 参与时间（offset date-time，缺省为当前时间）
+        #[arg(long)]
+        at: Option<String>,
+    },
+    /// 按 id 删除一条 `[[authors]]`
+    Rm {
+        /// bundle 目录
+        dir: PathBuf,
+        /// 分支 id（缺省为 ROOT）
+        uuid: Option<String>,
+        /// 稳定标识符
+        #[arg(long)]
+        id: String,
     },
 }
 
@@ -245,8 +368,9 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             name,
             title,
             summary,
+            id_version,
         } => {
-            cmd::init(&dir, name, title, summary)?;
+            cmd::init(&dir, name, title, summary, id_version)?;
             Ok(0)
         }
         Cmd::Validate {
@@ -259,12 +383,18 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             dir,
             depth,
             show_refs,
+            ascii,
         } => {
-            cmd::tree(&dir, depth, show_refs)?;
+            cmd::tree(&dir, depth, show_refs, ascii)?;
             Ok(0)
         }
-        Cmd::Ls { dir, uuid, raw } => {
-            cmd::ls(&dir, uuid, raw)?;
+        Cmd::Ls {
+            dir,
+            uuid,
+            uuid_opt,
+            raw,
+        } => {
+            cmd::ls(&dir, uuid.or(uuid_opt), raw)?;
             Ok(0)
         }
         Cmd::Show { dir, uuid, full } => {
@@ -294,7 +424,13 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 cmd::branch_add(&dir, &anchor, type_, title, summary, order)?;
                 Ok(0)
             }
-            BranchCmd::Rm { dir, uuid, force } => {
+            BranchCmd::Rm {
+                dir,
+                uuid,
+                force,
+                // 删除**总是**递归（`remove_dir_all`），该旗标仅为兼容规范 §9 的写法而接受
+                recursive: _,
+            } => {
                 cmd::branch_rm(&dir, &uuid, force)?;
                 Ok(0)
             }
@@ -313,10 +449,71 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             }
             RefCmd::Rm {
                 dir,
-                uuid,
                 ref_id,
+                uuid,
+                ref_opt,
             } => {
-                cmd::ref_rm(&dir, &uuid, &ref_id)?;
+                let ref_id = ref_id.or(ref_opt).ok_or_else(|| {
+                    Error::BadArg("缺少关联线 id（位置参数 `<REF_ID>` 或 `--ref <REF_ID>`）".into())
+                })?;
+                cmd::ref_rm(&dir, uuid, &ref_id)?;
+                Ok(0)
+            }
+        },
+        Cmd::Meta { cmd } => match cmd {
+            MetaCmd::Set {
+                dir,
+                uuid,
+                type_,
+                title,
+                summary,
+                name,
+                tags,
+            } => {
+                cmd::meta_set(&dir, uuid, type_, title, summary, name, tags)?;
+                Ok(0)
+            }
+        },
+        Cmd::Entry { cmd } => match cmd {
+            EntryCmd::Set {
+                dir,
+                uuid,
+                path,
+                type_,
+                title,
+                summary,
+                note,
+                order,
+            } => {
+                cmd::entry_set(
+                    &dir,
+                    uuid,
+                    &path,
+                    &cmd::EntryPatch {
+                        type_,
+                        title,
+                        summary,
+                        note,
+                        order,
+                    },
+                )?;
+                Ok(0)
+            }
+        },
+        Cmd::Author { cmd } => match cmd {
+            AuthorCmd::Add {
+                dir,
+                uuid,
+                id,
+                name,
+                role,
+                at,
+            } => {
+                cmd::author_add(&dir, uuid, id, name, role, at)?;
+                Ok(0)
+            }
+            AuthorCmd::Rm { dir, uuid, id } => {
+                cmd::author_rm(&dir, uuid, &id)?;
                 Ok(0)
             }
         },
@@ -329,8 +526,8 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             check,
             strip_comments,
         } => cmd::fmt(&dir, check, strip_comments),
-        Cmd::Norm { dir, uuid } => {
-            cmd::norm(&dir, uuid)?;
+        Cmd::Norm { dir, uuid, out } => {
+            cmd::norm(&dir, uuid, out)?;
             Ok(0)
         }
         Cmd::Context {
@@ -346,8 +543,9 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             dir,
             format,
             depth,
+            out,
         } => {
-            cmd::export(&dir, format, depth)?;
+            cmd::export(&dir, format, depth, out)?;
             Ok(0)
         }
         Cmd::Reveal { dir } => {
