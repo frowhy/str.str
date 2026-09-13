@@ -311,4 +311,4 @@ sha256 = "$TAGS_HASH"
 EOF
 
 echo "已生成：$OUT"
-"$ROOT/target/debug/str" tree "$OUT" --show-refs || true
+"$ROOT/str-cli/target/debug/str" tree "$OUT" --show-refs || true

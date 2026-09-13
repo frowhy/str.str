@@ -25,17 +25,20 @@ pub const STR_MAJOR: i64 = 1;
 /// 本实现对应的规范版本。
 pub const SPEC_VERSION: &str = "1.6.0";
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。
+///
+/// 注意：Schema 属**格式规范资产**，位于**仓库根** `schema/`（与 `examples/` 同级），
+/// 因此这里用 `../../schema/` 引用 —— 代价是 `str-cli/` 不能脱离仓库根单独构建。
 pub const EMBEDDED_SCHEMAS: &[(&str, &str)] = &[
     (
         "root-meta.schema.json",
-        include_str!("../schema/root-meta.schema.json"),
+        include_str!("../../schema/root-meta.schema.json"),
     ),
     (
         "node-meta.schema.json",
-        include_str!("../schema/node-meta.schema.json"),
+        include_str!("../../schema/node-meta.schema.json"),
     ),
     (
         "branch-meta.schema.json",
-        include_str!("../schema/branch-meta.schema.json"),
+        include_str!("../../schema/branch-meta.schema.json"),
     ),
 ];

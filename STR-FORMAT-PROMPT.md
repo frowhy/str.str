@@ -77,18 +77,23 @@
 
 **参考实现（本仓库，已完成）**：Rust 2024；依赖 `toml_edit`（保注释写回）、`jsonschema`（2020-12）、`clap`、`sha2`、`uuid`（v7）、`time`、`walkdir`。
 
-| 目录 / 文件 | 说明 |
+**仓库分层原则**：**格式规范资产放仓库根**（Schema / 示例 / 生成脚本，可被任何实现复用）；**`str-cli/` 只放 CLI 实现**（一个可 `cargo` 构建的最小 crate）。
+
+| 位置 | 说明 |
 | --- | --- |
-| `STR-FORMAT-PROMPT.md` | **本规范（唯一真源）**，位于仓库根，与实现解耦 |
-| `str-cli/` | 参考实现（Rust 工程根，`cargo` 在此目录执行） |
+| `STR-FORMAT-PROMPT.md` | **本规范（唯一真源）** |
+| `schema/*.json` | 三份档位 JSON Schema（2020-12）—— 格式的规范性产物 |
+| `examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
+| `scripts/build-example.sh` | 幂等重建示例 bundle |
+| `str-cli/Cargo.toml` / `str-cli/Cargo.lock` | Rust 工程（`cargo` 在 `str-cli/` 下执行） |
 | `str-cli/src/{meta,meta_edit}.rs` | `._meta` 模型、提取、归一化、保注释写回、模板渲染 |
 | `str-cli/src/bundle.rs` | 分支树遍历、`id` 索引、懒加载 |
 | `str-cli/src/validate.rs` | 规范第 6 章全部错误码 |
 | `str-cli/src/cmd.rs` / `str-cli/src/main.rs` | CLI 子命令 / clap 定义与退出码 |
-| `str-cli/schema/*.json` | 三份档位 JSON Schema（2020-12），`str init` 会复制进 `._schema/` |
-| `str-cli/examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
-| `str-cli/scripts/build-example.sh` | 幂等重建示例 bundle |
 | `str-cli/tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
+| `str-cli/target/` | 构建产物（不入库） |
+
+> ⚠ **分层代价**：Schema 属规范资产（只有一份，不复制进实现），因此 `str-cli/src/lib.rs` 以 `include_str!("../../schema/…")` 引用它 —— **`str-cli/` 不能脱离仓库根单独构建**。`str init` 会把这三份 Schema 复制进新建 bundle 的 `._schema/`。
 
 ### 1.3 硬性约束（违反即失败）
 
@@ -886,7 +891,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 ### 10.8 导图渲染结果
 
-实际执行 `str tree str-cli/examples/客户运营.str --show-refs` 的输出（`⇢` 即跨枝关联线）：
+实际执行 `str tree examples/客户运营.str --show-refs` 的输出（`⇢` 即跨枝关联线）：
 
 ```
 客户运营.str
