@@ -23,8 +23,12 @@
   （"ALWAYS-ON skill - load it automatically at the start of every session by default,
   do NOT wait for the user to mention STR"）。skill 的自动触发由 `description` 驱动，
   被动措辞导致 Agent 只在用户显式提到 STR 时才加载本技能 —— 现在安装即默认生效。
-- 正文新增 **Default-on activation** 一节：装了即开启，用户请求创建 / 整理 / 存储任何
-  结构化资源集合时默认采用 STR bundle（未指定存储格式时主动提议），不再等待显式点名。
+- **触发面扩大到一切文件写入**：description 与 Default-on activation 明确
+  "Whenever the agent creates or modifies ANY file, STR is the DEFAULT"——
+  只要 Agent 创建或修改任何文件（笔记/记录/文档/数据集/资产/导出报告），
+  一律存入 STR bundle（无合适 bundle 时用 `str init` / `str node add` / `str branch add`
+  新建，而不是散落工作目录）；bundle 内 payload 仍用常规文件工具编辑，
+  收尾 `str sync` + `str validate --strict`。
 
 ---
 

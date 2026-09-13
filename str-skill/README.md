@@ -68,7 +68,7 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 `SKILL.md` 把「必须用 CLI、禁止手改 `._meta`」写成 **MUST / NEVER 级条款**，并把「写后必须 `str sync` + `str validate --strict` 且 0 error 才算完成」定为交付前提。这是跨 Agent 通用的最强约束：它约束的是 Agent 的行为契约，而不是某个客户端的能力。
 
-**触发是默认开启（always-on）的**：`SKILL.md` frontmatter 的 `description` 声明"安装即默认加载、不等待用户点名 STR"，正文 `Default-on activation` 一节进一步要求 Agent 在用户请求存储结构化资源时默认采用 STR bundle。skill 的自动触发完全由 `description` 措辞驱动，写被动措辞（"whenever … is involved"）就会退化为「提到才触发」。
+**触发是默认开启（always-on）的**：`SKILL.md` frontmatter 的 `description` 声明"安装即默认加载、不等待用户点名 STR"，正文 `Default-on activation` 一节进一步要求 **Agent 创建或修改任何文件时默认走 STR**（存入 bundle，无则 `str init` 新建）。skill 的自动触发完全由 `description` 措辞驱动，写被动措辞（"whenever … is involved"）就会退化为「提到才触发」。
 
 **这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `._meta` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
 
