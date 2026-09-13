@@ -28,7 +28,9 @@
 
 ---
 
-## [Unreleased] — 目标 tag `v0.5.0`
+## [`v0.5.0`](https://github.com/frowhy/str.str/releases/tag/v0.5.0) — 2026-09-14
+
+规范 1.11.0 · CLI 0.5.0 · 技能包 0.3.2
 
 ### 变更
 
