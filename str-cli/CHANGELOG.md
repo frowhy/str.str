@@ -23,6 +23,9 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
 
 ### 变更
 
+- **`str tree` 根节点与子节点同样式**：根行由裸 bundle 目录名改为 `[0] 标题  (type)`
+  （标题依次取根 `._meta` 的 `title` → `name` → 目录名；根无 `type` 时以档位 `root` 兜底），
+  首行的 bundle 目录名保留，解析失败时追加 `! 解析失败`。
 - **`[uuid]` 位置参数统一「省略即 ROOT」**：`show` / `context` / `norm` / `ref add` / `branch add` /
   `branch rm` 的 UUID 位置参数改为可省略（此前前五个必填）。省略时目标为 ROOT；ROOT 上非法的两个
   操作不再靠「参数缺失」挡住，而是解析出 ROOT 后给出**带原因**的 `BadArg`（exit 2）——

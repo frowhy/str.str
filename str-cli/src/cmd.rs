@@ -227,11 +227,29 @@ pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool, ascii: bool) 
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
     println!("{}", bundle.name());
-    if scan.root_index.is_none() {
+    let Some(ri) = scan.root_index else {
         println!("  （缺少 `._meta`，无法渲染）");
         return Ok(());
+    };
+    // 根节点与子节点同样式：`[0] 标题  (type)`；根无 `type` 时以档位 `root` 兜底。
+    let v = &scan.visits[ri];
+    match v.meta.as_ref() {
+        Some(m) => {
+            let title = m
+                .title
+                .clone()
+                .or_else(|| m.name.clone())
+                .unwrap_or_else(|| bundle.name());
+            let kind_label = m.r#type.clone().unwrap_or_else(|| "root".to_string());
+            let mut line = format!("[0] {title}  ({kind_label})");
+            if !v.readable {
+                line.push_str("  ! 解析失败");
+            }
+            println!("{line}");
+        }
+        None => println!("[0] {}  ! 解析失败", bundle.name()),
     }
-    render_children(&scan, 0, "", max_depth, show_refs, ascii);
+    render_children(&scan, ri, "", max_depth, show_refs, ascii);
     Ok(())
 }
 
