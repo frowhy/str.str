@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://str-format.local/example/customer.schema.json",
+  "title": "crm.customer payload",
+  "type": "object",
+  "required": [
+    "name",
+    "region"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "region": {
+      "type": "string",
+      "minLength": 1
+    },
+    "since": {
+      "type": "string"
+    },
+    "tier": {
+      "enum": [
+        "normal",
+        "vip"
+      ]
+    }
+  }
+}

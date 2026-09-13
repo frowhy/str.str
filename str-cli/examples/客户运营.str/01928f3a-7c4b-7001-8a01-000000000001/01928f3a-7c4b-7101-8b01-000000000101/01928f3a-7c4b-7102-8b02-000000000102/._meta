@@ -1,0 +1,20 @@
+str = 1
+spec = "1.6.0"
+kind = "branch"
+id = "01928f3a-7c4b-7102-8b02-000000000102"
+type = "doc.meeting_note"
+title = "2026-09 会议纪要"
+summary = "深度 3 的关联分支，同样承载真实数据（Markdown 纪要）。"
+tags = ["meeting"]
+revision = 2
+created_at = 2026-09-12T11:22:00+08:00
+updated_at = 2026-09-13T09:05:00+08:00
+
+[[entries]]
+path = "2026-09-10.md"
+role = "payload"
+media_type = "text/markdown"
+size = 156
+sha256 = "162af15f76d0493282a4a5e666928f6de6a36662faa44a860288766be298e9a0"
+
+[ext]
