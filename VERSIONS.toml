@@ -56,7 +56,7 @@ implements_spec_major = 1
 # 技能包自身的版本（str-skill/SKILL.md frontmatter 的 `version`）。
 # **与 release.tag / cli.version 无绑定关系**：技能包只在自己内容变化时升版，
 # 因此三者常常不相等 —— 这是设计，不是漂移。
-version = "0.2.1"
+version = "0.3.0"
 # 技能包能正常工作的最低 CLI 版本（SKILL.md 会用到的命令自该版本起可用）。
 requires_cli = ">=0.3.0"
 # SkillHub 发布身份，键名与 SKILL.md frontmatter 一致（平台只认这两个名字）。

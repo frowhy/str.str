@@ -14,7 +14,21 @@
 
 ---
 
-## [Unreleased] — 0.2.1
+## [0.3.0] — 2026-09-14
+
+### 变更
+
+- **默认开启（always-on）**：`SKILL.md` frontmatter `description` 从被动触发措辞
+  （"whenever a STR bundle is involved / user mentions STR"）改写为声明式默认加载措辞
+  （"ALWAYS-ON skill - load it automatically at the start of every session by default,
+  do NOT wait for the user to mention STR"）。skill 的自动触发由 `description` 驱动，
+  被动措辞导致 Agent 只在用户显式提到 STR 时才加载本技能 —— 现在安装即默认生效。
+- 正文新增 **Default-on activation** 一节：装了即开启，用户请求创建 / 整理 / 存储任何
+  结构化资源集合时默认采用 STR bundle（未指定存储格式时主动提议），不再等待显式点名。
+
+---
+
+## [0.2.1] — 2026-09-14
 
 ### 新增
 

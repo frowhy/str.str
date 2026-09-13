@@ -68,6 +68,8 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 `SKILL.md` 把「必须用 CLI、禁止手改 `._meta`」写成 **MUST / NEVER 级条款**，并把「写后必须 `str sync` + `str validate --strict` 且 0 error 才算完成」定为交付前提。这是跨 Agent 通用的最强约束：它约束的是 Agent 的行为契约，而不是某个客户端的能力。
 
+**触发是默认开启（always-on）的**：`SKILL.md` frontmatter 的 `description` 声明"安装即默认加载、不等待用户点名 STR"，正文 `Default-on activation` 一节进一步要求 Agent 在用户请求存储结构化资源时默认采用 STR bundle。skill 的自动触发完全由 `description` 措辞驱动，写被动措辞（"whenever … is involved"）就会退化为「提到才触发」。
+
 **这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `._meta` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
 
 需要更强（客户端级）约束时，可把 SKILL.md 的 Hard rules 复制进宿主的 always-apply 规则机制，例如 CodeBuddy 的项目规则 `.codebuddy/rules/str/RULE.mdc`（frontmatter `alwaysApply: true`）。
@@ -93,16 +95,17 @@ v1.8.0 的实现对齐已消解此前的落差：§4.9 排序不生效、`--fix-
 
 ## 版本
 
-- 技能包版本：**0.2.1**
+- 技能包版本：**0.3.0**
 - 适配规范：**v1.9.0**（`STR-FORMAT-PROMPT.md`）
 - 依赖 CLI：**>= 0.3.0**（`str spec set` 与 `[uuid]` 位置参数缺省 ROOT 自 0.3.0 起提供）
 - 发布身份：slug **`str-skill`** · 展示名 **`STR 资源树`**（SkillHub）
 
 技能包版本、CLI 版本与发行 tag 是**三条独立演进的轴**，不要求相等；对应关系登记在仓库根
 [`VERSIONS.toml`](../VERSIONS.toml)，并由 `scripts/check-versions.sh` 在 CI 中守卫。
-逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)：0.2.1 补齐 SkillHub 发布 frontmatter 并接入自动发布、
-同步规范 v1.9.0（`[uuid]` 缺省 ROOT、新增 `str spec set`）；0.2.0 增加 `cargo install` 兜底安装；
-0.1.1 增加 GitHub Releases 自动下载与 SHA-256 强制校验；0.1.0 初版。
+逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)：0.3.0 默认开启（always-on 触发措辞 +
+Default-on activation 条款）；上一版补齐 SkillHub 发布 frontmatter 并接入自动发布、
+同步规范 v1.9.0（`[uuid]` 缺省 ROOT、新增 `str spec set`）；再上一版增加 `cargo install` 兜底安装；
+随后依次为 GitHub Releases 自动下载与 SHA-256 强制校验、初版。
 
 > 规范侧的版本历史（哪些版本需要迁移、工具需支持什么）见
 > [`SPEC-CHANGELOG.md`](../SPEC-CHANGELOG.md)，格式细则唯一真源仍是 `STR-FORMAT-PROMPT.md`。
@@ -119,7 +122,7 @@ v1.8.0 的实现对齐已消解此前的落差：§4.9 排序不生效、`--fix-
 | --- | --- | --- |
 | `slug` | `str-skill` | **全网唯一**、kebab-case、2~128 字符；**首次发布后不要改** —— 改了在平台上就是另一个 skill |
 | `displayName` | `STR 资源树` | 对外展示名（可为中文）。**必须用 camelCase**：平台与 CLI 只认这个键，且为必填（源码 `_validate_metadata()` 缺失即报「SKILL.md 缺少 displayName」） |
-| `version` | `0.2.1` | 必须是合法 SemVer；技能包内容变化时升它 |
+| `version` | `0.3.0` | 必须是合法 SemVer；技能包内容变化时升它 |
 | `summary` | 见 SKILL.md | 一句话简介 |
 | `license` | `MIT` | 开源许可证 |
 
