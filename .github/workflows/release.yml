@@ -1,0 +1,199 @@
+name: release
+
+# 打 v* tag 即触发：先全量测试 → 多平台编译 → 打包 → 创建 GitHub Release。
+# 也可在 Actions 页手动 workflow_dispatch（需填 tag）。
+#
+# 注意：str-cli 通过 `include_str!("../../._schema/…")` 内嵌三份 Schema，
+# 编译期需要完整的仓库布局，因此 checkout 必须是整个仓库（不能只 checkout str-cli/）。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v0.1.0）"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: 测试（单元 + 集成，34 项）
+        working-directory: str-cli
+        run: cargo test --locked --all-targets
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64：原生编译
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Linux aarch64：ubuntu 上交叉编译，需装 GNU 链接器
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            apt: gcc-aarch64-linux-gnu
+            linker_var: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
+            linker: aarch64-linux-gnu-gcc
+          # macOS 两个架构都在 macos-latest 上编译：Xcode SDK 同时含两种 slice，
+          # 因此不依赖已退役的 macos-13（x86_64）runner
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Windows x86_64：原生编译（MSVC 工具链已随 runner 提供）
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: rustc --version
+
+      - name: 安装目标平台标准库
+        run: rustup target add ${{ matrix.target }}
+
+      - name: 准备交叉编译链接器
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+          echo "${{ matrix.linker_var }}=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - name: 编译 release
+        working-directory: str-cli
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: 上传二进制（unix）
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-${{ matrix.target }}
+          path: str-cli/target/${{ matrix.target }}/release/str
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传二进制（windows）
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-${{ matrix.target }}
+          path: str-cli/target/${{ matrix.target }}/release/str.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: package & release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      NOTES: |
+        本 release 的资产：
+
+        - `str-<tag>-<target>.tar.gz` / `.zip` —— 各平台 `str` 单二进制（无运行时依赖）
+        - `str-skill-<tag>.zip` —— AI Agent 技能包；归档内顶层为 `str-skill/`，
+          可在 CodeBuddy 设置页用「导入 Skill」导入，或解压到 `<workspace>/.codebuddy/skills/`
+        - `SHA256SUMS.txt` —— 上述文件的 SHA-256 校验和
+
+        安装：解压后把 `str` 放进 `PATH`；Agent 侧可直接运行 `str-skill/scripts/ensure-str.sh`
+        自动定位（必要时构建）二进制。
+
+        规范正文、三份 JSON Schema 与示例 bundle 见 GitHub 自动提供的源码归档
+        （Source code）中的 `STR-FORMAT-PROMPT.md`、`._schema/` 与 `examples/`。
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 打包（各平台归档 + skill zip + 校验和）
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # 1) 每个 target 一个归档；Windows 用 .zip，其余用 .tar.gz
+          shopt -s nullglob
+          for d in artifacts/str-*; do
+            [ -d "$d" ] || continue
+            target="${d#artifacts/str-}"
+            if [ -f "$d/str.exe" ]; then
+              cp "$d/str.exe" str.exe
+              zip -q "dist/str-${TAG}-${target}.zip" str.exe
+              rm -f str.exe
+            elif [ -f "$d/str" ]; then
+              cp "$d/str" str
+              chmod +x str
+              tar -czf "dist/str-${TAG}-${target}.tar.gz" str
+              rm -f str
+            else
+              echo "::error::$d 中既无 str 也无 str.exe"
+              exit 1
+            fi
+            echo "已打包 ${target}"
+          done
+
+          # 2) skill zip：归档内顶层必须是 str-skill/ —— 与 skill-creator 的
+          #    package_skill.py 输出结构一致，才能被「导入 Skill」直接识别
+          zip -r -q "dist/str-skill-${TAG}.zip" str-skill -x '*.DS_Store' -x '*/._*'
+
+          # 3) 校验和
+          ( cd dist && sha256sum ./*.tar.gz ./*.zip > SHA256SUMS.txt )
+
+          echo "--- dist ---"
+          ls -la dist
+
+      - name: 校验归档内容
+        run: |
+          set -euo pipefail
+          echo "--- skill zip 顶层（应为 str-skill/）---"
+          unzip -l "dist/str-skill-${TAG}.zip"
+          for f in dist/str-${TAG}-*.tar.gz; do
+            echo "--- ${f} ---"
+            tar -tzf "$f"
+          done
+
+      - name: 创建 / 更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，改为覆盖上传资产"
+            gh release upload "$TAG" dist/* --clobber
+          elif git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "tag $TAG 已存在，为它创建 release"
+            gh release create "$TAG" dist/* \
+              --title "STR $TAG" --generate-notes --notes "$NOTES"
+          else
+            echo "tag $TAG 不存在，从当前提交创建 tag 并发布"
+            gh release create "$TAG" dist/* \
+              --title "STR $TAG" --generate-notes --notes "$NOTES" \
+              --target "$GITHUB_SHA"
+          fi
