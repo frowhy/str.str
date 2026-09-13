@@ -9,9 +9,9 @@ name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 14
+revision = 15
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-13T21:14:35+00:00
+updated_at = 2026-09-13T21:30:52+00:00
 
 [policies]
 id_version = 7
@@ -68,8 +68,8 @@ sha256 = "d42e4f375da91c10f7b6cebd4ba8b118dc5977df1a280e12418ba782da669133"
 path = "VERSIONS.toml"
 role = "payload"
 media_type = "application/toml"
-size = 4390
-sha256 = "739675f6b8a33c225f9eb118cd396d4f1bcfd33345a7561137204e25912a8b4c"
+size = 4388
+sha256 = "0b9f599401a156ef36eeff6fb79818a11dec36bf0a08fae68cf80ac0f6d8c6bd"
 
 [[entries]]
 path = "examples"
