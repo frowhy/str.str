@@ -2,16 +2,16 @@
 # ROOT 的 [[entries]] 中 role = "node" 的条目才是「分支」；
 # 其余 role（payload / dir / bundle / cache）是 ROOT 的内容。
 str = 1
-spec = "1.9.0"
+spec = "1.10.0"
 kind = "root"
 id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
 name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 18
+revision = 20
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-13T22:42:24+00:00
+updated_at = 2026-09-13T23:07:32+00:00
 
 [policies]
 id_version = 7
@@ -31,8 +31,8 @@ at = 2026-09-14T01:26:52+08:00
 path = "CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 5786
-sha256 = "ffd1e3b4661eb84a64c1bfe116eea1672d365791d62d5ed1961684911d282b6c"
+size = 6719
+sha256 = "c7c840e02b4eede3f3a2c6aa310e7c619fd301957c0986d18c18ea5f270825e0"
 
 [[entries]]
 path = "LICENSE"
@@ -46,30 +46,30 @@ sha256 = "563e5a728846d6ccf046f433476fb851dc8f106995e23d364b8712ed39a4505c"
 path = "README.md"
 role = "payload"
 media_type = "text/markdown"
-size = 12863
-sha256 = "2f75965b18868f0b348e78951d74260f43564f7120f11f16cbc2f9b1c2bc54cd"
+size = 12866
+sha256 = "cc39e5787d31d76b411082d6fc043cfd54aeb99d900457c9b83ef372dd9bb0d5"
 
 [[entries]]
 path = "SPEC-CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 4066
-sha256 = "ae2e415afa6c198d234cf006ff19c7c3bd2c3819b79f485f5bbbe1679b4f151a"
+size = 4364
+sha256 = "47bd68d497c291ca36a8239bbd3405de6ddae90aa6883cc684d9b47d661051d6"
 
 [[entries]]
 path = "STR-FORMAT-PROMPT.md"
 role = "payload"
 title = "规范正文（唯一真源）"
 media_type = "text/markdown"
-size = 77582
-sha256 = "d42e4f375da91c10f7b6cebd4ba8b118dc5977df1a280e12418ba782da669133"
+size = 80130
+sha256 = "43187137fbbbf4403e0aaf74142a4bb19ad7cc72f6810813d25fb19880904b78"
 
 [[entries]]
 path = "VERSIONS.toml"
 role = "payload"
 media_type = "application/toml"
-size = 4388
-sha256 = "b77574168c90bce8d1345ff09c282cda818121832e3fc5c8bc37ad92b9d47e98"
+size = 4391
+sha256 = "b980e8d186df1b91cae0d9abbcd7366a4867500d95f27e9cf23c0a9e3a9b38fe"
 
 [[entries]]
 path = "examples"

@@ -1,6 +1,6 @@
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.9.0"
+spec = "1.10.0"
 kind = "branch"
 id = "01928f3a-7c4b-7101-8b01-000000000101"
 type = "crm.followup_log"

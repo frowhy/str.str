@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.9.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.3.0`）。
+> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.10.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.4.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -86,22 +86,25 @@ demo.str  2 nodes / 1 branches / 5 entries  depth=2
 
 - `--json` 输出 `{ "bundle", "errors": [{code, level, path, message}], "warnings": [...], "stats": {nodes, branches, entries, depth} }`。
 - `--strict` 把 warning 提升为 error（CI 用）。
-- `--fix-manifest` **真正写盘**：先执行一次完整的 `str sync <dir>`（非 dry-run），再校验，因此「有未登记文件」这类问题会被就地修好。仍建议单独跑 `sync` 以便看到变更清单。
+- `--fix-manifest` **真正写盘**：先执行一次完整的 `str sync [dir]`（非 dry-run），再校验，因此「有未登记文件」这类问题会被就地修好。仍建议单独跑 `sync` 以便看到变更清单。
 - **不检查书写顺序**：键序 / 表序 / `entries` 排序由 `str fmt --check` 兜底（§3.15），`validate` 只报错误码。
 
-### 3.3 `str tree [--depth N] [--show-refs] [--ascii] <DIR>`
+### 3.3 `str tree [--depth N] [--show-refs] [--show-entries] [--ascii] <DIR>`
 
 ```
-demo.str
+[0] 客户运营结构化数据束  (root)
 ├─ [1] 客户A  (crm.customer)
 │  ⇢ 关联: <target-uuid>  --related--
+│  · profile.json  (payload)  87B
 │  └─ [1] 跟进记录  (crm.followup_log)
 └─ [2] 标签体系  (crm.tag)
 ```
 
-- `[n]` 是同级序号，括号内是 `type`。
+- 根行与子行同样式：`[n] 标题  (type)`；根的标题取 `title` → `name` → 目录名，根无 `type` 时以档位 `root` 兜底；不输出首行 bundle 目录名。
+- `[n]` 是同级序号（根为 `[0]`），括号内是 `type`。
 - **子分支的呈现顺序 = 父级 `entries[]` 的 `(order, path)` 顺序**（与落盘顺序同源）：有 `order` 的按 `order` 升序在前，无 `order` 的在末尾按目录名/`path` 字典序；`entries[]` 里没登记的子目录附加在最后并标记。
 - 关联线**只在 `--show-refs` 时输出**，且挂在**源分支**下方（未解析的目标显示为 `<uuid>（未解析）`）。
+- 内容清单行**只在 `--show-entries` 时输出**：在分支行下方以 `· path  (role)  标题  字节数` 列出该分支 `entries[]`（保持落盘次序）；`role = "node"` / `"branch"` 的结构行由树本身呈现，不重复输出。
 - `--ascii`：改用纯 ASCII 制表符（`|-- ` / `` `-- `` / `|   `，关联线箭头 `->`），便于字体缺字或纯文本环境。
 
 ### 3.4 `str ls [--raw] <DIR> [UUID]`
@@ -210,9 +213,9 @@ hello
 - `fmt` **不修改** `revision` / `updated_at`。
 - 幂等：连续执行第二次必定 `0`。
 
-### 3.16 `str spec set <DIR> <VERSION> [--dry-run]`
+### 3.16 `str spec set <VERSION> [DIR] [--dry-run]`
 
-把**整份 bundle** 的 `._meta.spec`（规范版本声明）统一改写为 `<VERSION>`。v1.9.0 新增：在此之前 `spec` 是唯一没有 CLI 写入路径的字段，bump 规范版本只能手改 `._meta`。
+把**整份 bundle** 的 `._meta.spec`（规范版本声明）统一改写为 `<VERSION>`。v1.9.0 新增：在此之前 `spec` 是唯一没有 CLI 写入路径的字段，bump 规范版本只能手改 `._meta`。v1.10.0 起参数顺序为 `<VERSION> [DIR]`（可选位置参数不得排在必填位置参数之前）；沿用 v1.9.0 旧顺序的调用会在版本串校验处被拒并提示新顺序。`[DIR]` 缺省为当前工作目录。
 
 - **作用范围是整份 bundle**：`spec` 在 root / node / branch 三种档位里都是必填字段（§4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致 —— 文档就在说谎。子 bundle（目录名以 `.str` 结尾）是硬边界，不进入。
 - **只改写有差异的分支 ⇒ 幂等**：第二次执行输出 `全部 `._meta` 的 `spec` 已是 1.9.0（6 份）`，一个字节都不写（`revision` / `updated_at` 同样不动）。
@@ -223,9 +226,9 @@ hello
 - 每个被改写的分支都会 `revision + 1` 并刷新 `updated_at`，同时推进 `._cache/revisions.json` 基线。
 
 ```sh
-$S spec set demo.str 1.9.0                  # 幂等；已是目标版本时输出「已是 …（N 份）」
-$S spec set demo.str --dry-run v1.10.0      # 只看计划（`v` 前缀会被规整掉）
-$S spec set demo.str 9.9.9                  # exit 2：major 必须是 1
+$S spec set 1.9.0 demo.str                  # 幂等；已是目标版本时输出「已是 …（N 份）」
+$S spec set 1.10.0 --dry-run                # 只看计划（`v` 前缀会被规整掉）；[DIR] 缺省为当前目录
+$S spec set 9.9.9 demo.str                  # exit 2：major 必须是 1
 ```
 
 ### 3.17 `str norm [--out <PATH|->] <DIR> [UUID]`

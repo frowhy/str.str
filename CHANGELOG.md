@@ -17,7 +17,8 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 |
 | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.9.0 | 0.3.0 | 0.3.0 |
+| 工作区（未发布） | — | 1.10.0 | 0.4.0 | 0.3.1 |
+| [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
 | [`v0.1.0`](https://github.com/frowhy/str.str/releases/tag/v0.1.0) | 2026-09-14 | 1.7.0 | 0.1.0 | 0.1.0 |
@@ -27,7 +28,23 @@
 
 ---
 
-## [Unreleased] — 目标 tag `v0.3.0`
+## [Unreleased] — 目标 tag `v0.4.0`
+
+### 变更
+
+- **规范 1.9.0 → 1.10.0**：§9 全部命令的 `<dir>` 统一放宽为 `[dir]`（省略即当前工作目录；
+  `init` 缺省以当前路径为基准目标）—— 与 v1.9.0 的 `[uuid]` 缺省 ROOT 同构，属纯放宽。
+  连带 `spec set` 签名调整为 `<VERSION> [dir]`。详见 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
+- **CLI 0.3.0 → 0.4.0**：`[dir]` 缺省化 + `spec set` 参数顺序调整。详见
+  [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.3.0 → 0.3.1**：命令索引补 `[dir]` 缺省说明，`--version` 示例同步到 0.4.0。
+- `release.yml` 的 `workflow_dispatch` 默认 tag 更新为 `v0.4.0`。
+
+---
+
+## [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) — 2026-09-14
+
+规范 1.9.0 · CLI 0.3.0 · 技能包 0.3.0
 
 ### 新增
 
@@ -47,7 +64,7 @@
   并新增 `spec` 的 CLI 写入路径 —— 旧调用全部仍合法，属纯放宽。详见 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
 - **CLI 0.2.0 → 0.3.0**：0.2.0 已被 crates.io 占用且版本号不可复用，工作区内容必须换号发布
   （否则 `publish.yml` 会因「版本已存在」而静默跳过）。详见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
-- **技能包 → 0.2.1**：同步规范 v1.9.0 的文档与命令面，并声明依赖 CLI >= 0.3.0。
+- **技能包 → 0.3.0**：always-on 触发 + 触发面扩大到一切文件写入，并声明依赖 CLI >= 0.3.0。
 - `release.yml` 的 `workflow_dispatch` 默认 tag 由 `v0.1.0` 更正为 `v0.3.0`（此前长期滞后）。
 
 ### 修复

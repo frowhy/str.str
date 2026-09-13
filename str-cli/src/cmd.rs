@@ -223,12 +223,17 @@ pub fn validate(dir: &Path, strict: bool, json: bool, fix_manifest: bool) -> Res
 // ─────────────────────────── tree ───────────────────────────
 
 /// 渲染分支树（含 `refs` 关联线）。
-pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool, ascii: bool) -> Result<()> {
+pub fn tree(
+    dir: &Path,
+    max_depth: Option<usize>,
+    show_refs: bool,
+    show_entries: bool,
+    ascii: bool,
+) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    println!("{}", bundle.name());
     let Some(ri) = scan.root_index else {
-        println!("  （缺少 `._meta`，无法渲染）");
+        println!("（缺少 `._meta`，无法渲染）");
         return Ok(());
     };
     // 根节点与子节点同样式：`[0] 标题  (type)`；根无 `type` 时以档位 `root` 兜底。
@@ -249,8 +254,31 @@ pub fn tree(dir: &Path, max_depth: Option<usize>, show_refs: bool, ascii: bool) 
         }
         None => println!("[0] {}  ! 解析失败", bundle.name()),
     }
-    render_children(&scan, ri, "", max_depth, show_refs, ascii);
+    if show_entries {
+        render_entries(&scan, ri, "  ");
+    }
+    render_children(&scan, ri, "", max_depth, show_refs, show_entries, ascii);
     Ok(())
+}
+
+/// 渲染某分支的内容清单（`entries[]`，保持落盘次序；`node` / `branch` 结构行由树本身呈现，跳过）。
+fn render_entries(scan: &Scan, idx: usize, prefix: &str) {
+    let Some(meta) = scan.visits[idx].meta.as_ref() else {
+        return;
+    };
+    for e in &meta.entries {
+        if e.role == "node" || e.role == "branch" {
+            continue;
+        }
+        let mut line = format!("{prefix}· {}  ({})", e.path, e.role);
+        if let Some(t) = &e.title {
+            line.push_str(&format!("  {t}"));
+        }
+        if let Some(s) = e.size {
+            line.push_str(&format!("  {s}B"));
+        }
+        println!("{line}");
+    }
 }
 
 /// 树形符号：`(false)` 为 Unicode 制表符，`(true)` 为纯 ASCII（`--ascii`）。
@@ -293,6 +321,7 @@ fn render_children(
     prefix: &str,
     max_depth: Option<usize>,
     show_refs: bool,
+    show_entries: bool,
     ascii: bool,
 ) {
     let Some(meta) = scan.visits[idx].meta.as_ref() else {
@@ -329,9 +358,12 @@ fn render_children(
             line.push_str("  ! 解析失败");
         }
         println!("{line}");
+        let next_prefix = format!("{prefix}{}", if last { blank } else { pipe });
+        if show_entries {
+            render_entries(scan, *ci, &next_prefix);
+        }
         if max_depth.map(|d| v.depth < d).unwrap_or(true) {
-            let next_prefix = format!("{prefix}{}", if last { blank } else { pipe });
-            render_children(scan, *ci, &next_prefix, max_depth, show_refs, ascii);
+            render_children(scan, *ci, &next_prefix, max_depth, show_refs, show_entries, ascii);
         }
     }
 }
@@ -899,7 +931,8 @@ fn normalize_spec_version(raw: &str) -> Result<String> {
         && parts[2].parse::<u64>().is_ok();
     if !ok {
         return Err(Error::BadArg(format!(
-            "`spec` 版本串 {raw:?} 非法：须形如 `1.<minor>.<patch>`（`str` 主版本固定为 `1`）"
+            "`spec` 版本串 {raw:?} 非法：须形如 `1.<minor>.<patch>`（`str` 主版本固定为 `1`）。\
+             注意自规范 v1.10.0 起 `spec set` 的参数顺序为 `<VERSION> [dir]`（如 `str spec set 1.10.0`）"
         )));
     }
     Ok(v)

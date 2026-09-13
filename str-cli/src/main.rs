@@ -22,8 +22,8 @@ struct Cli {
 enum Cmd {
     /// 创建新的 .str bundle（生成 ROOT `._meta` 与 `._schema/`）
     Init {
-        /// 目标目录（未以 .str 结尾时自动追加）
-        dir: PathBuf,
+        /// 目标目录（缺省为当前路径；未以 .str 结尾时自动追加 `.str`）
+        dir: Option<PathBuf>,
         /// bundle 短名
         #[arg(long)]
         name: Option<String>,
@@ -39,7 +39,8 @@ enum Cmd {
     },
     /// 全量校验（规范第 6 章全部错误码）
     Validate {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 把告警也视为失败（CI 用）
         #[arg(long)]
@@ -53,7 +54,8 @@ enum Cmd {
     },
     /// 渲染分支树（含跨枝关联线）
     Tree {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 最大渲染深度
         #[arg(long)]
@@ -61,13 +63,17 @@ enum Cmd {
         /// 显示 `refs` 关联线
         #[arg(long)]
         show_refs: bool,
+        /// 显示各分支的内容清单（`entries[]`，子分支行除外）
+        #[arg(long)]
+        show_entries: bool,
         /// 用纯 ASCII 制表符渲染（终端字体缺字时用）
         #[arg(long)]
         ascii: bool,
     },
     /// 列出某分支的内容清单
     Ls {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -80,7 +86,8 @@ enum Cmd {
     },
     /// 打印某分支的 `._meta`（归一化 JSON）
     Show {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -125,7 +132,8 @@ enum Cmd {
     },
     /// 用磁盘实际状态修正 `entries` 与指纹
     Sync {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 只显示将要发生的变更
         #[arg(long)]
@@ -133,7 +141,8 @@ enum Cmd {
     },
     /// 按规范键序 / 表序重写 `._meta`（保注释）
     Fmt {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 只检查是否需要规范化
         #[arg(long)]
@@ -144,7 +153,8 @@ enum Cmd {
     },
     /// 输出归一化 JSON（供外部 Schema 工具 / AI 使用）
     Norm {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -154,7 +164,8 @@ enum Cmd {
     },
     /// 生成供 AI 使用的上下文片段
     Context {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -167,7 +178,8 @@ enum Cmd {
     },
     /// 导出为单一文件（只读、派生）
     Export {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 输出格式：json / toml
         #[arg(long, default_value = "json")]
@@ -181,7 +193,8 @@ enum Cmd {
     },
     /// 平台适配：macOS 设置 bundle 位并让 `._meta` 可见
     Reveal {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
     },
     /// 列出全部错误码
@@ -192,7 +205,8 @@ enum Cmd {
 enum NodeCmd {
     /// 新增独立节点（深度 1）
     Add {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 实体类型，如 crm.customer
         #[arg(long = "type")]
@@ -210,7 +224,8 @@ enum NodeCmd {
 enum BranchCmd {
     /// 在指定分支下新增关联分支
     Add {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 锚点分支 id（缺省为 ROOT；但 ROOT 的直接子分支应改用 `node add`）
         anchor: Option<String>,
@@ -229,7 +244,8 @@ enum BranchCmd {
     },
     /// 删除关联分支（含全部下级）
     Rm {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT；ROOT 不可删除）
         uuid: Option<String>,
@@ -246,7 +262,8 @@ enum BranchCmd {
 enum RefCmd {
     /// 新增跨枝关联线
     Add {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 源分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -265,7 +282,8 @@ enum RefCmd {
     },
     /// 删除关联线
     Rm {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 关联线 id（规范 §9 的位置参数形式）
         ref_id: Option<String>,
@@ -282,7 +300,8 @@ enum RefCmd {
 enum MetaCmd {
     /// 设置分支自身的元信息字段（空串表示移除该字段）
     Set {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -308,7 +327,8 @@ enum MetaCmd {
 enum EntryCmd {
     /// 设置某分支 `entries[]` 中一条目的字段（空串表示移除该字段）
     Set {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 条目所在分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -337,7 +357,8 @@ enum EntryCmd {
 enum AuthorCmd {
     /// 新增 / 覆盖一条 `[[authors]]`（按 id 去重）
     Add {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -356,7 +377,8 @@ enum AuthorCmd {
     },
     /// 按 id 删除一条 `[[authors]]`
     Rm {
-        /// bundle 目录
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
         dir: PathBuf,
         /// 分支 id（缺省为 ROOT）
         uuid: Option<String>,
@@ -370,10 +392,11 @@ enum AuthorCmd {
 enum SpecCmd {
     /// 把整份 bundle 的 `spec` 统一改写为目标版本（幂等；从此改 `spec` 不再需要手改 `._meta`）
     Set {
-        /// bundle 目录
-        dir: PathBuf,
-        /// 目标规范版本，如 1.9.0（`str` 主版本固定为 1；可用 `v` 前缀）
+        /// 目标规范版本，如 1.10.0（`str` 主版本固定为 1；可用 `v` 前缀）
         version: String,
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
         /// 只显示将要发生的变更
         #[arg(long)]
         dry_run: bool,
@@ -389,6 +412,10 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             summary,
             id_version,
         } => {
+            // `[dir]` 缺省为当前路径：仍按「未以 `.str` 结尾则追加」定名，
+            // 故在 `foo/` 里执行 `str init` 创建的是 `foo.str`（而非在 `.` 里生成 `..str`）。
+            let dir =
+                dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             cmd::init(&dir, name, title, summary, id_version)?;
             Ok(0)
         }
@@ -402,9 +429,10 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             dir,
             depth,
             show_refs,
+            show_entries,
             ascii,
         } => {
-            cmd::tree(&dir, depth, show_refs, ascii)?;
+            cmd::tree(&dir, depth, show_refs, show_entries, ascii)?;
             Ok(0)
         }
         Cmd::Ls {
