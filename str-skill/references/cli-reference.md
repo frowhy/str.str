@@ -10,7 +10,8 @@
 
 | 方式 | 命令 / 位置 | 产物 |
 | --- | --- | --- |
-| 装到 `PATH` | `cargo install --path str-cli` | `~/.cargo/bin/str` |
+| 装到 `PATH`（crates.io） | `cargo install str-format` | `~/.cargo/bin/str` |
+| 装到 `PATH`（仓库源码） | `cargo install --path str-cli` | `~/.cargo/bin/str` |
 | 仅在仓库内使用 | `cd str-cli && cargo build --release` | `str-cli/target/release/str` |
 | 直接下预编译二进制 | GitHub Releases（5 平台） | 单文件 `str` / `str.exe` |
 | 交给 Agent 自动获取 | `STR="$(sh str-skill/scripts/ensure-str.sh)"` | 打印可执行文件路径 |

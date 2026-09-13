@@ -3,6 +3,9 @@ name: release
 # 打 v* tag 即触发：先全量测试 → 多平台编译 → 打包 → 创建 GitHub Release。
 # 也可在 Actions 页手动 workflow_dispatch（需填 tag）。
 #
+# crates.io 的发布由 publish.yml 负责（同一个 v* tag 也会触发它）；两者互不依赖，
+# 可各自重跑——crates.io 侧出问题不应阻塞 GitHub Release，反之亦然。
+#
 # 注意：str-cli 通过 `include_str!("../../._schema/…")` 内嵌三份 Schema，
 # 编译期需要完整的仓库布局，因此 checkout 必须是整个仓库（不能只 checkout str-cli/）。
 

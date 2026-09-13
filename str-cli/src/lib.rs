@@ -1,6 +1,7 @@
 //! # STR 结构化树资源格式（`.str`）
 //!
-//! 规范见仓库根目录 `STR-FORMAT-PROMPT.md`（v1.5.0）。
+//! 规范见仓库根目录 `STR-FORMAT-PROMPT.md`（唯一真源）；
+//! 本实现对应的规范版本见常量 [`SPEC_VERSION`]。
 //!
 //! 本 crate 提供：
 //! - `meta`：`._meta`（TOML）的解析、**归一化**（TOML → 规范 JSON，键序/表序固定）与**保注释写回**；
@@ -27,19 +28,21 @@ pub const STR_MAJOR: i64 = 1;
 pub const SPEC_VERSION: &str = "1.8.0";
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。
 ///
-/// 注意：Schema 属**格式规范资产**，位于**仓库根** `schema/`（与 `examples/` 同级），
-/// 因此这里用 `../../schema/` 引用 —— 代价是 `str-cli/` 不能脱离仓库根单独构建。
+/// Schema 属**格式规范资产**，唯一真源位于**仓库根** `._schema/`（与 `examples/` 同级）。
+/// 而 crates.io 只打包 crate 目录内的文件、`include_str!` 也无法引用包外路径，
+/// 因此 crate 内 `schema/` 保留一份**派生副本**：由 `bash scripts/sync-schema.sh`
+/// 生成，并由 `tests/schema_sync.rs` 守卫其与真源逐字节一致（漂移即测试失败）。
 pub const EMBEDDED_SCHEMAS: &[(&str, &str)] = &[
     (
         "root-meta.schema.json",
-        include_str!("../../._schema/root-meta.schema.json"),
+        include_str!("../schema/root-meta.schema.json"),
     ),
     (
         "node-meta.schema.json",
-        include_str!("../../._schema/node-meta.schema.json"),
+        include_str!("../schema/node-meta.schema.json"),
     ),
     (
         "branch-meta.schema.json",
-        include_str!("../../._schema/branch-meta.schema.json"),
+        include_str!("../schema/branch-meta.schema.json"),
     ),
 ];

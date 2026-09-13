@@ -2,8 +2,25 @@
 name = "str-format"
 version = "0.1.0"
 edition = "2024"
+# MSRV：edition 2024 下限为 1.85；实测依赖中最高者（time / icu_*）要求 1.88，
+# 故取二者较大值。发布到 crates.io 后 `cargo install` 会在旧工具链上给出清晰报错。
+rust-version = "1.88"
 description = "STR 结构化树资源格式（.str）的读写库、校验器与 CLI"
 license = "MIT"
+
+# ── crates.io 清单元数据（发布必需 / 强烈建议）──────────────────────
+repository = "https://github.com/frowhy/str.str"
+homepage = "https://github.com/frowhy/str.str"
+documentation = "https://docs.rs/str-format"
+readme = "README.md"
+keywords = ["str", "structured-data", "directory-bundle", "knowledge-base", "cli"]
+categories = [
+  "command-line-utilities",
+  "data-structures",
+  "filesystem",
+  "development-tools",
+  "encoding",
+]
 
 [[bin]]
 name = "str"

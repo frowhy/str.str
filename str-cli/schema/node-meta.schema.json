@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://str-format.local/schema/v1/node-meta.schema.json",
+  "title": "STR node `._meta`（独立节点，深度 1）",
+  "description": "对应 STR 规范 v1.8.0 第 4 章。校验对象是 `._meta`（TOML）归一化后的规范 JSON（见规范 4.1 / 4.9）。",
+  "type": "object",
+  "required": ["str", "spec", "kind", "id", "revision", "created_at", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "str": { "const": 1 },
+    "spec": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
+    "kind": { "const": "node" },
+    "id": { "type": "string", "format": "uuid" },
+    "name": { "type": "string", "minLength": 1 },
+    "type": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 400 },
+    "tags": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "revision": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "schema": { "type": "string", "minLength": 1 },
+    "authors": { "type": "array", "items": { "$ref": "#/$defs/author" } },
+    "refs": { "type": "array", "items": { "$ref": "#/$defs/ref" } },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } },
+    "ext": { "type": "object" }
+  },
+  "$defs": {
+    "author": {
+      "type": "object",
+      "required": ["id", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "editor", "viewer", "agent"] },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "required": ["id", "target", "rel"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "target": { "type": "string", "format": "uuid" },
+        "rel": { "type": "string", "pattern": "^(related|depends_on|instance_of|derived_from|ref|x-[a-z0-9-]+)$" },
+        "title": { "type": "string" },
+        "order": { "type": "integer", "minimum": 0 },
+        "note": { "type": "string" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["path", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "pattern": "^[^/]+$" },
+        "role": { "type": "string", "enum": ["branch", "payload", "asset", "dir", "bundle", "schema", "cache", "other"] },
+        "id": { "type": "string", "format": "uuid" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "order": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "count": { "type": "integer", "minimum": 0 },
+        "schema": { "type": "string" },
+        "optional": { "type": "boolean" },
+        "note": { "type": "string" }
+      },
+      "allOf": [
+        { "if": { "properties": { "role": { "const": "branch" } } }, "then": { "required": ["id"] } }
+      ]
+    }
+  }
+}

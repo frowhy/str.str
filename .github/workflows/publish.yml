@@ -1,0 +1,159 @@
+name: publish-crates
+
+# 把 `str-format` 发布到 crates.io。
+#
+# 触发：
+#   - push tag `v*`         —— 与 release.yml 同一个 tag 触发；两者互相独立，
+#                              可各自重跑（crates.io 挂了不影响 GitHub Release）。
+#   - workflow_dispatch     —— 手动发布 / 演练；`dry_run` 默认 true，
+#                              必须显式关掉才会真正上传。
+#
+# 鉴权（二选一，workflow 自动判定）：
+#   A. 仓库 Secret `CARGO_REGISTRY_TOKEN`
+#      —— **首次发布必须走这条**：crate 尚不存在时无法配置可信发布。
+#   B. crates.io 可信发布（Trusted Publishing / OIDC）
+#      —— crate 存在后在 crates.io → 该 crate → Settings → Trusted Publishing 填：
+#         repository owner = frowhy，repository name = str.str，
+#         workflow filename = publish.yml（environment 留空）。
+#         之后即可删除 Secret，改用 OIDC 短期令牌（作业结束自动吊销）。
+#
+# ⚠ crates.io 的发布**不可撤销**（只能 yank，且版本号不可复用）：
+#   正式发布一律由 tag 触发；手动触发默认只做 `--dry-run`。
+#
+# 注意：`str-format` 通过 `include_str!("../schema/…")` 内嵌三份 Schema，
+# 而 crates.io 只打包 crate 目录内的文件 —— 故 crate 内 `schema/` 是仓库根
+# `._schema/` 的派生副本，由 `bash scripts/sync-schema.sh` 生成、
+# 由 `tests/schema_sync.rs` 守卫一致性（见下方「打包内容自检」步骤）。
+#
+# 本地演练（不上传）：
+#   cargo publish --dry-run --allow-dirty --registry crates-io
+# —— 本机 ~/.cargo/config.toml 把 crates-io 替换成了镜像源，故本地须显式
+#    `--registry crates-io`；CI runner 无该配置，工作流内不需要此参数。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "仅打包校验（cargo publish --dry-run），不上传 crates.io"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # 可信发布（OIDC）必需；用 Secret 时不会用到
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    env:
+      # 空字符串 = 未配置该 Secret → 自动改走 OIDC 可信发布
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: 读取 / 校验版本
+        id: ver
+        run: |
+          set -euo pipefail
+          ver="$(cargo metadata --no-deps --format-version 1 --manifest-path str-cli/Cargo.toml \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "str-format"))')"
+          echo "待发布版本：str-format ${ver}"
+          # tag 触发时：tag 与 Cargo.toml 必须一致，否则发出去的就是错版本
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "${tag}" != "${ver}" ]; then
+              echo "::error::tag v${tag} 与 str-cli/Cargo.toml 的 version ${ver} 不一致；请先 bump version 再打 tag"
+              exit 1
+            fi
+          fi
+          echo "version=${ver}" >> "${GITHUB_OUTPUT}"
+
+      - name: 测试（含 Schema 副本一致性守卫）
+        working-directory: str-cli
+        run: cargo test --locked --all-targets
+
+      - name: 打包内容自检（Schema 必须随包发出）
+        working-directory: str-cli
+        run: |
+          set -euo pipefail
+          cargo package --list > /tmp/pkg-list.txt
+          echo "--- cargo package --list ---"
+          cat /tmp/pkg-list.txt
+          for f in schema/root-meta.schema.json schema/node-meta.schema.json schema/branch-meta.schema.json; do
+            if ! grep -qx "${f}" /tmp/pkg-list.txt; then
+              echo "::error::发布包内缺少 ${f} —— crate 内 Schema 副本缺失或未入库，请运行 bash scripts/sync-schema.sh"
+              exit 1
+            fi
+          done
+
+      - name: 查询该版本是否已发布
+        id: exists
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.version }}"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -A 'str.str release bot' \
+            "https://crates.io/api/v1/crates/str-format/${ver}")"
+          echo "crates.io 查询 HTTP ${code}"
+          if [ "${code}" = "200" ]; then
+            echo "::notice::str-format ${ver} 已存在于 crates.io，跳过发布（版本号不可覆盖）"
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # 只在没有长期 Token 时走 OIDC；换取失败不中断，交由下一步给出明确指引
+      - name: 获取 crates.io 令牌（可信发布 / OIDC）
+        id: auth
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        continue-on-error: true
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: 发布到 crates.io
+        if: steps.exists.outputs.skip != 'true'
+        working-directory: str-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || env.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "鉴权：已取得 crates.io 令牌"
+          else
+            echo "::error::没有任何 crates.io 凭证。二选一：(A) 仓库 Settings → Secrets and variables → Actions 新增 CARGO_REGISTRY_TOKEN；(B) 在 crates.io 为 str-format 配置 Trusted Publishing（owner=frowhy, repo=str.str, workflow=publish.yml）"
+            exit 1
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "模式：dry-run（不会上传）"
+            cargo publish --locked --dry-run
+          else
+            echo "模式：正式发布"
+            cargo publish --locked
+          fi
+
+      - name: 结果摘要
+        if: always()
+        run: |
+          {
+            echo "### crates.io 发布"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 版本 | \`str-format ${{ steps.ver.outputs.version }}\` |"
+            echo "| 触发 | \`${{ github.ref_name }}\` / \`${{ inputs.dry_run == true && 'dry-run' || 'publish' }}\` |"
+            echo "| 是否跳过 | \`${{ steps.exists.outputs.skip || 'false' }}\` |"
+            echo ""
+            echo "https://crates.io/crates/str-format"
+          } >> "${GITHUB_STEP_SUMMARY}"

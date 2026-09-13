@@ -1,5 +1,9 @@
 # STR — AI 时代的结构化资源标准
 
+[![crates.io](https://img.shields.io/crates/v/str-format.svg)](https://crates.io/crates/str-format)
+[![docs.rs](https://img.shields.io/docsrs/str-format.svg)](https://docs.rs/str-format)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **STR（Structured Tree Resource，结构化树资源）** 是一种开放的文件格式与工具链：
 用**目录树**存储一切结构化资源，用**思维导图语义**组织它们，让**人类与 AI 代理**
 在同一份资产上安全地读写、协作与版本控制。
@@ -125,7 +129,10 @@ str context 项目.str <uuid> --depth 2 --budget 8k   # 裁剪出可直接拼接
 ## 快速开始
 
 ```sh
-# 安装 CLI
+# 安装 CLI：crates.io 发行版（包名 str-format，可执行文件名 str）
+cargo install str-format
+
+# 或从本仓库源码安装
 cargo install --path str-cli
 
 # 创建 bundle
@@ -167,10 +174,11 @@ str validate .
 | 位置 | 说明 |
 | --- | --- |
 | `STR-FORMAT-PROMPT.md` | 格式规范（唯一真源，v1.8.0） |
-| `._schema/*.json` | 三档 JSON Schema（2020-12），格式规范性产物 |
+| `._schema/*.json` | 三档 JSON Schema（2020-12），格式规范性产物（Schema 的唯一真源） |
 | `examples/客户运营.str/` | 官方示例 bundle（`str validate --strict` 零错误） |
-| `scripts/build-example.sh` | 幂等重建示例 bundle |
-| `str-cli/` | Rust 参考实现（`str` 二进制） |
+| `scripts/*.sh` | `build-example.sh` 幂等重建示例 bundle；`sync-schema.sh` 同步 Schema 派生副本 |
+| `str-cli/` | Rust 参考实现（`str` 二进制；crates.io 包名 `str-format`） |
+| `str-cli/schema/*.json` | 三份 Schema 的 **crate 内派生副本**（crates.io 只打包 crate 目录内的文件，故为发版必需）；由 `sync-schema.sh` 生成、`tests/schema_sync.rs` 守卫与真源逐字节一致 |
 | `str-skill/` | Agent 技能包（含 CLI 安装器与下载校验） |
 
 > 自举（dogfooding）：本仓库根目录自身就是一个 `.str` bundle，

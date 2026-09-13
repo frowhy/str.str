@@ -23,10 +23,11 @@ str-skill/
 
 ### 1. 安装 `str` CLI
 
-在 STR 仓库根目录任选其一：
+任选其一：
 
 ```sh
-cargo install --path str-cli      # 装进 ~/.cargo/bin，全局可用
+cargo install str-format          # 从 crates.io 安装（包名 str-format，可执行文件 str）
+cargo install --path str-cli      # 或从 STR 仓库源码安装，同样装进 ~/.cargo/bin
 # 或仅在仓库内使用
 cd str-cli && cargo build --release   # 产物：str-cli/target/release/str
 ```
