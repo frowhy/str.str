@@ -7,13 +7,25 @@
 
 `str` 是单二进制，无运行时依赖。
 
-| 方式 | 命令 | 产物 |
+| 方式 | 命令 / 位置 | 产物 |
 | --- | --- | --- |
-| 安装到 `PATH` | `cargo install --path str-cli` | `~/.cargo/bin/str` |
+| 装到 `PATH` | `cargo install --path str-cli` | `~/.cargo/bin/str` |
 | 仅在仓库内使用 | `cd str-cli && cargo build --release` | `str-cli/target/release/str` |
-| 交给 Agent 自动解析 | `STR="$(sh str-skill/scripts/ensure-str.sh)"` | 打印可执行文件路径 |
+| 直接下预编译二进制 | GitHub Releases（5 平台） | 单文件 `str` / `str.exe` |
+| 交给 Agent 自动获取 | `STR="$(sh str-skill/scripts/ensure-str.sh)"` | 打印可执行文件路径 |
 
-`ensure-str.sh` 依次尝试：`$STR_BIN` → `PATH` 上的 `str` → `$STR_REPO` → 从脚本目录与当前目录向上查找 `str-cli/target/release/str` → 发现 `str-cli/Cargo.toml` 就 `cargo build --release`。全部失败则打印指引并**非零退出**。
+`ensure-str.sh` 依次尝试，命中即返回：① `$STR_BIN` → ② `PATH` 上的 `str`（须 `--version` 输出 `str x.y.z`，否则继续）→ ③ `$STR_REPO` → ④ 从脚本目录、再从当前目录向上查找源码产物（发现 `str-cli/Cargo.toml` 即 `cargo build --release`）→ ⑤ **从 GitHub Releases 下载当前平台的预编译二进制**。第 ⑤ 步细节：
+
+- **平台 → 资产名**（与 `.github/workflows/release.yml` 的矩阵一致）：
+  `Darwin/arm64` → `aarch64-apple-darwin`；`Darwin/x86_64` → `x86_64-apple-darwin`；
+  `Linux/aarch64` → `aarch64-unknown-linux-gnu`；`Linux/x86_64` → `x86_64-unknown-linux-gnu`；
+  `MINGW*/MSYS*/CYGWIN*/Windows_NT` + `x86_64` → `x86_64-pc-windows-msvc`（资产为 `.zip`，二进制名 `str.exe`）。其余平台跳过下载。
+- **版本**：`STR_VERSION`，默认 `latest`（经 GitHub API 解析 tag；API 不可用时**回退到脚本内置的默认版本**并告警，因此断网不会让版本解析失败）。
+- **完整性（关键）**：**必须**取到同一 release 的 `SHA256SUMS.txt`，且其中含本资产条目，逐字节比对通过才使用；取不到校验和 / 缺条目 / 不匹配，一律**中止**且**不写入缓存** —— 不存在「未校验就用」的降级分支。
+- **缓存**：`${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/<tag>/<target>/`，命中即复用、不重复下载。
+- **其它变量**：`STR_RELEASE_REPO`（fork 时改 `owner/repo`）、`STR_DOWNLOAD_BASE`（镜像 / 网络受限）、`STR_CACHE_DIR`、`STR_NO_DOWNLOAD=1`（离线，只走本地查找）。
+
+全部失败则打印安装指引并**非零退出**（退出码 1）；成功时 stdout **只**输出一行可执行文件路径，诊断一律走 stderr。
 
 ## 2. 全局约定
 

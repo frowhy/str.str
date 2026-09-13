@@ -31,7 +31,16 @@ cargo install --path str-cli      # 装进 ~/.cargo/bin，全局可用
 cd str-cli && cargo build --release   # 产物：str-cli/target/release/str
 ```
 
-Agent 不必自己判断走哪条路：`scripts/ensure-str.sh` 会依次尝试 `$STR_BIN` → `PATH` 上的 `str` → 向上查找 `str-cli/target/release/str` → 找到源码就用 `cargo build --release` 构建，全部失败则打印安装指引并**非零退出**（绝不静默降级为手改 `._meta`）。
+Agent 不必自己判断走哪条路。`scripts/ensure-str.sh` 依次尝试：`$STR_BIN` → `PATH` 上的 `str` → `$STR_REPO` → 从脚本目录 / 当前目录向上查找源码产物（发现 `str-cli/Cargo.toml` 就 `cargo build --release`）→ **从 GitHub Releases 自动下载当前平台的预编译二进制**。
+
+第 5 步（自动下载）的细节：
+
+- 自动识别平台并映射到 release 资产名：`Darwin/arm64`、`Darwin/x86_64`、`Linux/aarch64`、`Linux/x86_64`、`Windows/x86_64`（`.zip`）共 5 种。
+- **下载后必须通过该 release 的 `SHA256SUMS.txt` 逐字节校验**；校验和取不到、缺条目或不匹配一律**中止**，不做「未校验就用」的降级。
+- 结果缓存到 `${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/<tag>/<target>/`，命中即复用，不重复下载。
+- 可用环境变量：`STR_VERSION`（版本 tag，默认 `latest`）、`STR_RELEASE_REPO`（fork 时改 `owner/repo`）、`STR_DOWNLOAD_BASE`（网络受限时指向镜像）、`STR_CACHE_DIR`、`STR_NO_DOWNLOAD=1`（禁用下载，只走本地查找）。
+
+全部失败则打印安装指引并**非零退出**（绝不静默降级为手改 `._meta`）。
 
 ### 2. 把 skill 装到你的 Agent
 

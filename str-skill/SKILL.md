@@ -41,7 +41,18 @@ STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
 "$STR" --version        # must print: str 0.1.0
 ```
 
-`ensure-str.sh` checks `$STR_BIN`, then `str` on `PATH`, then walks up from its own directory and from the CWD looking for `str-cli/target/release/str`, builds it with `cargo build --release` when it finds `str-cli/Cargo.toml`, and otherwise prints installation instructions. It never falls back to editing files.
+`ensure-str.sh` resolves the CLI in this order and stops at the first hit:
+
+1. `$STR_BIN` — an explicit path you supply.
+2. `str` on `PATH` — accepted only when `--version` prints `str x.y.z`.
+3. `$STR_REPO` — a source checkout; builds it with `cargo build --release` when needed.
+4. walk up from the script's own directory, then from the CWD, looking for `str-cli/target/release/str` (building from source when it finds `str-cli/Cargo.toml`).
+5. **download the prebuilt binary for this platform from GitHub Releases** — detects OS/arch, fetches `str-<tag>-<target>.tar.gz` (`.zip` on Windows), **verifies it against that release's `SHA256SUMS.txt` and refuses to use it when the checksum is absent or does not match**, then caches it at `${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/<tag>/<target>/str`. Later calls reuse the cache without downloading again.
+6. otherwise print installation instructions and exit non-zero.
+
+Knobs: `STR_VERSION` (tag, default `latest`), `STR_RELEASE_REPO` (`owner/repo`, for forks), `STR_DOWNLOAD_BASE` (mirror, useful when GitHub is unreachable), `STR_CACHE_DIR`, `STR_NO_DOWNLOAD=1` (offline — local lookup only).
+
+It never falls back to editing files. If it cannot obtain the CLI it fails, and that failure is the correct outcome: report it instead of hand-editing `._meta`.
 
 ## Read path (progressive disclosure)
 
