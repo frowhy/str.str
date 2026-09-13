@@ -67,6 +67,12 @@ jobs:
           rustc --version
           cargo --version
 
+      # 版本一致性门禁：spec / cli / skill / release tag 必须与 VERSIONS.toml 一致。
+      # 与下面的「tag == Cargo.toml version」是两道互补的闸：后者防「tag 与 crate 错位」，
+      # 本步防「crate 与规范 / 技能包 / 真源错位」。
+      - name: 版本一致性门禁
+        run: bash scripts/check-versions.sh
+
       - name: 读取 / 校验版本
         id: ver
         run: |

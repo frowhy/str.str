@@ -25,7 +25,7 @@ pub mod validate;
 /// 本实现对应的 `str` 格式主版本。
 pub const STR_MAJOR: i64 = 1;
 /// 本实现对应的规范版本。
-pub const SPEC_VERSION: &str = "1.8.0";
+pub const SPEC_VERSION: &str = "1.9.0";
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。
 ///
 /// Schema 属**格式规范资产**，唯一真源位于**仓库根** `._schema/`（与 `examples/` 同级）。

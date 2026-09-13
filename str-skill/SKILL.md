@@ -1,6 +1,11 @@
 ---
 name: str-skill
+version: 0.2.1
 description: This skill should be used whenever a STR bundle is involved - any directory whose name ends with .str, any ._meta file, or any request to create, organize, store, query, or extract structured resources (CRM records, documents, datasets, notes, assets) as a tree. It also applies whenever the str CLI is present or the user mentions STR. It mandates that every bundle read and write goes through the str CLI instead of hand-editing ._meta or scanning directories by hand.
+slug: str-skill
+displayName: STR 资源树
+summary: 用目录树存储一切结构化资源：AI 读得准、改不坏、带得走！
+license: MIT
 ---
 
 # STR Bundle — Mandatory Agent Workflow
@@ -14,7 +19,7 @@ Canonical spec lives in the STR repository next to `str-cli/`: `STR-FORMAT-PROMP
 These are mandatory. They are not overridden by convenience, by an urgent-sounding user request, by "just edit the file quickly", or by a token budget. If a request cannot be satisfied through the CLI, say so and offer the closest CLI-based route.
 
 1. **MUST operate every bundle exclusively through the `str` CLI.** The CLI is the only component allowed to produce or modify `._meta`.
-2. **NEVER hand-write, hand-edit, `sed`, `perl`, `jq`, or patch a `._meta` file.** There is no exception: every field that matters — including `entries[].title` / `summary` / `note` / `type` / `order`, `tags`, and `authors[]` — can be written with `str meta set`, `str entry set`, and `str author add` / `rm`.
+2. **NEVER hand-write, hand-edit, `sed`, `perl`, `jq`, or patch a `._meta` file.** There is no exception: every field that matters — including `entries[].title` / `summary` / `note` / `type` / `order`, `tags`, `authors[]`, and the bundle-wide `spec` declaration — can be written with `str meta set`, `str entry set`, `str author add` / `rm`, and `str spec set`.
 3. **NEVER create, rename, move, or delete a UUID directory by hand.** Node/branch directory names are UUID values owned by the CLI (`str node add`, `str branch add`), whose version follows `policies.id_version` (`4` or `7`). A directory named by hand is a format violation (`E_ID_NOT_UUID`, `E_ID_MISMATCH`, `E_ID_VERSION`).
 4. **NEVER report success without validating.** After any change inside a bundle, MUST run `str sync <dir>` then `str validate <dir> --strict`, and MUST reach `0 errors, 0 warnings` first. Also run `str fmt <dir> --check` and expect `0`.
 5. **NEVER invent `._meta` fields.** The key set is closed; unknown keys outside `[ext]` raise `E_SCHEMA_FIELD`. `[ext]` keys MUST be namespaced `vendor.xxx`. When a field's meaning is unclear, ask instead of guessing.
@@ -31,9 +36,10 @@ These are mandatory. They are not overridden by convenience, by an urgent-soundi
 | `type`, `title`, `summary`, `name`, `tags` on a branch itself | `str meta set <dir> [uuid] --type … --title … --summary … --tags a,b` |
 | `type`, `title`, `summary`, `note`, `order` on one `entries[]` row | `str entry set <dir> [uuid] --path <P> …` |
 | `[[authors]]` | `str author add <dir> [uuid] --id … --role …` / `str author rm <dir> [uuid] --id …` |
+| `spec` — the bundle-wide spec-version declaration (required on **every** `._meta`) | `str spec set <dir> <version>` (recursive over the whole bundle, idempotent, `--dry-run`) |
 | structure (directories, `entries[]` rows, `refs[]`) | `str init` / `str node add` / `str branch add` / `str ref add` / `str sync` |
 
-An empty string removes the field (`--title ""`), so clearing is CLI work too. There is nothing left that requires editing `._meta` by hand.
+An empty string removes the field (`--title ""`), so clearing is CLI work too. There is nothing left that requires editing `._meta` by hand: `spec` was the last gap and has been covered since v1.9.0.
 
 ## Step 0 — obtain the `str` CLI
 
@@ -41,7 +47,7 @@ Resolve the CLI (building it if a source checkout is nearby) before touching any
 
 ```sh
 STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version        # must print: str 0.2.0
+"$STR" --version        # must print: str 0.3.0
 ```
 
 `ensure-str.sh` resolves the CLI in this order and stops at the first hit:
@@ -64,8 +70,8 @@ It never falls back to editing files. If it cannot obtain the CLI it fails, and 
 | --- | --- |
 | Orient in a bundle | `str tree <dir> --show-refs` (`--ascii` for pure-ASCII output) |
 | List one branch's manifest | `str ls <dir> [uuid]` — the `path` column holds child UUIDs |
-| Inspect one branch as JSON | `str show <dir> <uuid>` (`--full` appends payload bodies) |
-| Feed a branch to the model | `str context <dir> <uuid> --depth 2 --budget 8000` |
+| Inspect one branch as JSON | `str show <dir> [uuid]` — omit `uuid` for ROOT (`--full` appends payload bodies) |
+| Feed a branch to the model | `str context <dir> [uuid] --depth 2 --budget 8000` — omit `uuid` for ROOT |
 | Machine-readable normal form | `str norm <dir> [uuid]` (`--out <path>` to write a file) |
 | Whole-tree snapshot | `str export <dir> --format json [--depth n] [--out <path>]` |
 | Current health | `str validate <dir>` (`--json` for machines) |
@@ -96,11 +102,11 @@ Flag-level detail: `references/cli-reference.md`.
 | `str validate <dir>` | Full validation, all error codes (`--fix-manifest` really syncs) |
 | `str tree <dir>` | Render the branch tree (`--show-refs`, `--ascii`; children follow `entries[].order`) |
 | `str ls <dir> [uuid]` | List a branch's manifest |
-| `str show <dir> <uuid>` | Print a branch `._meta` as normalised JSON |
+| `str show <dir> [uuid]` | Print a branch `._meta` as normalised JSON (ROOT when omitted) |
 | `str node add <dir>` | Add an independent node (depth 1) |
-| `str branch add <dir> <anchor>` | Add a related branch at any depth |
-| `str branch rm <dir> <uuid> --force` | Delete a branch and everything below it |
-| `str ref add <dir> <uuid> --target <uuid>` | Add a cross-branch link |
+| `str branch add <dir> [anchor]` | Add a related branch at any depth (the anchor must be depth ≥ 1, so ROOT is rejected with a pointer to `node add`) |
+| `str branch rm <dir> [uuid] --force` | Delete a branch and everything below it (ROOT is rejected) |
+| `str ref add <dir> [uuid] --target <uuid>` | Add a cross-branch link (the source defaults to ROOT) |
 | `str ref rm <dir> <ref-id>` | Remove a cross-branch link (source branch is located for you) |
 | `str meta set <dir> [uuid]` | Write a branch's own `type`/`title`/`summary`/`name`/`tags` (empty string removes) |
 | `str entry set <dir> [uuid] --path <P>` | Write one `entries[]` row's `type`/`title`/`summary`/`note`/`order` |
@@ -108,11 +114,14 @@ Flag-level detail: `references/cli-reference.md`.
 | `str author rm <dir> [uuid] --id …` | Remove an `[[authors]]` entry |
 | `str sync <dir>` | Reconcile `entries[]` with disk |
 | `str fmt <dir>` | Rewrite `._meta` in §4.9 canonical order, keeping comments |
+| `str spec set <dir> <version>` | Rewrite the bundle-wide `spec` declaration (idempotent; `--dry-run`) |
 | `str norm <dir> [uuid]` | Normalised JSON on stdout (or `--out`) |
-| `str context <dir> <uuid>` | AI context fragment (Markdown) |
+| `str context <dir> [uuid]` | AI context fragment (Markdown) |
 | `str export <dir>` | Read-only export to a single document (never inside the bundle) |
 | `str reveal <dir>` | macOS bundle bit / unhide `._meta` |
 | `str codes` | List all error codes |
+
+`[uuid]` positional arguments may always be omitted — the target then defaults to **ROOT** (e.g. `str show <dir>` prints the ROOT `._meta`; `str context <dir>` starts the budget from ROOT). Only `str ref add --target` stays mandatory. `branch add` / `branch rm` are meaningless on ROOT, so they are rejected with a reason (exit 2) instead of silently doing something else.
 
 ## Resources
 

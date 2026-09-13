@@ -30,7 +30,7 @@ cd str.str/str-cli && cargo build --release   # 产物：target/release/str
 ```sh
 str init 我的项目.str --name 我的项目
 str node add   我的项目.str --type code.project --title 核心引擎 --summary "…"
-str branch add 我的项目.str <uuid> --type code.docs --title 设计文档
+str branch add 我的项目.str [uuid] --type code.docs --title 设计文档
 str tree       我的项目.str --show-refs
 str sync       我的项目.str          # 磁盘实际状态 → 修正 entries（幂等）
 str validate   我的项目.str --strict # 0 errors / 0 warnings 才算交付
@@ -56,6 +56,16 @@ assert_eq!(report.error_count(), 0);
   且 `include_str!` 无法引用包外路径（否则 `cargo package` 的验证构建必然失败）；
 - 副本由 `bash scripts/sync-schema.sh` 生成，并由 `tests/schema_sync.rs` 守卫二者
   逐字节一致：**一旦漂移，`cargo test` 直接失败**，不会静默分叉。
+
+## 版本
+
+本 crate 的版本（当前 **0.3.0**）是**独立于格式规范版本**的一条轴：规范定义磁盘上的数据契约，
+crate 定义代码 / 命令契约，两者可各自演进。当前实现对应规范 **v1.9.0**（`str` 主版本 = `1`）；
+三条轴与发行 tag 的对应关系登记在仓库根 `VERSIONS.toml`。逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+```sh
+str --version     # str 0.3.0
+```
 
 ## 许可
 

@@ -211,7 +211,7 @@ fn validate_fix_manifest_actually_writes() {
 #[test]
 fn ref_rm_locates_source_from_positional_id() {
     let (root, aaa, bbb) = two_nodes("refrm");
-    cmd::ref_add(&root, &aaa, &bbb, "related".into(), None, None).unwrap();
+    cmd::ref_add(&root, Some(aaa.clone()), &bbb, "related".into(), None, None).unwrap();
     let ref_id = {
         let bundle = Bundle::new(root.clone()).unwrap();
         let scan = bundle.scan().unwrap();
@@ -349,6 +349,94 @@ fn norm_and_export_out_targets() {
     assert!(cmd::export(&root, "yaml".into(), None, None).is_err());
 }
 
+/// 规范 §9：`[uuid]` 位置参数缺省一律为 ROOT；对 ROOT 非法的操作必须给出**带原因**的拒绝。
+#[test]
+fn uuid_argument_defaults_to_root() {
+    let (root, aaa, _) = two_nodes("rootdefault");
+
+    // 读类命令：省略 `<UUID>` 应落到 ROOT（而非报「参数缺失」）
+    cmd::ls(&root, None, false).unwrap();
+    cmd::show(&root, None, false).unwrap();
+    cmd::context(&root, None, 2, 8000).unwrap();
+
+    // 缺省不等于忽略参数：显式给出不存在的 id 仍必须失败
+    assert!(cmd::show(&root, Some("no-such-uuid".into()), false).is_err());
+    assert!(cmd::context(&root, Some("no-such-uuid".into()), 2, 8000).is_err());
+
+    // `ref add` 缺省源分支 = ROOT → 关联线落在 ROOT 的 `refs[]`
+    cmd::ref_add(&root, None, &aaa, "related".into(), None, None).unwrap();
+    let root_meta = read(&root.join("._meta"));
+    assert!(root_meta.contains("[[refs]]"), "{root_meta}");
+    assert_eq!(report(&root).0, 0, "ROOT 持有 `refs` 必须合法：{root_meta}");
+
+    // `branch add` / `branch rm` 缺省同样是 ROOT，但 ROOT 上这两个操作非法 → 拒绝且说明原因
+    let err = cmd::branch_add(&root, None, Some("x.y".into()), None, None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("node add"), "应指引到 `node add`，实际：{err}");
+    let err = cmd::branch_rm(&root, None, true).unwrap_err().to_string();
+    assert!(err.contains("不能删除 ROOT"), "实际：{err}");
+
+    // 给出合法 uuid 时两者照常工作（缺省值不改变原有语义）
+    cmd::branch_add(
+        &root,
+        Some(aaa.clone()),
+        Some("a.sub".into()),
+        Some("SUB".into()),
+        None,
+        None,
+    )
+    .unwrap();
+    let sub = {
+        let bundle = Bundle::new(root.clone()).unwrap();
+        let scan = bundle.scan().unwrap();
+        let parent = scan.resolve(&aaa).unwrap();
+        scan.visits
+            .iter()
+            .filter(|v| v.parent == Some(parent))
+            .map(|v| v.dir.file_name().unwrap().to_string_lossy().to_string())
+            .next()
+            .expect("应新增一个下级分支")
+    };
+    cmd::branch_rm(&root, Some(sub), true).unwrap();
+}
+
+/// 规范 §9：`str spec set` 覆盖整份 bundle 的 `spec`，**幂等**，且只接受 `1.<minor>.<patch>`。
+#[test]
+fn spec_set_rewrites_whole_bundle_and_is_idempotent() {
+    let (root, aaa, bbb) = two_nodes("specset");
+    let root_meta = root.join("._meta");
+    let a_meta = root.join(&aaa).join("._meta");
+    let b_meta = root.join(&bbb).join("._meta");
+
+    // 初始由 `str init` / `node add` 写出本实现的规范版本
+    assert!(read(&root_meta).contains(&format!("spec = \"{SPEC}\"")));
+
+    // dry-run 不动盘
+    cmd::spec_set(&root, "1.7.0", true).unwrap();
+    assert!(read(&root_meta).contains(&format!("spec = \"{SPEC}\"")));
+
+    // 真写：ROOT + 两个节点共 3 份全部落到目标版本（`v` 前缀应被规整掉）
+    cmd::spec_set(&root, "v1.7.0", false).unwrap();
+    for f in [&root_meta, &a_meta, &b_meta] {
+        assert!(read(f).contains("spec = \"1.7.0\""), "{f:?}");
+    }
+    assert_eq!(report(&root).0, 0, "`spec` 只供人类追溯，改它不得让校验失败");
+
+    // 幂等：值相同则一个字节都不写（含 `revision` / `updated_at`）
+    let frozen = read(&root_meta);
+    cmd::spec_set(&root, "1.7.0", false).unwrap();
+    assert_eq!(read(&root_meta), frozen, "值未变则不得改写 `._meta`");
+
+    // 非法版本串：major 必须为 1 且必须是三段（与 `._schema` 的正则同源）
+    for bad in ["2.0.0", "1.9", "1.9.0.1", "", "abc", "1.x.0"] {
+        assert!(
+            cmd::spec_set(&root, bad, false).is_err(),
+            "{bad:?} 应被拒绝"
+        );
+    }
+}
+
 #[test]
 fn branch_rm_accepts_recursive_and_cleans_baseline() {
     let (root, aaa, _) = two_nodes("rmrecursive");
@@ -356,7 +444,7 @@ fn branch_rm_accepts_recursive_and_cleans_baseline() {
     let bundle = Bundle::new(root.clone()).unwrap();
     assert!(str_format::baseline::load(&bundle).branches.contains_key(&aaa));
 
-    cmd::branch_rm(&root, &aaa, true).unwrap();
+    cmd::branch_rm(&root, Some(aaa.clone()), true).unwrap();
     assert!(!root.join(&aaa).exists());
     let bundle = Bundle::new(root.clone()).unwrap();
     assert!(

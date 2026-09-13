@@ -82,8 +82,8 @@ enum Cmd {
     Show {
         /// bundle 目录
         dir: PathBuf,
-        /// 分支 id
-        uuid: String,
+        /// 分支 id（缺省为 ROOT）
+        uuid: Option<String>,
         /// 附带 payload 正文
         #[arg(long)]
         full: bool,
@@ -118,6 +118,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AuthorCmd,
     },
+    /// 规范版本声明（bundle 级：`._meta.spec`）
+    Spec {
+        #[command(subcommand)]
+        cmd: SpecCmd,
+    },
     /// 用磁盘实际状态修正 `entries` 与指纹
     Sync {
         /// bundle 目录
@@ -151,8 +156,8 @@ enum Cmd {
     Context {
         /// bundle 目录
         dir: PathBuf,
-        /// 分支 id
-        uuid: String,
+        /// 分支 id（缺省为 ROOT）
+        uuid: Option<String>,
         /// 下钻层数
         #[arg(long, default_value_t = 2)]
         depth: usize,
@@ -207,8 +212,8 @@ enum BranchCmd {
     Add {
         /// bundle 目录
         dir: PathBuf,
-        /// 锚点分支 id
-        anchor: String,
+        /// 锚点分支 id（缺省为 ROOT；但 ROOT 的直接子分支应改用 `node add`）
+        anchor: Option<String>,
         /// 类型
         #[arg(long = "type")]
         type_: Option<String>,
@@ -226,8 +231,8 @@ enum BranchCmd {
     Rm {
         /// bundle 目录
         dir: PathBuf,
-        /// 分支 id
-        uuid: String,
+        /// 分支 id（缺省为 ROOT；ROOT 不可删除）
+        uuid: Option<String>,
         /// 确认删除
         #[arg(long)]
         force: bool,
@@ -243,8 +248,8 @@ enum RefCmd {
     Add {
         /// bundle 目录
         dir: PathBuf,
-        /// 源分支 id
-        uuid: String,
+        /// 源分支 id（缺省为 ROOT）
+        uuid: Option<String>,
         /// 目标分支 id
         #[arg(long)]
         target: String,
@@ -361,6 +366,20 @@ enum AuthorCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum SpecCmd {
+    /// 把整份 bundle 的 `spec` 统一改写为目标版本（幂等；从此改 `spec` 不再需要手改 `._meta`）
+    Set {
+        /// bundle 目录
+        dir: PathBuf,
+        /// 目标规范版本，如 1.9.0（`str` 主版本固定为 1；可用 `v` 前缀）
+        version: String,
+        /// 只显示将要发生的变更
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 fn dispatch(cmd: Cmd) -> Result<i32> {
     match cmd {
         Cmd::Init {
@@ -398,7 +417,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             Ok(0)
         }
         Cmd::Show { dir, uuid, full } => {
-            cmd::show(&dir, &uuid, full)?;
+            cmd::show(&dir, uuid, full)?;
             Ok(0)
         }
         Cmd::Node { cmd } => match cmd {
@@ -421,7 +440,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 summary,
                 order,
             } => {
-                cmd::branch_add(&dir, &anchor, type_, title, summary, order)?;
+                cmd::branch_add(&dir, anchor, type_, title, summary, order)?;
                 Ok(0)
             }
             BranchCmd::Rm {
@@ -431,7 +450,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 // 删除**总是**递归（`remove_dir_all`），该旗标仅为兼容规范 §9 的写法而接受
                 recursive: _,
             } => {
-                cmd::branch_rm(&dir, &uuid, force)?;
+                cmd::branch_rm(&dir, uuid, force)?;
                 Ok(0)
             }
         },
@@ -444,7 +463,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 title,
                 note,
             } => {
-                cmd::ref_add(&dir, &uuid, &target, rel, title, note)?;
+                cmd::ref_add(&dir, uuid, &target, rel, title, note)?;
                 Ok(0)
             }
             RefCmd::Rm {
@@ -517,6 +536,16 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 Ok(0)
             }
         },
+        Cmd::Spec { cmd } => match cmd {
+            SpecCmd::Set {
+                dir,
+                version,
+                dry_run,
+            } => {
+                cmd::spec_set(&dir, &version, dry_run)?;
+                Ok(0)
+            }
+        },
         Cmd::Sync { dir, dry_run } => {
             cmd::sync(&dir, dry_run)?;
             Ok(0)
@@ -536,7 +565,7 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             depth,
             budget,
         } => {
-            cmd::context(&dir, &uuid, depth, budget)?;
+            cmd::context(&dir, uuid, depth, budget)?;
             Ok(0)
         }
         Cmd::Export {

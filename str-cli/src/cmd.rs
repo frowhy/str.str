@@ -131,6 +131,9 @@ fn save_meta(bundle: &Bundle, dir: &Path, meta: &Meta) -> Result<()> {
 }
 
 /// 取目标分支下标：给了 `uuid` 就解析，缺省为 ROOT。
+///
+/// 规范 §9：命令签名中凡 `[uuid]` 形式的位置参数均**可选**，缺省目标一律为 ROOT。
+/// 本函数是这条规则的唯一实现点 —— 新增命令时复用它，不要各自内联缺省逻辑。
 fn target_branch(scan: &Scan, uuid: Option<&str>) -> Result<usize> {
     match uuid {
         Some(u) => {
@@ -321,13 +324,7 @@ fn render_children(
 pub fn ls(dir: &Path, uuid: Option<String>, raw: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = match uuid {
-        Some(u) => locate(&scan, &u)
-            .ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))?,
-        None => scan
-            .root_index
-            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into()))?,
-    };
+    let idx = target_branch(&scan, uuid.as_deref())?;
     let v = &scan.visits[idx];
     println!("{}  （{}）", v.rel, if raw { "磁盘原始" } else { "清单" });
     if raw {
@@ -359,11 +356,11 @@ pub fn ls(dir: &Path, uuid: Option<String>, raw: bool) -> Result<()> {
     Ok(())
 }
 
-/// 打印某分支的 `._meta`（归一化 JSON）。
-pub fn show(dir: &Path, uuid: &str, full: bool) -> Result<()> {
+/// 打印某分支的 `._meta`（归一化 JSON）。（规范 §9：`<UUID>` 缺省为 ROOT。）
+pub fn show(dir: &Path, uuid: Option<String>, full: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, uuid).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{uuid}`")))?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
     let v = &scan.visits[idx];
     let Some(meta) = v.meta.as_ref() else {
         return Err(Error::BadArg(format!("{} 的 `._meta` 解析失败", v.rel)));
@@ -447,9 +444,12 @@ pub fn node_add(
 }
 
 /// 在指定分支下新增关联分支（任意深度）。
+///
+/// 规范 §9：`<ANCHOR-UUID>` 缺省为 ROOT；但 ROOT 的直接子分支是 `node` 而非 `branch`，
+/// 因此缺省/显式给出 ROOT 时由下方的深度判据拒绝并指引到 `str node add`。
 pub fn branch_add(
     dir: &Path,
-    anchor: &str,
+    anchor: Option<String>,
     type_: Option<String>,
     title: Option<String>,
     summary: Option<String>,
@@ -457,11 +457,12 @@ pub fn branch_add(
 ) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, anchor)
-        .ok_or_else(|| Error::BadArg(format!("找不到锚点分支 id `{anchor}`")))?;
+    let idx = target_branch(&scan, anchor.as_deref())?;
     if scan.visits[idx].depth == 0 {
         return Err(Error::BadArg(
-            "ROOT 的直接子分支应使用 `str node add`（role = node）".into(),
+            "ROOT 的直接子分支应使用 `str node add`（role = node）；\
+             `branch add` 的锚点须是深度 ≥ 1 的分支"
+                .into(),
         ));
     }
     let anchor_dir = scan.visits[idx].dir.clone();
@@ -514,13 +515,18 @@ pub fn branch_add(
 }
 
 /// 删除关联分支（含其全部下级）。
-pub fn branch_rm(dir: &Path, uuid: &str, force: bool) -> Result<()> {
+///
+/// 规范 §9：`<UUID>` 缺省为 ROOT；而 ROOT 不可删除，故缺省调用会得到明确拒绝
+/// （而不是靠「参数缺失」这种不含原因的错误挡住）。
+pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, uuid).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{uuid}`")))?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
     let v = &scan.visits[idx];
     if v.depth == 0 {
-        return Err(Error::BadArg("不能删除 ROOT".into()));
+        return Err(Error::BadArg(
+            "不能删除 ROOT（`<UUID>` 缺省即为 ROOT，请显式给出要删除的分支 id）".into(),
+        ));
     }
     if !force {
         return Err(Error::BadArg(format!(
@@ -557,10 +563,10 @@ pub fn branch_rm(dir: &Path, uuid: &str, force: bool) -> Result<()> {
 
 // ─────────────────────────── ref ───────────────────────────
 
-/// 新增跨枝关联线。
+/// 新增跨枝关联线。（规范 §9：源分支 `<UUID>` 缺省为 ROOT；`--target` 仍必填。）
 pub fn ref_add(
     dir: &Path,
-    uuid: &str,
+    uuid: Option<String>,
     target: &str,
     rel: String,
     title: Option<String>,
@@ -568,7 +574,7 @@ pub fn ref_add(
 ) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, uuid).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{uuid}`")))?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
     if locate(&scan, target).is_none() {
         return Err(Error::BadArg(format!("找不到目标分支 id `{target}`")));
     }
@@ -589,7 +595,12 @@ pub fn ref_add(
     });
     meta.touch();
     save_meta(&bundle, &src_dir, &meta)?;
-    println!("已新增关联线 {ref_id}：{uuid} → {target}");
+    // 源分支可能是缺省来的 ROOT（其 `id` 与目录名无关），故打印解析后的真实 `id`
+    let src_id = meta
+        .id
+        .clone()
+        .unwrap_or_else(|| scan.visits[idx].rel.clone());
+    println!("已新增关联线 {ref_id}：{src_id} → {target}");
     Ok(())
 }
 
@@ -854,6 +865,115 @@ pub fn author_rm(dir: &Path, uuid: Option<String>, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ─────────────────────────── spec ───────────────────────────
+
+/// 校验并规整 `spec` 版本串。
+///
+/// 只接受形如 `1.<minor>.<patch>` 的值 —— 与 `._schema` 里 `^1\.[0-9]+\.[0-9]+$` 的正则一致
+/// （写进去的必须能通过 bundle 自己声明的 Schema）；允许 `v` 前缀，规整时去掉。
+/// `str` 主版本固定为 `1`（规范 §13：只有 `str` 主版本需要工具显式支持）。
+fn normalize_spec_version(raw: &str) -> Result<String> {
+    let v = raw.trim().trim_start_matches('v').trim().to_string();
+    let parts: Vec<&str> = v.split('.').collect();
+    let ok = parts.len() == 3
+        && parts[0] == "1"
+        && parts[1].parse::<u64>().is_ok()
+        && parts[2].parse::<u64>().is_ok();
+    if !ok {
+        return Err(Error::BadArg(format!(
+            "`spec` 版本串 {raw:?} 非法：须形如 `1.<minor>.<patch>`（`str` 主版本固定为 `1`）"
+        )));
+    }
+    Ok(v)
+}
+
+/// `str spec set`：把整份 bundle 声明的规范版本（`._meta.spec`）统一改写为 `version`。
+///
+/// 为什么是**整份 bundle**：`spec` 在三种档位里都是必填字段（规范 §4.3），只改 ROOT 会让
+/// 其余分支的声明与 ROOT 不一致 —— 文档就在说谎。子 bundle（`.str` 目录）是硬边界（§3.5），
+/// 不进入。只改写与目标值不同的分支，因此**幂等**（第二次「已更新 0 份」）。
+///
+/// 这是「不再需要手改 `._meta`」的最后一块：v1.9.0 之前 `spec` 没有任何 CLI 写入命令。
+pub fn spec_set(dir: &Path, version: &str, dry_run: bool) -> Result<()> {
+    let version = normalize_spec_version(version)?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+
+    // 先整体体检：任何一份 `._meta` 解析失败就拒绝执行 —— 既不半途写一半，也不静默跳过
+    let broken: Vec<String> = scan
+        .visits
+        .iter()
+        .filter(|v| v.meta.is_none())
+        .map(|v| v.rel.clone())
+        .collect();
+    if !broken.is_empty() {
+        return Err(Error::BadArg(format!(
+            "{} 份 `._meta` 解析失败（{}），改 `spec` 前请先修复",
+            broken.len(),
+            broken.join("、")
+        )));
+    }
+
+    // 计划：只挑 `spec` 与目标值不同的分支
+    let mut plan: Vec<(usize, String)> = Vec::new();
+    for (i, v) in scan.visits.iter().enumerate() {
+        let from = v
+            .meta
+            .as_ref()
+            .and_then(|m| m.spec.clone())
+            .unwrap_or_else(|| "（缺失）".to_string());
+        if from == version {
+            continue;
+        }
+        plan.push((i, from));
+    }
+    for (i, from) in &plan {
+        println!("~ {}  spec: {from} → {version}", scan.visits[*i].rel);
+    }
+    if !plan.is_empty() && version != SPEC_VERSION {
+        println!(
+            "注意：目标 `spec` = {version} 与本实现对应的规范版本（{SPEC_VERSION}）不同；\
+             `spec` 仅用于人类追溯，工具只强校验 `str` 主版本（规范 §13）"
+        );
+    }
+
+    if plan.is_empty() {
+        println!(
+            "全部 `._meta` 的 `spec` 已是 {version}（{} 份）",
+            scan.visits.len()
+        );
+        return Ok(());
+    }
+    if dry_run {
+        println!("（dry-run）将更新 {} 份 `._meta`", plan.len());
+        return Ok(());
+    }
+
+    for (i, _) in &plan {
+        let branch_dir = scan.visits[*i].dir.clone();
+        let mut work = match bundle.read_meta(&branch_dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => {
+                // 体检已通过，此处仅防御并发改动；一旦发生就中止，不留下写一半的结果
+                return Err(Error::BadArg(format!(
+                    "{} 的 `._meta` 解析失败，已中止（未写出部分结果）",
+                    scan.visits[*i].rel
+                )));
+            }
+        };
+        let had_spec = work.doc.as_table().contains_key("spec");
+        work.set_str("spec", &version);
+        if !had_spec {
+            // 缺失时插入会落到文件末尾，而 TOML 要求裸键写在任何表头之前 → 用 §4.9 规范化归位
+            work.canonicalize();
+        }
+        work.touch();
+        save_meta(&bundle, &branch_dir, &work)?;
+    }
+    println!("已更新 {} 份 `._meta`", plan.len());
+    Ok(())
+}
+
 // ─────────────────────────── sync ───────────────────────────
 
 /// 用磁盘实际状态修正全部 `entries`，并更新 `size` / `sha256`。
@@ -1031,6 +1151,7 @@ pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
 /// 输出归一化 JSON。
 ///
 /// `--out -`（或缺省）写 stdout；给路径则写文件（规范 §9）。
+/// `<UUID>` 缺省为 ROOT。
 pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
@@ -1043,11 +1164,11 @@ pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()>
     emit(&text, out.as_deref())
 }
 
-/// 生成供 AI 使用的上下文片段。
-pub fn context(dir: &Path, uuid: &str, depth: usize, budget: usize) -> Result<()> {
+/// 生成供 AI 使用的上下文片段。（规范 §9：`<UUID>` 缺省为 ROOT。）
+pub fn context(dir: &Path, uuid: Option<String>, depth: usize, budget: usize) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
-    let idx = locate(&scan, uuid).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{uuid}`")))?;
+    let idx = target_branch(&scan, uuid.as_deref())?;
     let mut out = String::new();
     out.push_str(&format!("# STR 上下文：{}\n\n", bundle.name()));
     render_context(&scan, idx, depth, &mut out, 0);

@@ -17,7 +17,7 @@
 # 环境变量：
 #   STR_BIN             显式指定可执行文件（最高优先级）
 #   STR_REPO            源码仓库根（应含 str-cli/Cargo.toml）
-#   STR_VERSION         版本 tag，如 v0.2.0；默认 latest，解析失败回退到内置默认版本
+#   STR_VERSION         版本 tag，如 v0.3.0；默认 latest，解析失败回退到内置默认版本
 #   STR_RELEASE_REPO    发布仓库 `owner/repo`，默认 frowhy/str.str（fork 时改此值）
 #   STR_DOWNLOAD_BASE   资产下载前缀，默认 https://github.com/<repo>/releases/download
 #                       （网络受限时可指向镜像；`latest` 解析失败不影响它，因为版本已回退）
@@ -42,7 +42,7 @@
 set -eu
 
 RELEASE_REPO=${STR_RELEASE_REPO:-frowhy/str.str}
-DEFAULT_VERSION=v0.2.0
+DEFAULT_VERSION=v0.3.0
 STR_VERSION=${STR_VERSION:-latest}
 DOWNLOAD_BASE=${STR_DOWNLOAD_BASE:-https://github.com/$RELEASE_REPO/releases/download}
 CACHE_BASE=${STR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/str-skill}

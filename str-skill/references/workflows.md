@@ -12,7 +12,7 @@
 
 ```sh
 $S init crm --name crm --title "客户运营" --summary "CRM 结构化数据束"
-# → 已创建 bundle：crm.str / spec = 1.8.0  str = 1 / policies.id_version = 7 / ._schema 内已写入 3 份校验 Schema
+# → 已创建 bundle：crm.str / spec = 1.9.0  str = 1 / policies.id_version = 7 / ._schema 内已写入 3 份校验 Schema
 
 $S node add crm.str --type crm.customer --title "客户A" --summary "示例客户"
 # → 已新增独立节点 01a09bf1-0eba-7336-8366-b9499cbb240a（深度 1）
@@ -116,6 +116,7 @@ $S ref rm crm.str --uuid "$CUST" --ref 01a09bf1-354b-…    # 等价写法：显
 ```sh
 $S tree crm.str --show-refs          # ① 先看全貌（不含 payload 正文）
 $S ls crm.str                        # ② ROOT 清单，拿到一级节点 UUID
+$S show crm.str                      # ②' 省略 UUID ⇒ ROOT（规范 §9：`[uuid]` 缺省即 ROOT）
 $S ls crm.str "$CUST"                # ③ 单分支清单（等价：--uuid "$CUST"）
 $S show crm.str "$CUST"              # ④ 单分支元信息（归一化 JSON）
 $S show crm.str "$CUST" --full       # ⑤ 连带 payload 正文（谨慎，会变长）

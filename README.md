@@ -9,7 +9,7 @@
 在同一份资产上安全地读写、协作与版本控制。
 
 - 格式：`.str` 目录 bundle（形态对标 macOS `.app`）—— 纯目录 + 纯文本，零平台依赖
-- 规范版本：v1.8.0（`str` 主版本号 = `1`）
+- 规范版本：v1.9.0（`str` 主版本号 = `1`）
 - 参考实现：Rust CLI（`str-cli/`），20+ 子命令，35 个校验错误码
 - 状态：`DRAFT → 待评审`
 
@@ -98,7 +98,7 @@ AI 读取 bundle 不需要全量加载——每一层 `._meta` 自带摘要，�
 配套命令与技能：
 
 ```sh
-str context 项目.str <uuid> --depth 2 --budget 8k   # 裁剪出可直接拼接进模型上下文的片段
+str context 项目.str [uuid] --depth 2 --budget 8k   # 裁剪出可直接拼接进模型上下文的片段（省略 uuid 即从 ROOT 起）
 ```
 
 - [`str-skill/`](str-skill/) — 通用 Agent 技能包（CodeBuddy / Claude Code / Cursor 等），
@@ -140,14 +140,18 @@ str init 我的项目.str --name 我的项目
 
 # 日常操作
 str node add 我的项目.str --type code.project --title 核心引擎 --summary "…"
-str branch add 我的项目.str <uuid> --type code.docs --title 设计文档
-str ref add  我的项目.str <uuid> --target <uuid> --rel depends_on
+str branch add 我的项目.str [uuid] --type code.docs --title 设计文档
+str ref add  我的项目.str [uuid] --target <uuid> --rel depends_on
 str sync 我的项目.str          # 磁盘实际状态 → 修正 entries（幂等）
 str validate 我的项目.str --strict
 
 # 提交前自检（本仓库自身即一个 bundle）
 str validate .
 ```
+
+> **`[uuid]` 缺省 ROOT**：凡以单个分支为目标的命令，其 `<UUID>` 位置参数都可省略，缺省目标为 **ROOT** ——
+> 例如 `str show 我的项目.str` 打印 ROOT 的 `._meta`、`str context 我的项目.str` 从 ROOT 起裁剪上下文。
+> 只有 `str ref add --target` 必填；`branch add` / `branch rm` 在 ROOT 上无意义，会以带原因的 `BadArg`（exit 2）拒绝。
 
 关键设计：`str sync` 幂等（第二次零 diff）、`._meta` 写回保注释、
 序列化确定性（固定键序/表序/排序）—— Git diff 永远只反映真实变更。
@@ -173,16 +177,47 @@ str validate .
 
 | 位置 | 说明 |
 | --- | --- |
-| `STR-FORMAT-PROMPT.md` | 格式规范（唯一真源，v1.8.0） |
+| `STR-FORMAT-PROMPT.md` | 格式规范（唯一真源，v1.9.0） |
+| `VERSIONS.toml` | **版本唯一真源**：规范 / CLI / 技能包三条轴 + 发行 tag 锚 |
+| `CHANGELOG.md` | 仓库与发行的变更日志（每个 tag 冻结的「规范 · CLI · skill」三元组） |
+| `SPEC-CHANGELOG.md` | 格式规范的变更日志（发行 / 兼容视角；细则真源仍是正文《修订记录》） |
 | `._schema/*.json` | 三档 JSON Schema（2020-12），格式规范性产物（Schema 的唯一真源） |
 | `examples/客户运营.str/` | 官方示例 bundle（`str validate --strict` 零错误） |
-| `scripts/*.sh` | `build-example.sh` 幂等重建示例 bundle；`sync-schema.sh` 同步 Schema 派生副本 |
+| `scripts/*.sh` | `build-example.sh` 幂等重建示例 bundle；`sync-schema.sh` 同步 Schema 派生副本；`check-versions.sh` 版本一致性门禁 |
 | `str-cli/` | Rust 参考实现（`str` 二进制；crates.io 包名 `str-format`） |
 | `str-cli/schema/*.json` | 三份 Schema 的 **crate 内派生副本**（crates.io 只打包 crate 目录内的文件，故为发版必需）；由 `sync-schema.sh` 生成、`tests/schema_sync.rs` 守卫与真源逐字节一致 |
 | `str-skill/` | Agent 技能包（含 CLI 安装器与下载校验） |
 
 > 自举（dogfooding）：本仓库根目录自身就是一个 `.str` bundle，
 > `str validate .` 恒为 0 errors / 0 warnings——格式在自己的仓库上先行验证。
+
+---
+
+## 版本控制：三条轴 + 一个发行锚
+
+仓库里的版本号不是一个号，而是**三条独立演进的轴** —— 它们的变更频率与破坏面都不同，
+因此**不要求相等**；对应关系登记在 [`VERSIONS.toml`](VERSIONS.toml)，不靠「约定相等」：
+
+| 轴 | 当前 | 定义什么契约 | 怎么升 |
+| --- | --- | --- | --- |
+| 规范 `spec` | `1.9.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
+| 实现 `cli` | `0.3.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
+| 技能包 `skill` | `0.2.1` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
+| **发行 tag** | `v0.3.0` | 把上面三者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
+
+- **唯一需要工具显式支持的只有 `str` 主版本号**（当前 `1`）；`spec` 供人类追溯 —— 见规范 §13。
+- **门禁**：`bash scripts/check-versions.sh` 逐点比对「真源 ↔ 各声明点」（正文头部、`._meta`、
+  Rust 常量、Schema description、示例生成脚本、README、技能包 frontmatter 与发布身份、`ensure-str.sh`、
+  workflow 默认 tag），CI 在三个发布工作流中强制执行；tag 推送时还会校验
+  「推送的 tag = 真源声明的 tag」，杜绝「tag 打了、真源没改」。
+- **发布载体**：推 `v*` tag 同时触发三个互相独立的工作流 —— `release.yml`（GitHub Release：五平台
+  二进制 + 技能包 zip + SHA256SUMS）、`publish.yml`（crates.io）、`publish-skillhub.yml`
+  （SkillHub 技能市场，`str-skill/` 无变化时自动跳过）；任一条失败都不阻塞另外两条。
+  SkillHub 侧需先在 Actions 里配置仓库级 Secret `SKILLHUB_KEY`（个人 API Token，见
+  [`str-skill/README.md`](str-skill/README.md) 的「发布到 SkillHub」）。
+- **逐版变更**：[`CHANGELOG.md`](CHANGELOG.md)（仓库 / 发行）、[`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)
+  （规范）、[`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)、[`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
+- 别把 `._meta` 的 `revision`（bundle 内的内容修订计数，与 git 无关）当成发布版本。
 
 ---
 

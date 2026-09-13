@@ -1,0 +1,66 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# VERSIONS.toml —— 版本唯一真源（Single Source of Truth）
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# 本仓库有**三条独立演进的版本轴 + 一个发行锚**。其余所有位置的版本号都必须与本
+# 文件一致；一致性由 `scripts/check-versions.sh` 逐点校验，并在 CI 中作为门禁
+# （release.yml / publish.yml 的 test 阶段），任何一处漂移都会让流水线失败。
+#
+#   轴 A  spec    格式规范版本    —— 定义**磁盘上的数据契约**（STR-FORMAT-PROMPT.md）
+#   轴 B  cli     参考实现版本    —— 定义**代码 / 命令契约**（crate `str-format`）
+#   轴 C  skill   Agent 技能版本  —— 定义**Agent 行为契约**（str-skill 的 MUST / NEVER）
+#   锚    release 发行 tag        —— 把 A+B+C 的某个组合**冻结命名**，锚定 = cli 版本
+#
+# 三条轴**不要求相等**：变更频率与破坏面都不同（改一句措辞会升 patch、收紧一条校验
+# 会升 spec major、改一条 MUST 会升 skill major）。它们之间的对应关系由本文件登记，
+# 而不是靠「约定相等」——约定相等正是「同一份制品有两个版本号」这类矛盾的来源。
+#
+#   spec  semver 1.x.y  patch = 措辞 / 示例；minor = 新增可选字段或枚举值；
+#                       major = 收紧校验或语义变更（须配套 `str migrate`，且 `str` 主版本 +1）
+#   cli   semver 0.x.y  patch = 修复；minor = 新命令 / 新 flag；major = 命令面不兼容
+#                       （含「支持新的 spec major」这一种）
+#   skill semver 0.x.y  patch = 文案 / 示例；minor = 新增 references 或流程；
+#                       major = Hard rules（MUST / NEVER）变更
+#
+# 维护流程：改本文件 → 按 `scripts/check-versions.sh` 的报错同步各声明点 → 门禁转绿 → 提交。
+# 注意：仓库根 `._meta` 登记了本文件（payload），所以改完本文件必须 `str sync .` 刷新摘要。
+
+[release]
+# 发行 tag = "v" + cli.version（锚定规则，由门禁强制）。
+# status = "released" 表示该 tag 已推送；"unreleased" 表示工作区领先于已发布版本。
+tag = "v0.3.0"
+status = "unreleased"
+# 最近一次真正发布出去的 tag，用于对照「工作区领先了哪些内容」。
+last_published = "v0.2.0"
+
+[spec]
+# 规范正文当前版本。必须同时等于：
+#   STR-FORMAT-PROMPT.md 头部表、仓库根 ._meta 的 `spec`、str-cli/src/lib.rs 的
+#   SPEC_VERSION、README.md 的「规范版本」、._schema/*.json 的 description、
+#   scripts/build-example.sh 的生成模板、examples/客户运营.str 的 ._meta。
+version = "1.9.0"
+# 格式主版本：写入每份 `._meta` 的 `str` 字段。工具只强校验这一个值（规范 §13 规则 1），
+# `spec` 仅供人类追溯。
+major = 1
+
+[cli]
+# crate `str-format` 的版本。必须同时等于：
+#   str-cli/Cargo.toml、Cargo.lock、str-skill/scripts/ensure-str.sh 的 DEFAULT_VERSION，
+#   以及技能包文档中 `str --version` 的示例输出。
+version = "0.3.0"
+min_rust = "1.88"
+# 本实现对应的规范主版本（= spec.major）
+implements_spec_major = 1
+
+[skill]
+# 技能包自身的版本（str-skill/SKILL.md frontmatter 的 `version`）。
+# **与 release.tag / cli.version 无绑定关系**：技能包只在自己内容变化时升版，
+# 因此三者常常不相等 —— 这是设计，不是漂移。
+version = "0.2.1"
+# 技能包能正常工作的最低 CLI 版本（SKILL.md 会用到的命令自该版本起可用）。
+requires_cli = ">=0.3.0"
+# SkillHub 发布身份，键名与 SKILL.md frontmatter 一致（平台只认这两个名字）。
+# slug 全网唯一、kebab-case、2~128 字符；**单行道：首次发布后不可更改**（改了就是另一个 skill）。
+# 定案（2026-09-14）：与本地目录名一致；备选 `str-tree` 已否决。两者均必填。
+slug = "str-skill"
+displayName = "STR 资源树"

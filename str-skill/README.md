@@ -11,6 +11,7 @@
 str-skill/
 ├── SKILL.md                      # 技能主体：强制规则 + 读写路径 + 命令索引（英文）
 ├── README.md                     # 本文件（给人看）
+├── CHANGELOG.md                  # 技能包自身的变更日志（版本轴独立于 CLI / 发行 tag）
 ├── references/
 │   ├── cli-reference.md          # str CLI 逐条命令、退出码、输出形状、规范↔实现漂移
 │   ├── spec-digest.md            # STR 格式规范精要（结构/命名/字段/错误码）
@@ -84,7 +85,7 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 ## 已知边界
 
-v1.8.0 的实现对齐已消解此前的落差：§9 参数漂移、§4.9 排序不生效、`--fix-manifest` 不写盘、`E_REVISION_STALE` 判不动、描述性字段只能手改；同时把规范自身最后两处不一致（`policies.unknown_entry`、§9「写前校验」措辞）也一并收口。**当前残留只剩「限制」而非「不一致」**，逐条列在 `references/cli-reference.md` §5：
+v1.8.0 的实现对齐已消解此前的落差：§4.9 排序不生效、`--fix-manifest` 不写盘、`E_REVISION_STALE` 判不动、描述性字段只能手改，并把规范自身的不一致（`policies.unknown_entry`、§9「写前校验」措辞）一并收口；v1.9.0 又把 §9 最后一处参数漂移关掉 —— 凡 `[uuid]` 位置参数**省略即 ROOT**（含 `show` / `context` / `norm` / `ref add` / `branch add` / `branch rm`）。**当前残留只剩「限制」而非「不一致」**，逐条列在 `references/cli-reference.md` §5：
 
 - **`str validate` 不检查书写顺序**：规范把顺序门禁交给 `str fmt --check`（返回 0），写命令落盘的字节本身已规范。
 - **`E_REVISION_STALE` 依赖基线**：历史判定靠 `._cache/revisions.json`（派生数据，由写命令与 `str sync` 维护）；删掉该目录即关闭这项历史检查。
@@ -92,7 +93,63 @@ v1.8.0 的实现对齐已消解此前的落差：§9 参数漂移、§4.9 排序
 
 ## 版本
 
-技能包与规范同步到 **v1.8.0**（`STR-FORMAT-PROMPT.md`）：排序细则明确化（`order` 缺省视为最大，混排 `._meta` 首次规范化会一次性重排）、`E_REVISION_STALE` 可判定化（§6.1.1）、§9 命令面补齐（`ls` / `ref rm` 位置参数 + 四个字段写入命令）、删除 `policies.unknown_entry`、§9「写前校验」改述为「产出即合法且规范」。
+- 技能包版本：**0.2.1**
+- 适配规范：**v1.9.0**（`STR-FORMAT-PROMPT.md`）
+- 依赖 CLI：**>= 0.3.0**（`str spec set` 与 `[uuid]` 位置参数缺省 ROOT 自 0.3.0 起提供）
+- 发布身份：slug **`str-skill`** · 展示名 **`STR 资源树`**（SkillHub）
+
+技能包版本、CLI 版本与发行 tag 是**三条独立演进的轴**，不要求相等；对应关系登记在仓库根
+[`VERSIONS.toml`](../VERSIONS.toml)，并由 `scripts/check-versions.sh` 在 CI 中守卫。
+逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)：0.2.1 补齐 SkillHub 发布 frontmatter 并接入自动发布、
+同步规范 v1.9.0（`[uuid]` 缺省 ROOT、新增 `str spec set`）；0.2.0 增加 `cargo install` 兜底安装；
+0.1.1 增加 GitHub Releases 自动下载与 SHA-256 强制校验；0.1.0 初版。
+
+> 规范侧的版本历史（哪些版本需要迁移、工具需支持什么）见
+> [`SPEC-CHANGELOG.md`](../SPEC-CHANGELOG.md)，格式细则唯一真源仍是 `STR-FORMAT-PROMPT.md`。
+
+## 发布到 SkillHub
+
+技能包以 slug `str-skill`、展示名 `STR 资源树` 发布到 [SkillHub](https://skillhub.cn)。
+这两个值取自 `SKILL.md` 的 frontmatter，真源登记在 [`VERSIONS.toml`](../VERSIONS.toml) 的 `[skill]`，
+由 `scripts/check-versions.sh` 守卫（含 `slug` 的 kebab-case 格式与 2~128 长度校验）。
+
+`SKILL.md` 头部必须带平台要求的 frontmatter：
+
+| 字段 | 当前值 | 说明 |
+| --- | --- | --- |
+| `slug` | `str-skill` | **全网唯一**、kebab-case、2~128 字符；**首次发布后不要改** —— 改了在平台上就是另一个 skill |
+| `displayName` | `STR 资源树` | 对外展示名（可为中文）。**必须用 camelCase**：平台与 CLI 只认这个键，且为必填（源码 `_validate_metadata()` 缺失即报「SKILL.md 缺少 displayName」） |
+| `version` | `0.2.1` | 必须是合法 SemVer；技能包内容变化时升它 |
+| `summary` | 见 SKILL.md | 一句话简介 |
+| `license` | `MIT` | 开源许可证 |
+
+### 自动发布（CI）
+
+推 `v*` tag 即触发 [`.github/workflows/publish-skillhub.yml`](../.github/workflows/publish-skillhub.yml)：
+先跑版本门禁 → 本地预检（`--dry-run`，只校验 frontmatter 与打包，**不发起 HTTP 请求、不需要 Token**）
+→ 正式发布。
+
+- **鉴权**：仓库 Secret `SKILLHUB_KEY`（SkillHub 个人 API Token，形如 `skh_...`）。
+  获取需先在 skillhub.cn 登录并**完成实名认证** → 个人中心 → API keys → 创建（Token 只在创建时完整显示一次）。
+- **幂等**：tag 触发时会对比「上一条 tag ↔ 本次 tag」之间 `str-skill/` 是否有变化 —— 无变化即跳过。
+  技能包是独立版本轴，CLI / 规范发版不必连带重发技能包；手动触发可用 `force` 覆盖。
+- **不阻塞其它发布**：本工作流与 `release.yml`（GitHub Release）、`publish.yml`（crates.io）互相独立。
+- **排障**：`401` Token 失效 / 已撤销 · `403` 未完成实名认证 · `409` slug 被占用 · `429` 触发限频。
+
+### 手动发布
+
+```sh
+# 安装 CLI（仅 CLI，不带预置技能集合）
+curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only
+export PATH="$HOME/.local/bin:$PATH"
+
+skillhub login --key skh_xxx --host https://api.skillhub.cn   # 登录（Token 经参数传入）
+skillhub auth whoami                                           # 确认身份
+skillhub publish str-skill --dry-run                           # 本地预检（无需 Token）
+skillhub publish str-skill --changelog "修复 xxx，新增 yyy"     # 正式发布
+```
+
+更新与首发流程一致：保持 `slug` 不变，改 `version` 与内容，再发布一次即可。
 
 ## 许可
 

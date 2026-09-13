@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.8.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.9.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-09-14 |
 | 文档定位 | **本文件即提示词（Prompt）**，整份可直接投喂给 AI 开发代理；第 1 章为指令主体，第 2~13 章为规范性附录（即指令的「事实来源」） |
@@ -24,6 +24,7 @@
 | **v1.6.0** | 2026-09-14 | **补齐实现期发现的三处澄清**（格式语义无变化）：① **`entries` 与 `refs` 同因 TOML 无法表达空数组表而允许整表省略**（归一化补 `[]`），schema 中不再必填；② `E_RESERVED_NAME` 判定精确化 —— 业务**目录**以 `._` 开头必报、**已登记**的 `._*` 条目必报、未登记的 `._*` **普通文件**豁免；③ `str sync` 去掉 `--recursive`（始终递归）。另补充**参考实现（Rust）与仓库结构**、错误码覆盖率验收项，示例 §10 全部替换为**真实 `size`/`sha256`**（由 `scripts/build-example.sh` 生成并逐字对齐）。 |
 | **v1.7.0** | 2026-09-14 | **自举驱动修订**：以本仓库自身作为 `.str` bundle 跑 `str validate .`，暴露并修正 4 处规范缺陷。① 新增 **3.5「`.str` 目录是 bundle 硬边界」** + `role = "bundle"`（父 bundle 不进入子 bundle，示例 / 测试夹具 bundle 可安全内嵌）；② **操作系统 / 工具元数据豁免**扩展至版本控制元数据（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.svn/`）；③ `W_ROOT_STRAY` 语义修正为「既非 UUID 命名的分支目录、**又未登记进 `entries`** 的散落条目」（消除与 3.3「任意目录可放任意文件」的矛盾）；④ **schema / policy 冲突修正**：JSON Schema 不再无条件要求 `size` / `sha256`，该强制改由校验器按 `policies.sha256` 判定（Schema 读不到 `[policies]`）。`role: cache` 措辞放宽为「派生缓存 / 构建产物」。 |
 | **v1.8.0** | 2026-09-14 | **实现对齐驱动修订**：以「让工具真正执行规范」为目标消解规范 ↔ 实现的落差。① **4.9 排序细则明确化**：数组表按 `(order, path\|id)` 排序、`order` 缺省视为最大（原措辞「无 `order` 者保持既有相对顺序」与本章标题「确定性序列化」自相矛盾，改为与 4.6 同源的可判定规则）；② **6.1.1 新增「`E_REVISION_STALE` 的可判定性」**：历史相关条件须由写入端登记基线（`._cache/revisions.json`，派生数据）方能判定，并明确「`sync` 只在 `revision` 前进时推进基线」；③ **9 章命令面补齐**：`str ls <dir> [uuid]`、`str ref rm <dir> <ref-uuid>`（位置参数），并新增 `str meta set` / `str entry set` / `str author add\|rm` 四个字段写入命令 —— 从此 `type` / `title` / `summary` / `note` / `tags` / `authors[]` **不再需要手改 `._meta`**；④ 明确「写出的 `._meta` 一律是 4.9 规范形式」与「`str tree` 呈现顺序与落盘顺序同源」；⑤ DoD 增补 21~23 项；⑥ **删除 `policies.unknown_entry`**（与 4.8 `manifest` 语义重叠、从未被 Schema 与实现采纳；先例见 v1.5.0 删 `branch_min_depth`）；⑦ 9 章「写操作须先通过校验」改述为可判定的「产出的 `._meta` 必须自身合法且规范」，避免与「新增文件 → `str sync`」的正常流程自锁。 |
+| **v1.9.0** | 2026-09-14 | **统一 `<UUID>` 缺省语义 + 补齐 `spec` 写入命令**。① §9 命令表中 `show` / `branch add` / `branch rm` / `ref add` / `norm` / `context` 的 `<uuid>` / `<anchor-uuid>` 一律改为 **`[uuid]`** —— **省略即默认 ROOT**，与既有的 `ls` / `meta set` / `entry set` / `author add\|rm` 对齐（`norm` 此前「§9 写必填、实现已可选」的落差随之消失）。规则是**放宽**，旧调用全部仍然合法；ROOT 上非法的两个操作不再靠「参数缺失」挡住，而是在解析出 ROOT 后给出**带原因**的拒绝 —— `branch add` 指引改用 `node add`（ROOT 的直接子分支是 `node`），`branch rm` 明确 `不能删除 ROOT`；并把这条缺省规则写成 §9 的**规范条文**（此后新增命令一律适用），DoD 增补第 24 项。② **新增 `str spec set <dir> <VERSION>`**：`spec` 此前是唯一「没有 CLI 写入命令、只能手改 `._meta`」的字段（v1.8.0 的「无例外」因此留了个洞）；该命令递归改写整份 bundle 的 `spec`（子 bundle 除外，§3.5）、只改有差异的分支（幂等）、任一份 `._meta` 解析失败即整体拒绝，DoD 增补第 25 项 —— 至此「不得手改 `._meta`」不再有例外。 |
 
 ---
 
@@ -245,7 +246,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `str` | integer | ✅ | 格式主版本，本规范固定为 `1` |
-| `spec` | string | ✅ | 规范语义化版本，如 `"1.5.0"` |
+| `spec` | string | ✅ | 规范语义化版本，如 `"1.9.0"`（形如 `1.<minor>.<patch>`；批量改写用 `str spec set`） |
 | `kind` | `"root"｜"node"｜"branch"` | ✅ | 档位，必须与所在深度匹配（见 3.3） |
 | `id` | uuid | ✅ | 自身标识。**`node`/`branch` 必须与所在目录名完全一致**；`root` 由工具生成，与目录名无关 |
 | `name` | string | root 必填 | bundle 短名（人类可读，不含 `.str`） |
@@ -588,7 +589,7 @@ A.str/
 
 ### 8.2 上下文裁剪命令
 
-`str context <bundle> <uuid> --depth 2 --budget 8k` 输出「导图摘要 + 选中分支元信息 + 下级分支摘要 + 关联线」的 Markdown 片段，供直接拼接进模型上下文。
+`str context <bundle> [uuid] --depth 2 --budget 8k` 输出「导图摘要 + 选中分支元信息 + 下级分支摘要 + 关联线」的 Markdown 片段，供直接拼接进模型上下文（`[uuid]` 缺省为 ROOT）。
 
 ### 8.3 AI 写入约束
 
@@ -616,11 +617,11 @@ A.str/
 | `str validate <dir>` | 全量校验 | `--strict` `--json` `--fix-manifest` |
 | `str tree <dir>` | 渲染导图（分支树 + 关联线标注） | `--depth n` `--show-refs` `--ascii` |
 | `str ls <dir> [uuid]` | 列出当前分支条目（读 `._meta.entries`） | `--raw`（改为直接读磁盘） |
-| `str show <dir> <uuid>` | 打印某分支 `._meta` 与内容摘要 | `--full` |
+| `str show <dir> [uuid]` | 打印某分支 `._meta` 与内容摘要 | `--full` |
 | `str node add <dir>` | 新增**独立节点**（深度 1，生成目录 + `._meta` + 登记到 ROOT） | `--type` `--title` `--summary` |
-| `str branch add <dir> <anchor-uuid>` | 在指定分支下新增**关联分支**（任意深度） | `--type` `--title` `--summary` `--order` |
-| `str branch rm <dir> <uuid>` | 删除关联分支（含其全部下级） | `--force` `--recursive` |
-| `str ref add <dir> <uuid> --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
+| `str branch add <dir> [anchor-uuid]` | 在指定分支下新增**关联分支**（任意深度） | `--type` `--title` `--summary` `--order` |
+| `str branch rm <dir> [uuid]` | 删除关联分支（含其全部下级） | `--force` `--recursive` |
+| `str ref add <dir> [uuid] --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
 | `str ref rm <dir> <ref-uuid>` | 删除关联线（源分支由工具定位，也可用 `--uuid` 指定） | — |
 | `str meta set <dir> [uuid]` | 写入**分支自身**的元信息字段 | `--type` `--title` `--summary` `--name` `--tags` |
 | `str entry set <dir> [uuid]` | 写入某分支 `entries[]` 中**指定条目**的字段 | `--path` `--type` `--title` `--summary` `--note` `--order` |
@@ -628,17 +629,26 @@ A.str/
 | `str author rm <dir> [uuid]` | 按 `id` 删除一条 `[[authors]]` | `--id` |
 | `str sync <dir>` | 用磁盘实际状态修正 `entries`（补登/移除/`size`/`sha256` 更新）；**始终递归**全部分支 | `--dry-run` |
 | `str fmt <dir>` | 按 4.9 键序/表序重写 `._meta`（**保注释**） | `--check` `--strip-comments` |
-| `str norm <dir> <uuid>` | 输出**归一化 JSON**（供外部 Schema 工具 / AI 使用） | `--out -` |
-| `str context <dir> <uuid>` | 生成 AI 上下文片段 | `--depth` `--budget` |
+| `str spec set <dir> <VERSION>` | 把整份 bundle 的 `spec`（规范版本声明）统一改写为 `<VERSION>`；只改有差异的分支，**幂等** | `--dry-run` |
+| `str norm <dir> [uuid]` | 输出**归一化 JSON**（供外部 Schema 工具 / AI 使用） | `--out -` |
+| `str context <dir> [uuid]` | 生成 AI 上下文片段 | `--depth` `--budget` |
 | `str export <dir>` | 导出为单一文件（只读、派生） | `--format json\|toml` `--out -` `--depth` |
 | `str reveal <dir>` | 平台适配：macOS 设置 Bundle 位 / 取消 `._meta` 隐藏 | — |
 
-**`meta set` / `entry set` / `author add|rm` 的约定**（写入「结构之外」的字段）：
+**`[uuid]` 的缺省规则（规范条文）**：
 
-- 前三者**只能写字段的值，不能造结构**：`entries[].path` / `role` / `id`、`kind`、`refs` 结构仍归 `node add` / `branch add` / `sync` 所有；
+- 命令签名中凡以 **`[uuid]`** 书写的位置参数（含 `[anchor-uuid]`）一律**可选**，**省略时目标为 ROOT**；`<uuid>` 表示仍然必填（目前只有 `str ref add --target`）。工具 MUST 接受省略形式，MUST NOT 以「参数缺失」拒绝。
+- 该缺省值只解决**寻址**，不改变命令语义：若某操作在 ROOT 上没有意义或不允许（`branch add` 的锚点、`branch rm` 的目标），工具 MUST 解析出 ROOT 后以 `BadArg` **拒绝并说明原因**（前者指引改用 `node add`，后者提示 `不能删除 ROOT`），MUST NOT 静默改写成别的操作。
+- 新增命令时一律沿用本条：凡取单个分支为目标的命令，其 `<UUID>` 位置参数都应写作 `[uuid]` 并缺省 ROOT。
+
+**`meta set` / `entry set` / `author add|rm` / `spec set` 的约定**（写入「结构之外」的字段）：
+
+- 四者**只能写字段的值，不能造结构**：`entries[].path` / `role` / `id`、`kind`、`refs` 结构仍归 `node add` / `branch add` / `sync` 所有；
 - 字符串字段传**空串表示移除**该字段（用于清掉 `type` / `title` / `summary` / `note` / `tags` 项）；
 - 每次写入同样遵守 7.2：`revision + 1` 并刷新 `updated_at`；
-- `entry set` 的 `[uuid]` 指的是**条目所在的分支**（缺省为 ROOT），`--path` 是该分支 `entries[]` 里的单段名。
+- `entry set` 的 `[uuid]` 指的是**条目所在的分支**（缺省为 ROOT），`--path` 是该分支 `entries[]` 里的单段名；
+- `spec set` 是**唯一 bundle 级**的字段写入命令：`spec` 在三种档位里都是必填字段（4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致，故它 MUST 递归改写全部 `._meta`（子 bundle 除外，见 3.5），且**只改写与目标值不同的分支** —— 因此幂等（第二次输出「已更新 0 份」）；任一份 `._meta` 解析失败时 MUST 整体拒绝执行，不得写出一半；
+- `spec set` 的目标版本 MUST 形如 `1.<minor>.<patch>`（与 `._schema` 的正则同源）；`spec` 只供**人类追溯**，工具只强校验 `str` 主版本（见 13 章），因此写入比本实现更新的版本（前向声明）或更旧的版本（降级声明）都被允许。
 
 实现要求：
 
@@ -652,6 +662,7 @@ A.str/
 - **写出的 `._meta` 一律是 4.9 规范形式**：任一写命令（含 `sync` / `node add` / `meta set` …）落盘的字节都已按键序 / 表序 / 集合排序规范化，因此「改完再 `fmt`」应当无事可做 —— `str fmt --check` 返回 0 可作为 CI 门禁。
 - **`str tree` 的呈现顺序与落盘顺序同源**：子分支按父级 `entries[]` 的 `(order, path)` 排列，`entries` 中没有登记的子目录附加在末尾。
 - `E_REVISION_STALE` 的历史判定手段见 6.1.1；写入端有义务登记基线，否则该错误码退化为「只能判定自描述部分」。
+- **任何字段都必须有 CLI 写入路径**：不得存在「只能手改 `._meta`」的字段。`spec` 曾是该缺口的唯一残留，自 v1.9.0 起由 `str spec set` 承担（`str` 主版本固定为 `1`，不提供写入命令）。
 
 ---
 
@@ -700,7 +711,7 @@ A.str/
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "root"
 id = "01928f3a-7c4b-7000-8000-000000000000"
 name = "客户运营"
@@ -771,7 +782,7 @@ note = "bundle 级校验 Schema 存放处"
 
 ```toml
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
 type = "crm.customer"
@@ -829,7 +840,7 @@ order = 1
 ```toml
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "branch"
 id = "01928f3a-7c4b-7101-8b01-000000000101"
 type = "crm.followup_log"
@@ -863,7 +874,7 @@ order = 1
 
 ```toml
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "branch"
 id = "01928f3a-7c4b-7102-8b02-000000000102"
 type = "doc.meeting_note"
@@ -888,7 +899,7 @@ sha256 = "162af15f76d0493282a4a5e666928f6de6a36662faa44a860288766be298e9a0"
 
 ```toml
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "node"
 id = "01928f3a-7c4b-7002-8a02-000000000002"
 type = "crm.order_dataset"
@@ -913,7 +924,7 @@ sha256 = "1dd4893612cb1710550acb0624982a21e5ec5267d1dd05431e9aa20d02c16ef7"
 
 ```toml
 str = 1
-spec = "1.8.0"
+spec = "1.9.0"
 kind = "node"
 id = "01928f3a-7c4b-7003-8a03-000000000003"
 type = "crm.tag_system"
@@ -1055,6 +1066,8 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 21 | 字段写入闭环 | `str meta set` / `str entry set` / `str author add\|rm` 能写入 `type` / `title` / `summary` / `note` / `tags` / `authors[]`，且写后 `str validate --strict` → 0 errors；空串能移除字段 |
 | 22 | 排序确定性 | 同一组 `entries` 无论物理书写顺序如何，`str fmt` 后字节一致；`str fmt --check` 幂等返回 0 |
 | 23 | 修订历史可判定 | 绕过 CLI 只改 `updated_at` 不推进 `revision` → `str validate` 报 `E_REVISION_STALE`，且该结论跨 `str sync` 持续可见，直到 `revision` 真正前进 |
+| 24 | **`[uuid]` 缺省 ROOT** | `str show` / `str context` / `str norm` / `str ref add` / `str branch add` / `str branch rm` 省略 `<UUID>` 时目标为 ROOT；`show` / `context` / `norm` / `ref add` 落到 ROOT 正常工作，`branch add` / `branch rm` 以 `BadArg` 拒绝**并给出原因**（不得退化为「参数缺失」） |
+| 25 | **`spec` 可经 CLI 写入** | `str spec set <dir> <VERSION>` 改写整份 bundle 的 `spec`（子 bundle 除外）且**幂等**（第二次输出「已更新 0 份」）；写后 `str validate --strict` → 0 errors；非法版本串（`2.0.0` / `1.9` / 空串）→ `BadArg`；任一份 `._meta` 解析失败则**整体拒绝**、不写出部分结果 |
 
 ---
 
@@ -1070,7 +1083,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 1. **只有 `str` 主版本号**需要工具显式支持；`spec` 用于人类追溯。
 2. 一切厂商/实验性扩展必须放 `ext`（键名 `vendor.feature`），不得占用顶层字段。
-3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定；⑥ v1.7.0 引入 `.str` 子 bundle 硬边界与 `role = "bundle"`、扩展元数据豁免至 VCS、修正 `W_ROOT_STRAY` 与 schema/policy 冲突；⑦ v1.8.0 把「排序细则」「`E_REVISION_STALE` 可判定性」写实、补齐字段写入命令（`meta set` / `entry set` / `author`）使「必须经 CLI 操作 `._meta`」成为无例外的规则，另删除从未实现的 `policies.unknown_entry`、并把「写前校验」改述为可判定的「产出即合法且规范」；若已有实现，只需按 4.7 的删除说明去掉对 `unknown_entry` 的读取，并用 4.9 的排序细则替换原「无 `order` 者保持既有相对顺序」的写法（首次规范化会有一次性条目重排，属预期）。
+3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定；⑥ v1.7.0 引入 `.str` 子 bundle 硬边界与 `role = "bundle"`、扩展元数据豁免至 VCS、修正 `W_ROOT_STRAY` 与 schema/policy 冲突；⑦ v1.8.0 把「排序细则」「`E_REVISION_STALE` 可判定性」写实、补齐字段写入命令（`meta set` / `entry set` / `author`）使「必须经 CLI 操作 `._meta`」成为无例外的规则，另删除从未实现的 `policies.unknown_entry`、并把「写前校验」改述为可判定的「产出即合法且规范」；若已有实现，只需按 4.7 的删除说明去掉对 `unknown_entry` 的读取，并用 4.9 的排序细则替换原「无 `order` 者保持既有相对顺序」的写法（首次规范化会有一次性条目重排，属预期）；⑧ v1.9.0 把 §9 中 `show` / `branch add` / `branch rm` / `ref add` / `norm` / `context` 的 `<uuid>` 统一放宽为 `[uuid]`（省略即 ROOT）并写成规范条文 —— 纯放宽，旧调用不受影响，已有实现只需接受省略形式并在 ROOT 上对 `branch add` / `branch rm` 给出带原因的拒绝；同时新增 `str spec set`，把此前**唯一只能手改**的字段 `spec` 也纳入 CLI 写入路径（递归整份 bundle、幂等）—— 实现该命令不需要格式语义变更，纯属补齐工具面。
 
 ---
 

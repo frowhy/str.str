@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.8.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.2.0`）。
+> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.9.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.3.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -53,7 +53,7 @@
 - **stdout 只放结果**：`norm` / `export` / `context` / `validate --json` / `ls` / `show` / `tree` 的正文都在 stdout，可直接管道给 `jq`。
 - 写操作成功时在 stdout 打印一行中文确认，例如 `已新增独立节点 <uuid>（深度 1）`。
 - **写命令落盘的 `._meta` 一律已是 §4.9 规范形式**（键序 / 表序 / `entries`·`refs` 排序），因此「改完再 `fmt`」通常无事可做。
-- 写命令还会把当前 `(revision, updated_at)` 登记进 `._cache/revisions.json`（bundle 根下的派生数据），这是 `E_REVISION_STALE` 历史判定的基线，见 §3.19。
+- 写命令还会把当前 `(revision, updated_at)` 登记进 `._cache/revisions.json`（bundle 根下的派生数据），这是 `E_REVISION_STALE` 历史判定的基线，见 §4。
 
 ## 3. 命令逐条
 
@@ -68,7 +68,7 @@
 
 ```
 已创建 bundle：demo.str
-  spec = 1.8.0  str = 1
+  spec = 1.9.0  str = 1
   policies.id_version = 7
   ._schema 内已写入 3 份校验 Schema
 ```
@@ -87,7 +87,7 @@ demo.str  2 nodes / 1 branches / 5 entries  depth=2
 - `--json` 输出 `{ "bundle", "errors": [{code, level, path, message}], "warnings": [...], "stats": {nodes, branches, entries, depth} }`。
 - `--strict` 把 warning 提升为 error（CI 用）。
 - `--fix-manifest` **真正写盘**：先执行一次完整的 `str sync <dir>`（非 dry-run），再校验，因此「有未登记文件」这类问题会被就地修好。仍建议单独跑 `sync` 以便看到变更清单。
-- **不检查书写顺序**：键序 / 表序 / `entries` 排序由 `str fmt --check` 兜底（§3.13），`validate` 只报错误码。
+- **不检查书写顺序**：键序 / 表序 / `entries` 排序由 `str fmt --check` 兜底（§3.15），`validate` 只报错误码。
 
 ### 3.3 `str tree [--depth N] [--show-refs] [--ascii] <DIR>`
 
@@ -120,9 +120,9 @@ demo.str
 
 - `--raw` 直接读磁盘：首行 `<rel>  （磁盘原始）`，随后每行 `  - <文件>` / `  d <目录>`。
 
-### 3.5 `str show [--full] <DIR> <UUID>`
+### 3.5 `str show [--full] <DIR> [UUID]`
 
-打印该分支 `._meta` 的**归一化 JSON**（含 `ext: {}`、空表补 `[]`）。
+打印该分支 `._meta` 的**归一化 JSON**（含 `ext: {}`、空表补 `[]`）。`[UUID]` 缺省为 ROOT。
 
 `--full` 会在 JSON 之后追加各 `payload` / `asset` 的正文，形如：
 
@@ -135,21 +135,21 @@ hello
 
 新增**独立节点**（深度 1，`kind = "node"`）：生成 UUID（版本取 ROOT 的 `policies.id_version`）目录 + `._meta`，并 `upsert` 进 ROOT 的 `entries[]`（`role = "node"`）。stdout 打印新 UUID。ROOT 的 `revision` 会 `+1`。
 
-### 3.7 `str branch add [--type T] [--title X] [--summary S] [--order N] <DIR> <ANCHOR>`
+### 3.7 `str branch add [--type T] [--title X] [--summary S] [--order N] <DIR> [ANCHOR]`
 
 在锚点分支下新增**关联分支**（`kind = "branch"`，深度 ≥ 2）。
-锚点必须是 `node`/`branch`（深度 ≥ 1）；对 ROOT 使用会报 `参数错误：ROOT 的直接子分支应使用 \`str node add\`（role = node）`。`--order` 缺省为同级最大 `order + 1`。
+锚点必须是 `node`/`branch`（深度 ≥ 1）；**`[ANCHOR]` 缺省为 ROOT**，而 ROOT 不是合法锚点，故省略时（与显式传 ROOT 一样）报 `参数错误：ROOT 的直接子分支应使用 \`str node add\`（role = node）；\`branch add\` 的锚点须是深度 ≥ 1 的分支`（exit 2）。`--order` 缺省为同级最大 `order + 1`。
 
-### 3.8 `str branch rm --force [--recursive] <DIR> <UUID>`
+### 3.8 `str branch rm --force [--recursive] <DIR> [UUID]`
 
 - **删除总是递归**（`remove_dir_all`，含全部下级）；`--recursive` 为兼容规范 §9 的写法而接受，与缺省行为一致。
-- 不加 `--force` 会以 exit 2 拒绝（提示会移除全部下级）；不能删除 ROOT。
+- 不加 `--force` 会以 exit 2 拒绝（提示会移除全部下级）；**`[UUID]` 缺省为 ROOT，而 ROOT 不可删除** —— 省略时以 `参数错误：不能删除 ROOT（\`<UUID>\` 缺省即为 ROOT，请显式给出要删除的分支 id）` 拒绝。
 - 删除后会自动从父级 `entries[]` 移除该条目，父级 `revision + 1`；同时重扫一遍以清理该分支在 `._cache/revisions.json` 中的基线条目。
 
-### 3.9 `str ref add --target <TARGET> [--rel R] [--title X] [--note N] <DIR> <UUID>`
+### 3.9 `str ref add --target <TARGET> [--rel R] [--title X] [--note N] <DIR> [UUID]`
 
-在**源分支** `<UUID>` 的 `._meta.refs[]` 追加一条关联线。`--rel` 缺省 `related`。
-`<UUID>` 与 `<TARGET>` 都必须能在本 bundle 内解析，否则 exit 2。新 `refs[].id` 为 UUIDv7。
+在**源分支** `[UUID]`（缺省为 ROOT —— ROOT 持有 `refs[]` 是合法的）的 `._meta.refs[]` 追加一条关联线。`--rel` 缺省 `related`。
+`[UUID]` 与 `<TARGET>` 都必须能在本 bundle 内解析，否则 exit 2。新 `refs[].id` 为 UUIDv7。
 
 合法 `rel`（Schema 正则）：`related`、`depends_on`、`instance_of`、`derived_from`、`ref`、`x-<小写字母数字连字符>`。
 
@@ -198,7 +198,7 @@ hello
 - 新文件按扩展名推断 role：`json/toml/yaml/csv/md/txt` → `payload`，其余 → `asset`；同时补 `media_type`、`size`、`sha256`。
 - 只有**确实发生变更**的分支才 `revision + 1` + 刷新 `updated_at`。
 - 补登的条目**不带** `title` / `summary` / `type` —— 用 §3.11 / §3.12 补齐。
-- 非 dry-run 时会校准 `._cache/revisions.json` 基线：**只在该分支 `revision` 确实前进时推进**，因此绕过 CLI 的改动不会被「洗白」（见 §3.19）。
+- 非 dry-run 时会校准 `._cache/revisions.json` 基线：**只在该分支 `revision` 确实前进时推进**，因此绕过 CLI 的改动不会被「洗白」（见 §4）。
 
 ### 3.15 `str fmt [--check] [--strip-comments] <DIR>`
 
@@ -210,12 +210,30 @@ hello
 - `fmt` **不修改** `revision` / `updated_at`。
 - 幂等：连续执行第二次必定 `0`。
 
-### 3.16 `str norm [--out <PATH|->] <DIR> [UUID]`
+### 3.16 `str spec set <DIR> <VERSION> [--dry-run]`
+
+把**整份 bundle** 的 `._meta.spec`（规范版本声明）统一改写为 `<VERSION>`。v1.9.0 新增：在此之前 `spec` 是唯一没有 CLI 写入路径的字段，bump 规范版本只能手改 `._meta`。
+
+- **作用范围是整份 bundle**：`spec` 在 root / node / branch 三种档位里都是必填字段（§4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致 —— 文档就在说谎。子 bundle（目录名以 `.str` 结尾）是硬边界，不进入。
+- **只改写有差异的分支 ⇒ 幂等**：第二次执行输出 `全部 `._meta` 的 `spec` 已是 1.9.0（6 份）`，一个字节都不写（`revision` / `updated_at` 同样不动）。
+- `--dry-run` 只列出 `~ <rel>  spec: 1.9.0 → 1.8.0` 形式的计划，不落盘。
+- 版本串必须是 `1.<minor>.<patch>`（与 `._schema` 的正则同源），可带 `v` 前缀；`2.0.0` / `1.9` / 空串一律 exit 2。
+- 目标版本与本实现对应的规范版本不同时多打一行提示：`spec` 只供人类追溯，工具只强校验 `str` 主版本（规范 §13），因此**前向声明与降级声明都被允许**。
+- **不写一半**：执行前先整体体检，任一份 `._meta` 解析失败就直接 exit 2，不做部分改写。
+- 每个被改写的分支都会 `revision + 1` 并刷新 `updated_at`，同时推进 `._cache/revisions.json` 基线。
+
+```sh
+$S spec set demo.str 1.9.0                  # 幂等；已是目标版本时输出「已是 …（N 份）」
+$S spec set demo.str --dry-run v1.10.0      # 只看计划（`v` 前缀会被规整掉）
+$S spec set demo.str 9.9.9                  # exit 2：major 必须是 1
+```
+
+### 3.17 `str norm [--out <PATH|->] <DIR> [UUID]`
 
 打印归一化 JSON（2 空格缩进，含 `ext: {}`、空表补 `[]`）。缺省为 ROOT。
 `--out -`（或省略）写 stdout；给路径则写文件。
 
-### 3.17 `str context <DIR> <UUID> [--depth N] [--budget C]`
+### 3.18 `str context <DIR> [UUID] [--depth N] [--budget C]`
 
 输出 Markdown 上下文片段，下级分支按 `entries[]` 的 `(order, path)` 展开：
 
@@ -231,20 +249,20 @@ hello
     2026-09 跟进
 ```
 
-`--depth` 缺省 `2`，`--budget` 缺省 `8000`（字符）。超预算时截断并追加 `…（已按 --budget 截断）`。
+`--depth` 缺省 `2`，`--budget` 缺省 `8000`（字符）。`[UUID]` 缺省为 ROOT（即从 ROOT 起按深度展开整棵树）。超预算时截断并追加 `…（已按 --budget 截断）`。
 
-### 3.18 `str export [--format json|toml] [--out <PATH|->] [--depth N] <DIR>`
+### 3.19 `str export [--format json|toml] [--out <PATH|->] [--depth N] <DIR>`
 
 只读导出整棵树：`{"path", "depth", "meta", "children": [...]}` 递归结构（子节点同样按 `(order, path)` 排列）。缺省 `--format json`。
 `--out -`（或省略）写 stdout。产物是派生数据，**`--out` 若指向 bundle 内部会被拒绝（exit 2）**；`--format` 只接受 `json` / `toml`，其它值 exit 2。
 
 > `--format toml` 用的是简易 JSON→TOML 序列化，仅供人读，不是 §4.9 的规范形式。
 
-### 3.19 `str reveal <DIR>`
+### 3.20 `str reveal <DIR>`
 
 macOS：`SetFile -a B` 设 bundle 位 + `chflags nohidden` 取消各 `._meta` 的隐藏标记。缺少 `SetFile`（需 Xcode CLT）时只打印手动命令，不算失败。非 macOS 打印提示。
 
-### 3.20 `str codes`
+### 3.21 `str codes`
 
 列出全部 **35** 个错误码（24 个 `E_*` + 11 个 `W_*`，含 `W_MANIFEST_*` 三个 advisory 变体）。规范 §9 未列此命令。
 

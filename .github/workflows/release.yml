@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的 tag（例如 v0.1.0）"
+        description: "要发布的 tag（例如 v0.3.0）"
         required: true
-        default: "v0.1.0"
+        default: "v0.3.0"
 
 permissions:
   contents: write
@@ -37,6 +37,11 @@ jobs:
         run: |
           rustc --version
           cargo --version
+
+      # 版本一致性门禁（VERSIONS.toml 为真源）：真源 ↔ 各声明点逐点比对；tag 推送时
+      # 还会校验「推送的 tag = 真源声明的 tag」。放在最前面，版本对不上就没必要编译。
+      - name: 版本一致性门禁
+        run: bash scripts/check-versions.sh
 
       - name: 测试（单元 + 集成，48 项）
         working-directory: str-cli
