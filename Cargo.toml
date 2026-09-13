@@ -1,0 +1,30 @@
+[package]
+name = "str-format"
+version = "0.1.0"
+edition = "2024"
+description = "STR 结构化树资源格式（.str）的读写库、校验器与 CLI"
+license = "MIT"
+
+[[bin]]
+name = "str"
+path = "src/main.rs"
+
+[lib]
+name = "str_format"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+jsonschema = "0.56.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.10"
+thiserror = "2.0.20"
+time = { version = "0.3.55", features = ["formatting", "parsing"] }
+toml_edit = "0.25.15"
+uuid = { version = "1.26.1", features = ["v7"] }
+walkdir = "2.5.0"
+
+[profile.release]
+opt-level = 3

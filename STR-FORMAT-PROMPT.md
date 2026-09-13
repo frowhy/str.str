@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.4.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.6.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-09-14 |
 | 文档定位 | **本文件即提示词（Prompt）**，整份可直接投喂给 AI 开发代理；第 1 章为指令主体，第 2~13 章为规范性附录（即指令的「事实来源」） |
@@ -21,6 +21,7 @@
 | **v1.3.0** | 2026-09-14 | **统一 `._` 保留前缀**：`.meta` → **`._meta`**；`_schema` / `_audit` / `_cache` → **`._schema` / `._audit` / `._cache`**。格式保留名一律以 `._` 开头，业务条目不得以 `._` 开头。连带：新增**操作系统噪声豁免**（`._*` 形式的 AppleDouble 伴生文件与 `.DS_Store` 一律忽略，不报 `E_RESERVED_NAME`、不参与清单比对）；`.gitignore` 模板补 `**/._*`。 |
 | **v1.4.0** | 2026-09-14 | **载体由 JSON 改为 TOML v1.0.0**（`._meta` 现为 TOML；允许 `#` 注释且工具必须保注释；时间改用 TOML 原生 offset date-time；清单改为数组表 `[[entries]]` / `[[refs]]` / `[[authors]]`，`[policies]` / `[ext]` 为表；新增「TOML → 规范 JSON 归一化 → JSON Schema 校验」链路，ADR-1 重写）。**决策收敛**：UUID v7 固定（`id_version = 7`）、保留 `refs` 跨枝关联、`sha256` 改为**强制**（`policies.sha256 = "required"`，新增 `E_MANIFEST_DIGEST_MISSING`）。顺带清理：`[[entries]]` 不再重复声明 `kind`（与 `role` 冗余），由 `role` 唯一表达；CLI 新增 `str fmt` / `str norm`，`str export` 支持 `--format json\|toml`。 |
 | **v1.5.0** | 2026-09-14 | **移除 `._audit/` 与 `journal` role**：审计能力交由 Git / 协作平台提供，格式内不设审计目录（删除 7.3 节、7.1 表相关行、`role: journal`、示例与 .gitignore 相关项）。**固定深度分界**：深度 1 = `node`、深度 ≥2 = `branch` 为硬规则，删除 `policies.branch_min_depth` 字段（2 是唯一自洽值，暴露可配置开关只会误导）。附录 A 全部决策关闭，转为决策索引。 |
+| **v1.6.0** | 2026-09-14 | **补齐实现期发现的三处澄清**（格式语义无变化）：① **`entries` 与 `refs` 同因 TOML 无法表达空数组表而允许整表省略**（归一化补 `[]`），schema 中不再必填；② `E_RESERVED_NAME` 判定精确化 —— 业务**目录**以 `._` 开头必报、**已登记**的 `._*` 条目必报、未登记的 `._*` **普通文件**豁免；③ `str sync` 去掉 `--recursive`（始终递归）。另补充**参考实现（Rust）与仓库结构**、错误码覆盖率验收项，示例 §10 全部替换为**真实 `size`/`sha256`**（由 `scripts/build-example.sh` 生成并逐字对齐）。 |
 
 ---
 
@@ -73,6 +74,19 @@
 | D6 | CLI | 实现第 9 章全部命令 |
 | D7 | 测试 | 单测 + 对 D3 的端到端校验 + **故意破坏用例**（每个 error 码至少 1 例） |
 | D8 | 平台适配 | macOS 可选 Bundle 位；Windows/Linux 保持普通目录（不得依赖平台特性才能工作） |
+
+**参考实现（本仓库，已完成）**：Rust 2024；依赖 `toml_edit`（保注释写回）、`jsonschema`（2020-12）、`clap`、`sha2`、`uuid`（v7）、`time`、`walkdir`。
+
+| 目录 / 文件 | 说明 |
+| --- | --- |
+| `src/{meta,meta_edit}.rs` | `._meta` 模型、提取、归一化、保注释写回、模板渲染 |
+| `src/bundle.rs` | 分支树遍历、`id` 索引、懒加载 |
+| `src/validate.rs` | 规范第 6 章全部错误码 |
+| `src/cmd.rs` / `src/main.rs` | CLI 子命令 / clap 定义与退出码 |
+| `schema/*.json` | 三份档位 JSON Schema（2020-12），`str init` 会复制进 `._schema/` |
+| `examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
+| `scripts/build-example.sh` | 幂等重建示例 bundle |
+| `tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
 
 ### 1.3 硬性约束（违反即失败）
 
@@ -188,7 +202,7 @@
 | 文件名 | `._meta`（无扩展名） |
 | 注释 | **允许** `#` 注释；注释**不得承载语义**（一切语义必须落在字段里）；工具写回时**必须保留注释**（comment-preserving） |
 | 时间 | 一律使用 TOML **原生 offset date-time**（必须带时区偏移，如 `2026-09-14T10:03:11+08:00`），**不得**写成字符串 |
-| 空数组表 | TOML 无法表达空的 `[[x]]`；`refs` 为空时**整表省略**，归一化时补为 `[]` |
+| 空数组表 | TOML 无法表达空的 `[[x]]`；`refs` / `entries` 为空时**整表省略**，归一化时补为 `[]`（故二者在 schema 中不是必填表） |
 | 大小上限 | 建议 ≤ 256 KiB；超过说明该分支内容过于庞杂，宜拆分下级分支 |
 
 > JSON 与 YAML 均已评估并否决，理由见 11 章 **ADR-1**。
@@ -227,7 +241,7 @@
 | `schema` | string | 否 | 该分支 payload 的 JSON Schema 引用（bundle 内相对路径，如 `._schema/customer.schema.json`） |
 | `policies` | table `[policies]` | 仅 root | 校验策略，见 4.7 |
 | `refs` | array of tables `[[refs]]` | 否 | **跨枝关联声明**（思维导图的「关联线」），见 4.5；不复制数据、不改变目录结构 |
-| `entries` | array of tables `[[entries]]` | ✅ | **本目录内容清单（唯一真源）**，见 4.6 |
+| `entries` | array of tables `[[entries]]` | ✅（空时可整表省略） | **本目录内容清单（唯一真源）**，见 4.6；为空时省略，归一化补 `[]` |
 | `ext` | table `[ext]` | 否 | 扩展命名空间，键必须为 `vendor.xxx` 形式 |
 
 ### 4.4 `authors[]` 元素
@@ -446,7 +460,7 @@ A.str/
 | `E_MANIFEST_HASH` | error | `size` / `sha256` 与实际不符 |
 | `E_MANIFEST_DIGEST_MISSING` | error | `policies.sha256 = "required"` 时，`role` ∈ `payload`/`asset` 的条目缺少 `size` 或 `sha256` |
 | `E_MANIFEST_DUP` | error | `entries[].path` 重复 |
-| `E_RESERVED_NAME` | error | 业务条目以 `._` 开头（`._*` 普通文件与 `.DS_Store` 属操作系统噪声，必须豁免，不得报本码） |
+| `E_RESERVED_NAME` | error | 占用 `._` 保留命名空间：① 业务**目录**以 `._` 开头（AppleDouble 只产生文件，故 `._*` 目录必属业务命名）；② **已在 `entries` 中登记**的 `._*` 条目（作者显式声明其为业务内容）。未登记的 `._*` **普通文件**与 `.DS_Store` 属操作系统噪声，必须豁免、不得报本码 |
 | `E_REVISION_STALE` | error | `updated_at` 变化但 `revision` 未前进，或 `revision` 非递增整数 |
 | `E_SCHEMA_FAIL` | error | payload 不满足其声明的 JSON Schema |
 | `W_BUNDLE_SUFFIX` | warn | 根目录名未以 `.str` 结尾 |
@@ -571,7 +585,7 @@ A.str/
 | `str branch rm <dir> <uuid>` | 删除关联分支（含其全部下级） | `--force` `--recursive` |
 | `str ref add <dir> <uuid> --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
 | `str ref rm <dir> <ref-uuid>` | 删除关联线 | — |
-| `str sync <dir>` | 用磁盘实际状态修正 `entries[]`（补登/移除/`size`/`sha256` 更新） | `--dry-run` `--recursive` |
+| `str sync <dir>` | 用磁盘实际状态修正 `entries`（补登/移除/`size`/`sha256` 更新）；**始终递归**全部分支 | `--dry-run` |
 | `str fmt <dir>` | 按 4.9 键序/表序重写 `._meta`（**保注释**） | `--check` `--strip-comments` |
 | `str norm <dir> <uuid>` | 输出**归一化 JSON**（供外部 Schema 工具 / AI 使用） | `--out -` |
 | `str context <dir> <uuid>` | 生成 AI 上下文片段 | `--depth` `--budget` |
@@ -597,6 +611,9 @@ A.str/
 客户运营.str/
 ├── ._meta
 ├── ._schema/
+│   ├── root-meta.schema.json
+│   ├── node-meta.schema.json
+│   ├── branch-meta.schema.json
 │   └── customer.schema.json
 ├── 01928f3a-7c4b-7001-8a01-000000000001/          # 独立节点：客户档案
 │   ├── ._meta
@@ -620,12 +637,17 @@ A.str/
 
 > 注意：深度 2 的「跟进记录」与深度 3 的「2026-09 会议纪要」**都在承载真实数据**，这正是 v1.1.0 明确允许的形态。
 
+> **本节的 6 份 `._meta` 与 `examples/客户运营.str/` 逐字一致**（`size` / `sha256` 为真实计算值，
+> 非占位符），可用 `scripts/build-example.sh` 重新生成，并用 `str validate examples/客户运营.str --strict` 验证。
+
+
 ### 10.2 `客户运营.str/._meta`
 
 ```toml
-# ROOT 元数据：记录一级分支结构（即 role = "node" 的 entries）
+# ── STR bundle 根元数据 ──────────────────────────────────────────
+# ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.5.0"
+spec = "1.6.0"
 kind = "root"
 id = "01928f3a-7c4b-7000-8000-000000000000"
 name = "客户运营"
@@ -640,7 +662,6 @@ updated_at = 2026-09-14T10:03:11+08:00
 id_version = 7
 max_depth = 32
 manifest = "strict"
-unknown_entry = "allow"
 sha256 = "required"
 large_asset_bytes = 10485760
 deep_tree_warn = 16
@@ -687,8 +708,8 @@ order = 3
 [[entries]]
 path = "._schema"
 role = "schema"
-count = 1
-note = "bundle 级 Schema 存放处"
+count = 4
+note = "bundle 级校验 Schema 存放处"
 
 [ext]
 ```
@@ -697,7 +718,7 @@ note = "bundle 级 Schema 存放处"
 
 ```toml
 str = 1
-spec = "1.5.0"
+spec = "1.6.0"
 kind = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
 type = "crm.customer"
@@ -708,12 +729,6 @@ revision = 8
 created_at = 2026-09-01T09:20:00+08:00
 updated_at = 2026-09-14T10:03:11+08:00
 schema = "._schema/customer.schema.json"
-
-[[authors]]
-id = "u:frowhy"
-name = "Frowhy"
-role = "owner"
-at = 2026-09-01T09:20:00+08:00
 
 [[refs]]
 id = "01928f3a-7c4b-7201-8d01-000000000201"
@@ -727,15 +742,16 @@ note = "跨枝关联：客户档案 ⇢ 订单数据集"
 path = "profile.json"
 role = "payload"
 media_type = "application/json"
-size = 412
-sha256 = "9f2c1d0b7a4e5c6d8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60"
+size = 87
+sha256 = "852fa7846c3b3a70e053cf1b00ad8503a5f04b804cc4d1259404585260b8037f"
+schema = "._schema/customer.schema.json"
 
 [[entries]]
 path = "avatar.png"
 role = "asset"
 media_type = "image/png"
-size = 18234
-sha256 = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809"
+size = 70
+sha256 = "6b7fa434f92a8b80aab02d9bf1a12e49ffcae424e4013a1c4f68b67e3d2bbcd0"
 
 [[entries]]
 path = "attachments"
@@ -760,7 +776,7 @@ order = 1
 ```toml
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.5.0"
+spec = "1.6.0"
 kind = "branch"
 id = "01928f3a-7c4b-7101-8b01-000000000101"
 type = "crm.followup_log"
@@ -771,18 +787,12 @@ revision = 3
 created_at = 2026-09-10T14:00:00+08:00
 updated_at = 2026-09-14T10:03:11+08:00
 
-[[authors]]
-id = "u:frowhy"
-name = "Frowhy"
-role = "editor"
-at = 2026-09-14T10:03:11+08:00
-
 [[entries]]
 path = "followups.json"
 role = "payload"
 media_type = "application/json"
-size = 1893
-sha256 = "2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a"
+size = 164
+sha256 = "5ca93dc91b69a6eef2b4692cd270032f3b246ba9c8763b79afbcdfeef7bc195a"
 
 [[entries]]
 path = "01928f3a-7c4b-7102-8b02-000000000102"
@@ -800,7 +810,7 @@ order = 1
 
 ```toml
 str = 1
-spec = "1.5.0"
+spec = "1.6.0"
 kind = "branch"
 id = "01928f3a-7c4b-7102-8b02-000000000102"
 type = "doc.meeting_note"
@@ -811,33 +821,78 @@ revision = 2
 created_at = 2026-09-12T11:22:00+08:00
 updated_at = 2026-09-13T09:05:00+08:00
 
-[[authors]]
-id = "u:agent-001"
-name = "AI Agent"
-role = "agent"
-at = 2026-09-13T09:05:00+08:00
-
 [[entries]]
 path = "2026-09-10.md"
 role = "payload"
 media_type = "text/markdown"
-size = 2418
-sha256 = "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b"
+size = 156
+sha256 = "162af15f76d0493282a4a5e666928f6de6a36662faa44a860288766be298e9a0"
 
 [ext]
 ```
 
-### 10.6 导图渲染结果
+### 10.6 `01928f3a-7c4b-7002-8a02-000000000002/._meta`（订单数据集 · 独立节点）
+
+```toml
+str = 1
+spec = "1.6.0"
+kind = "node"
+id = "01928f3a-7c4b-7002-8a02-000000000002"
+type = "crm.order_dataset"
+title = "订单数据集"
+summary = "全部订单明细（CSV）。"
+tags = ["order"]
+revision = 4
+created_at = 2026-09-02T10:00:00+08:00
+updated_at = 2026-09-14T10:03:11+08:00
+
+[[entries]]
+path = "orders.csv"
+role = "payload"
+media_type = "text/csv"
+size = 136
+sha256 = "1dd4893612cb1710550acb0624982a21e5ec5267d1dd05431e9aa20d02c16ef7"
+
+[ext]
+```
+
+### 10.7 `01928f3a-7c4b-7003-8a03-000000000003/._meta`（标签体系 · 独立节点）
+
+```toml
+str = 1
+spec = "1.6.0"
+kind = "node"
+id = "01928f3a-7c4b-7003-8a03-000000000003"
+type = "crm.tag_system"
+title = "标签体系"
+summary = "客户与订单共用的标签字典。"
+tags = ["taxonomy"]
+revision = 2
+created_at = 2026-09-03T15:30:00+08:00
+updated_at = 2026-09-14T10:03:11+08:00
+
+[[entries]]
+path = "tags.json"
+role = "payload"
+media_type = "application/json"
+size = 63
+sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
+
+[ext]
+```
+
+### 10.8 导图渲染结果
+
+实际执行 `str tree examples/客户运营.str --show-refs` 的输出（`⇢` 即跨枝关联线）：
 
 ```
 客户运营.str
-├─ [1] 客户档案 · 张伟              (crm.customer)
-│   ├─ 跟进记录                     (crm.followup_log)
-│   │   └─ 2026-09 会议纪要         (doc.meeting_note)  → 2026-09-10.md
-│   ├─ profile.json / avatar.png / attachments/
-│   ⇢ 关联: 订单数据集  --related--
-├─ [2] 订单数据集                   (crm.order_dataset)  → orders.csv
-└─ [3] 标签体系                     (crm.tag_system)      → tags.json
+├─ [1] 客户档案 · 张伟  (crm.customer)
+│  ⇢ 关联: 01928f3a-7c4b-7002-8a02-000000000002  --related--
+│  └─ [1] 跟进记录  (crm.followup_log)
+│     └─ [1] 2026-09 会议纪要  (doc.meeting_note)
+├─ [2] 订单数据集  (crm.order_dataset)
+└─ [3] 标签体系  (crm.tag_system)
 ```
 
 ---
@@ -938,7 +993,7 @@ sha256 = "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b"
 | 12 | AI 可用性 | `str context --budget 8k` 输出可直接拼入模型上下文，且不含 payload 正文 |
 | 13 | 文档一致 | 本文件各章节与实现行为逐条比对无差异 |
 | 14 | 操作系统噪声豁免 | 在 bundle 内放置 `._orders.csv`、`._._meta`、`.DS_Store` → 校验**通过**且不计入 `entries` 统计；业务文件以 `._` 开头 → `E_RESERVED_NAME` |
-| 15 | TOML 校验链 | `._meta` → 归一化 JSON → JSON Schema 校验全链路通过；归一化后的键序/表序与 4.9 完全一致；`refs` 缺省时补 `[]` |
+| 15 | TOML 校验链 | `._meta` → 归一化 JSON → JSON Schema 校验全链路通过；归一化后的键序/表序与 4.9 完全一致；`refs` / `entries` 缺省时补 `[]` |
 | 16 | 注释保真 | 在 `._meta` 里加 `#` 注释 → 经 `str sync`/`str fmt` 写回后注释仍在；`str fmt --strip-comments` 时才可丢弃 |
 | 17 | 强制指纹 | 删除任 `payload`/`asset` 条目的 `sha256` 或 `size` → `E_MANIFEST_DIGEST_MISSING` |
 
@@ -956,7 +1011,7 @@ sha256 = "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b"
 
 1. **只有 `str` 主版本号**需要工具显式支持；`spec` 用于人类追溯。
 2. 一切厂商/实验性扩展必须放 `ext`（键名 `vendor.feature`），不得占用顶层字段。
-3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」。
+3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定。
 
 ---
 
