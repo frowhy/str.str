@@ -72,7 +72,59 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 **这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `._meta` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
 
-需要更强（客户端级）约束时，可把 SKILL.md 的 Hard rules 复制进宿主的 always-apply 规则机制，例如 CodeBuddy 的项目规则 `.codebuddy/rules/str/RULE.mdc`（frontmatter `alwaysApply: true`）。
+需要更强（客户端级）约束时，可把 SKILL.md 的 Hard rules 复制进宿主的 always-apply 规则机制 —— 详见下一节。
+
+## 保证自动触发：Rules 兜底
+
+`description` 措辞只是**请求**宿主默认加载本技能，不是保证 —— 各客户端对 skill 的加载策略不同：
+
+- 有的客户端按 `description` 语义检索，只在判断「相关」时才加载（措辞被动就退化为「提到才触发」）；
+- 有的客户端对每会话加载的 skill 数量有预算，always-on 技能可能被挤出；
+- 有的客户端根本没有自动加载，skill 只能手动调用。
+
+**唯一可靠的兜底是宿主的 always-apply 规则机制**：规则（rules）是每次会话必然注入的上下文，不依赖任何检索或判断。在其中写一条「会话开始时先读 SKILL.md 并遵循」的指令，即可把默认加载变成强制加载。
+
+### CodeBuddy：项目规则（推荐）
+
+新建 `.codebuddy/rules/str-skill/RULE.mdc`（内容如下，原样复制即可）：
+
+```mdc
+---
+description: 强制加载 str-skill（STR bundle 工作流）
+alwaysApply: true
+---
+
+每次会话开始时，先完整阅读技能文件 `.codebuddy/skills/str-skill/SKILL.md`
+（用户级安装则在 `~/.codebuddy/skills/str-skill/SKILL.md`），并在整个会话中遵循其约束：
+
+1. 任何 `._meta` 的读写必须通过 `str` CLI，禁止手写、sed/perl/jq 改 TOML。
+2. 创建或修改任何文件时，默认将产物组织进 STR bundle；
+   无合适 bundle 时用 `str init`（结构用 `str node add` / `str branch add`）新建，
+   而不是散落工作目录。bundle 内 payload 用常规文件工具编辑。
+3. 每次 bundle 变更收尾必须 `str sync <dir>` + `str validate <dir> --strict`，
+   达到 0 errors / 0 warnings 才算完成，另跑 `str fmt <dir> --check` 期望 0。
+```
+
+要点：**frontmatter 必须有 `alwaysApply: true`**，否则规则退化为按 `description` 检索触发 —— 和 skill 本身同样的坑。
+
+### CodeBuddy：用户级规则（跨项目）
+
+用户级规则目录是**平铺文件**：同款内容放到 `~/.codebuddy/rules/str-skill-load.mdc`
+（frontmatter 与上同，实测格式含 `alwaysApply` / `enabled` / `updatedAt` 字段），对所有项目生效。
+注意配套关系：**skill 必须真的装好**（`~/.codebuddy/skills/str-skill/`）规则才有目标可读 ——
+「自动触发失效」最常见的根因不是措辞，而是 skill 根本没安装或装错了目录。
+
+### 其它 Agent
+
+机制同构，换文件即可：凡「每次会话必然注入」的约定文件（如 Claude Code 的 `CLAUDE.md`、
+CodeBuddy 的根 `CODEBUDDY.md`）都是现成载体 —— 把上面规则正文（不含 frontmatter）粘进去，
+并把技能文件路径改成该客户端的 skill 安装路径。
+
+### 验证加载是否生效
+
+会话里直接问 Agent：「读取 `.codebuddy/skills/str-skill/SKILL.md` 的硬规则一节并复述」。
+能复述 `str sync` + `str validate --strict` 的 0/0 交付前提，说明规则已注入；否则检查
+规则文件路径与 `alwaysApply` frontmatter。
 
 ## 与仓库其它部分的关系
 

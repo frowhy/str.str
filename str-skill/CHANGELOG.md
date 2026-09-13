@@ -29,6 +29,13 @@
   一律存入 STR bundle（无合适 bundle 时用 `str init` / `str node add` / `str branch add`
   新建，而不是散落工作目录）；bundle 内 payload 仍用常规文件工具编辑，
   收尾 `str sync` + `str validate --strict`。
+- **README 新增「保证自动触发：Rules 兜底」章节**：实测 `description` 声明式措辞仍不能在
+  所有客户端保证 always-on（按语义检索、加载预算、无自动加载三类宿主都会漏触发），
+  给出唯一可靠兜底 —— 宿主 always-apply 规则：CodeBuddy 项目级
+  `.codebuddy/rules/str-skill/RULE.mdc`（`alwaysApply: true` + 会话开始先读 SKILL.md
+  并遵循硬规则，规则正文可直接复制）与用户级 `~/.codebuddy/rules/` 跨项目写法，
+  以及 Claude Code `CLAUDE.md` / 根 `CODEBUDDY.md` 等同构载体；并附加载生效的验证方法。
+  强调规则的 frontmatter 必须带 `alwaysApply: true`，否则与 skill 同样退化为检索触发。
 
 ---
 
