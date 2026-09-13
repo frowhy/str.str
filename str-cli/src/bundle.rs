@@ -148,7 +148,14 @@ impl Bundle {
         for entry in walkdir::WalkDir::new(dir)
             .max_depth(8)
             .into_iter()
-            .filter_entry(|e| e.depth() == 0 || !util::is_os_noise(&e.file_name().to_string_lossy()))
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                // 不进入独立子 bundle（`.str` 目录是硬边界，规范 3.5）
+                !util::is_os_noise(&name) && !util::is_sub_bundle(&name)
+            })
             .flatten()
         {
             if entry.depth() == 0 || !entry.file_type().is_dir() {
@@ -218,6 +225,10 @@ impl Bundle {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 if util::is_os_noise(&name) {
+                    continue;
+                }
+                if util::is_sub_bundle(&name) {
+                    // 独立子 bundle：硬边界，父 bundle 不进入、不参与分支树
                     continue;
                 }
                 let rel = self.rel(&child);

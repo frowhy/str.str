@@ -354,11 +354,14 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
-            if v.depth == 0 && !util::is_uuid(name) {
+            // ROOT 允许承载任意内容（规范 3.3：任意目录可放任意文件），
+            // 但「既非 UUID 命名的分支目录、又未登记进 entries」的条目属散落内容 → 告警。
+            let declared_here = entries.iter().any(|e| e.path == *name);
+            if v.depth == 0 && !util::is_uuid(name) && !declared_here {
                 self.warn(
                     code::ROOT_STRAY,
                     ep.clone(),
-                    "ROOT 下出现既非分支目录（UUID 命名）也非保留名的条目",
+                    "ROOT 下出现既非分支目录（UUID 命名）又未登记的条目",
                 );
             }
             match entries.iter().find(|e| e.path == *name) {
@@ -428,8 +431,20 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
+                let dir_name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let child_has_meta = bundle.has_meta(&path);
                 if e.role == "dir" {
+                    if util::is_sub_bundle(&dir_name) {
+                        self.err(
+                            code::ENTRY_ROLE_DEPTH,
+                            ep,
+                            "该目录名以 `.str` 结尾（独立子 bundle），应登记为 `role = \"bundle\"`",
+                        );
+                        return;
+                    }
                     if child_has_meta {
                         self.err(
                             code::ENTRY_ROLE_DEPTH,
@@ -510,6 +525,26 @@ impl<'a> Checker<'a> {
                         code::ENTRY_ROLE_DEPTH,
                         ep,
                         format!("`role = {:?}` 要求目录", e.role),
+                    );
+                }
+            }
+            "bundle" => {
+                // 独立子 bundle：目录名须以 `.str` 结尾；父 bundle 不进入其内部
+                let dir_name = path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if !is_dir {
+                    self.err(
+                        code::ENTRY_ROLE_DEPTH,
+                        ep,
+                        "`role = \"bundle\"` 要求目录",
+                    );
+                } else if !util::is_sub_bundle(&dir_name) {
+                    self.err(
+                        code::ENTRY_ROLE_DEPTH,
+                        ep,
+                        format!("`role = \"bundle\"` 要求目录名以 `.str` 结尾，实为 {dir_name:?}"),
                     );
                 }
             }

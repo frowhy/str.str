@@ -25,7 +25,7 @@ mkdir -p "$OUT/._schema" \
          "$OUT/$N3"
 
 # ── bundle 级 Schema ────────────────────────────────────────────
-cp "$ROOT"/schema/*.json "$OUT/._schema/"
+cp "$ROOT"/._schema/*.json "$OUT/._schema/"
 python3 - "$OUT/._schema/customer.schema.json" <<'PY'
 import json, sys
 schema = {
@@ -79,7 +79,7 @@ cat > "$OUT/._meta" <<EOF
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "root"
 id = "$ROOT_ID"
 name = "客户运营"
@@ -155,7 +155,7 @@ TAGS_SIZE=$(size_of "$OUT/$N3/tags.json");         TAGS_HASH=$(hash_of "$OUT/$N3
 
 cat > "$OUT/$N1/._meta" <<EOF
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "$N1"
 type = "crm.customer"
@@ -211,7 +211,7 @@ EOF
 cat > "$OUT/$N1/$L1/._meta" <<EOF
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "branch"
 id = "$L1"
 type = "crm.followup_log"
@@ -243,7 +243,7 @@ EOF
 
 cat > "$OUT/$N1/$L1/$L2/._meta" <<EOF
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "branch"
 id = "$L2"
 type = "doc.meeting_note"
@@ -266,7 +266,7 @@ EOF
 
 cat > "$OUT/$N2/._meta" <<EOF
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "$N2"
 type = "crm.order_dataset"
@@ -289,7 +289,7 @@ EOF
 
 cat > "$OUT/$N3/._meta" <<EOF
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "$N3"
 type = "crm.tag_system"

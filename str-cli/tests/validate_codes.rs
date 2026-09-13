@@ -572,13 +572,85 @@ fn w_bundle_suffix() {
 
 #[test]
 fn w_dotfile_and_root_stray() {
+    // 真正的“其它点文件” → W_DOTFILE
     let root = baseline("dotfile");
-    w(&root, ".gitignore", "._cache/\n");
+    w(&root, ".env", "A=1\n");
     assert_code(&root, "W_DOTFILE");
 
+    // VCS 元数据豁免：`.git/` 与 `.gitignore` 不报任何码（规范 3.4）
+    let root = baseline("vcs");
+    w(&root, ".gitignore", "._cache/\n");
+    w(&root, ".git/HEAD", "ref: refs/heads/main\n");
+    let (set, report) = codes(&root);
+    assert!(!set.contains("W_DOTFILE"), "VCS 元数据应豁免：\n{report}");
+    assert!(!set.contains("E_MANIFEST_MISSING"), "VCS 元数据应豁免：\n{report}");
+
+    // ROOT 未登记的散落内容 → W_ROOT_STRAY
     let root = baseline("rootstray");
     w(&root, "notes.md", "x");
     assert_code(&root, "W_ROOT_STRAY");
+
+    // ROOT **已登记**的非 UUID 内容 → 合法（规范 3.3：任意目录可放任意文件）
+    let root = baseline("rootstray2");
+    let body = "x\n";
+    w(&root, "notes.md", body);
+    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    w(
+        &root,
+        "._meta",
+        &format!("{text}\n{}", payload_entry("notes.md", body, "text/markdown")),
+    );
+    let (set, report) = codes(&root);
+    assert!(
+        !set.contains("W_ROOT_STRAY"),
+        "已登记的 ROOT 内容不应告警：\n{report}"
+    );
+    assert_clean(&root);
+}
+
+#[test]
+fn dod_nested_bundle_is_hard_boundary() {
+    let root = baseline("nested");
+    let sub = "子集.str";
+    w(
+        &root,
+        &format!("{sub}/._meta"),
+        &meta_text("root", "01928f3a-7c4b-7000-8000-00000000000f", "title = \"嵌套\"\nsummary = \"s\"", ""),
+    );
+    w(&root, &format!("{sub}/data.txt"), "inner\n");
+    // 未登记 → 报「未登记」，但**不得**报「父目录不是分支」（.str 是硬边界）
+    let (set, report) = codes(&root);
+    assert!(
+        !set.contains("E_META_MISSING"),
+        "`.str` 目录必须是硬边界：\n{report}"
+    );
+    assert!(set.contains("E_MANIFEST_MISSING"), "未登记应报：\n{report}");
+
+    // 登记为 role = "bundle" → 全绿
+    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    w(
+        &root,
+        "._meta",
+        &format!(
+            "{text}\n[[entries]]\npath = \"{sub}\"\nrole = \"bundle\"\ntitle = \"嵌套子 bundle\"\n"
+        ),
+    );
+    assert_clean(&root);
+
+    // 登记为 role = "dir" → 提示应改用 bundle
+    let root2 = baseline("nested2");
+    w(
+        &root2,
+        &format!("{sub}/._meta"),
+        &meta_text("root", "01928f3a-7c4b-7000-8000-00000000000f", "title = \"嵌套\"\nsummary = \"s\"", ""),
+    );
+    let text = std::fs::read_to_string(root2.join("._meta")).unwrap();
+    w(
+        &root2,
+        "._meta",
+        &format!("{text}\n[[entries]]\npath = \"{sub}\"\nrole = \"dir\"\n"),
+    );
+    assert_code(&root2, "E_ENTRY_ROLE_DEPTH");
 }
 
 #[test]

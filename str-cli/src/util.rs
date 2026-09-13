@@ -98,12 +98,34 @@ pub fn is_lock_file(name: &str) -> bool {
     name == LOCK_FILE
 }
 
-/// 是否为操作系统噪声（不参与校验，规范 3.4）。
+/// 是否为操作系统 / 工具（VCS）元数据：一律豁免，不参与校验（规范 3.4）。
 ///
-/// `._*` 形式的普通文件是 macOS AppleDouble 伴生文件；`._meta` 本身不是噪声。
+/// - `._*` 形式的**普通文件**是 macOS AppleDouble 伴生文件（`._meta` 本身不是噪声）；
+/// - `.git` / `.gitignore` / `.hg` / `.svn` 等是版本控制元数据 —— 真实项目必然存在。
 pub fn is_os_noise(name: &str) -> bool {
-    matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini")
-        || (name.starts_with("._") && name != META_FILE)
+    matches!(
+        name,
+        ".DS_Store"
+            | "Thumbs.db"
+            | "desktop.ini"
+            | ".git"
+            | ".gitignore"
+            | ".gitattributes"
+            | ".gitmodules"
+            | ".gitkeep"
+            | ".hg"
+            | ".hgignore"
+            | ".svn"
+            | ".jj"
+    ) || (name.starts_with("._") && name != META_FILE)
+}
+
+/// 是否为**独立子 bundle**：目录名以 `.str` 结尾。
+///
+/// `.str` 目录是 bundle 的**硬边界**：父 bundle 不进入、不把它当作分支
+/// （同 `.app` 嵌套语义）。父级 `entries` 中应表达为 `role = "bundle"`。
+pub fn is_sub_bundle(name: &str) -> bool {
+    name.ends_with(".str")
 }
 
 /// 是否为其它点文件（非 `._meta` / `.lock`）→ `W_DOTFILE`。

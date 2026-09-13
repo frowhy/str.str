@@ -1,0 +1,51 @@
+# ── STR 自举：本仓库自身即一个 .str bundle ──────────────────────
+# ROOT 的 [[entries]] 中 role = "node" 的条目才是「分支」；
+# 其余 role（payload / dir / bundle / cache）是 ROOT 的内容。
+str = 1
+spec = "1.7.0"
+kind = "root"
+id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
+name = "str"
+title = "STR 结构化树资源格式 · 规范与参考实现"
+summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle 与 Rust 参考实现；本仓库自身即一个 .str bundle（自举）。"
+tags = ["str", "format", "self-hosted"]
+revision = 1
+created_at = 2026-09-14T01:26:52+08:00
+updated_at = 2026-09-14T01:26:52+08:00
+
+[policies]
+id_version = 7
+max_depth = 32
+manifest = "strict"
+sha256 = "optional"
+large_asset_bytes = 10485760
+deep_tree_warn = 16
+
+[[authors]]
+id = "u:frowhy"
+name = "Frowhy"
+role = "owner"
+at = 2026-09-14T01:26:52+08:00
+
+[[entries]]
+path = "STR-FORMAT-PROMPT.md"
+role = "payload"
+media_type = "text/markdown"
+title = "规范正文（唯一真源）"
+
+[[entries]]
+path = "str-cli"
+role = "dir"
+title = "Rust 参考实现（CLI）"
+
+[[entries]]
+path = "examples"
+role = "dir"
+title = "示例 bundle 目录"
+
+[[entries]]
+path = "scripts"
+role = "dir"
+title = "辅助脚本"
+
+[ext]

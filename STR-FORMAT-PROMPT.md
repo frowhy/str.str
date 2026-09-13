@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.6.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.7.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-09-14 |
 | 文档定位 | **本文件即提示词（Prompt）**，整份可直接投喂给 AI 开发代理；第 1 章为指令主体，第 2~13 章为规范性附录（即指令的「事实来源」） |
@@ -22,6 +22,7 @@
 | **v1.4.0** | 2026-09-14 | **载体由 JSON 改为 TOML v1.0.0**（`._meta` 现为 TOML；允许 `#` 注释且工具必须保注释；时间改用 TOML 原生 offset date-time；清单改为数组表 `[[entries]]` / `[[refs]]` / `[[authors]]`，`[policies]` / `[ext]` 为表；新增「TOML → 规范 JSON 归一化 → JSON Schema 校验」链路，ADR-1 重写）。**决策收敛**：UUID v7 固定（`id_version = 7`）、保留 `refs` 跨枝关联、`sha256` 改为**强制**（`policies.sha256 = "required"`，新增 `E_MANIFEST_DIGEST_MISSING`）。顺带清理：`[[entries]]` 不再重复声明 `kind`（与 `role` 冗余），由 `role` 唯一表达；CLI 新增 `str fmt` / `str norm`，`str export` 支持 `--format json\|toml`。 |
 | **v1.5.0** | 2026-09-14 | **移除 `._audit/` 与 `journal` role**：审计能力交由 Git / 协作平台提供，格式内不设审计目录（删除 7.3 节、7.1 表相关行、`role: journal`、示例与 .gitignore 相关项）。**固定深度分界**：深度 1 = `node`、深度 ≥2 = `branch` 为硬规则，删除 `policies.branch_min_depth` 字段（2 是唯一自洽值，暴露可配置开关只会误导）。附录 A 全部决策关闭，转为决策索引。 |
 | **v1.6.0** | 2026-09-14 | **补齐实现期发现的三处澄清**（格式语义无变化）：① **`entries` 与 `refs` 同因 TOML 无法表达空数组表而允许整表省略**（归一化补 `[]`），schema 中不再必填；② `E_RESERVED_NAME` 判定精确化 —— 业务**目录**以 `._` 开头必报、**已登记**的 `._*` 条目必报、未登记的 `._*` **普通文件**豁免；③ `str sync` 去掉 `--recursive`（始终递归）。另补充**参考实现（Rust）与仓库结构**、错误码覆盖率验收项，示例 §10 全部替换为**真实 `size`/`sha256`**（由 `scripts/build-example.sh` 生成并逐字对齐）。 |
+| **v1.7.0** | 2026-09-14 | **自举驱动修订**：以本仓库自身作为 `.str` bundle 跑 `str validate .`，暴露并修正 4 处规范缺陷。① 新增 **3.5「`.str` 目录是 bundle 硬边界」** + `role = "bundle"`（父 bundle 不进入子 bundle，示例 / 测试夹具 bundle 可安全内嵌）；② **操作系统 / 工具元数据豁免**扩展至版本控制元数据（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.svn/`）；③ `W_ROOT_STRAY` 语义修正为「既非 UUID 命名的分支目录、**又未登记进 `entries`** 的散落条目」（消除与 3.3「任意目录可放任意文件」的矛盾）；④ **schema / policy 冲突修正**：JSON Schema 不再无条件要求 `size` / `sha256`，该强制改由校验器按 `policies.sha256` 判定（Schema 读不到 `[policies]`）。`role: cache` 措辞放宽为「派生缓存 / 构建产物」。 |
 
 ---
 
@@ -77,7 +78,7 @@
 
 **参考实现（本仓库，已完成）**：Rust 2024；依赖 `toml_edit`（保注释写回）、`jsonschema`（2020-12）、`clap`、`sha2`、`uuid`（v7）、`time`、`walkdir`。
 
-**仓库分层原则**：**格式规范资产放仓库根**（Schema / 示例 / 生成脚本，可被任何实现复用）；**`str-cli/` 只放 CLI 实现**（一个可 `cargo` 构建的最小 crate）。
+**仓库分层原则**：**格式规范资产放仓库根**（Schema / 示例 / 生成脚本，可被任何实现复用）；**`str-cli/` 只放 CLI 实现**（一个可 `cargo` 构建的最小 crate）。此外，**仓库自身即一个 `.str` bundle（自举 / dogfooding）**：根目录名为 `str.str`，其 `._meta` 记录本仓库的分支与内容，可直接用 `str validate .` 自检 —— 这也是格式在**真实项目**上的第一个用例。
 
 | 位置 | 说明 |
 | --- | --- |
@@ -93,7 +94,7 @@
 | `str-cli/tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
 | `str-cli/target/` | 构建产物（不入库） |
 
-> ⚠ **分层代价**：Schema 属规范资产（只有一份，不复制进实现），因此 `str-cli/src/lib.rs` 以 `include_str!("../../schema/…")` 引用它 —— **`str-cli/` 不能脱离仓库根单独构建**。`str init` 会把这三份 Schema 复制进新建 bundle 的 `._schema/`。
+> ⚠ **分层代价**：Schema 属规范资产（只有一份，不复制进实现），因此 `str-cli/src/lib.rs` 以 `include_str!("../../._schema/…")` 引用它 —— **`str-cli/` 不能脱离仓库根单独构建**。`str init` 会把这三份 Schema 复制进新建 bundle 的 `._schema/`。
 
 ### 1.3 硬性约束（违反即失败）
 
@@ -191,7 +192,17 @@
 | 保留名 | 以 **`._`** 开头（`._meta` / `._schema` / `._cache` / 未来扩展）；业务条目**不得**以 `._` 开头 | `E_RESERVED_NAME` |
 | 锁文件 | `.lock`（可选，短生命周期，不得提交） | — |
 | 其它点文件 | 仅 `._meta` / `.lock` 合法，其余告警 | `W_DOTFILE` |
-| 操作系统噪声 | `._*` 形式的**普通文件**（macOS AppleDouble 伴生文件）与 `.DS_Store` **一律忽略**：不视为保留名、不参与清单比对、不报任何错 | —（豁免） |
+| 操作系统 / 工具元数据 | `._*` 形式的**普通文件**（macOS AppleDouble 伴生文件）、`.DS_Store`、`Thumbs.db`、`desktop.ini`，以及**版本控制元数据**（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.hgignore`、`.svn/`）**一律忽略**：不视为保留名、不参与清单比对、不报任何错 | —（豁免） |
+
+### 3.5 `.str` 目录是 bundle 硬边界
+
+**以 `.str` 结尾的目录一律视为独立的子 bundle**（语义同 `.app` 嵌套）：
+
+- 父 bundle 的扫描 / 校验 **不进入** 其内部：既不把它当作分支（即使其中含 `._meta`），也不检查其内部清单；
+- 它是**完整的 bundle 边界** —— 内部自成一个 `kind = root` 的 `._meta` 体系，`id` 与目录名无关；
+- 父级 `entries` 中应表达为 **`role = "bundle"`**（要求目录名以 `.str` 结尾）；登记为 `role = "dir"` 会报 `E_ENTRY_ROLE_DEPTH`。
+
+设计动机：真实项目（尤其是格式自身的仓库）必然需要在内部存放**示例 bundle / 测试夹具 bundle**；若不设边界，父 bundle 会把子 bundle 的 `._meta` 误判为「非分支目录内出现元数据」而报错。
 
 ---
 
@@ -315,7 +326,7 @@ Entry 字段表：
 | `asset` | 附属素材文件（图片/PDF/音视频等） | ❌ |
 | `dir` | 普通子目录（纯内容容器，不含 `._meta`，因而不是分支） | ❌ |
 | `schema` | `._schema/` 目录（bundle 级 Schema 存放处；内部文件不逐个登记） | ❌ |
-| `cache` | 派生缓存（`._cache/` 内；可删） | ❌ |
+| `cache` | 派生缓存 / 构建产物（可删；`._cache/` 内的实例因保留名免登记） | ❌ |
 | `other` | 其它未分类条目（需 `note` 说明） | ❌ |
 
 > **只有带 `._meta` 的子目录才是分支**（`role` = `node`/`branch`）；其余子目录一律是普通内容容器（`role` = `dir`）。这是「分支」与「目录」的唯一判据。
@@ -471,8 +482,8 @@ A.str/
 | `E_REVISION_STALE` | error | `updated_at` 变化但 `revision` 未前进，或 `revision` 非递增整数 |
 | `E_SCHEMA_FAIL` | error | payload 不满足其声明的 JSON Schema |
 | `W_BUNDLE_SUFFIX` | warn | 根目录名未以 `.str` 结尾 |
-| `W_DOTFILE` | warn | 出现非 `._meta` / `.lock` 的点文件（`._*` **普通文件**与 `.DS_Store` 属操作系统噪声，必须豁免） |
-| `W_ROOT_STRAY` | warn | ROOT 下出现既非分支目录也非保留名的条目 |
+| `W_DOTFILE` | warn | 出现非 `._meta` / `.lock` 的点文件（`._*` **普通文件**、`.DS_Store` 与**版本控制元数据** `.git/` `.gitignore` 等属操作系统/工具元数据，必须豁免） |
+| `W_ROOT_STRAY` | warn | ROOT 下出现**既非 UUID 命名的分支目录、又未登记进 `entries`** 的散落条目（已登记的 ROOT 内容属合法，见 3.3） |
 | `W_NO_SUMMARY` | warn | `node`/`branch` 缺 `summary`（削弱 AI 检索能力） |
 | `W_NO_TYPE` | warn | `node`/`branch` 缺 `type` |
 | `W_DEEP_TREE` | warn | 分支树深度超过 `deep_tree_warn` |
@@ -655,7 +666,7 @@ A.str/
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "root"
 id = "01928f3a-7c4b-7000-8000-000000000000"
 name = "客户运营"
@@ -726,7 +737,7 @@ note = "bundle 级校验 Schema 存放处"
 
 ```toml
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
 type = "crm.customer"
@@ -784,7 +795,7 @@ order = 1
 ```toml
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "branch"
 id = "01928f3a-7c4b-7101-8b01-000000000101"
 type = "crm.followup_log"
@@ -818,7 +829,7 @@ order = 1
 
 ```toml
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "branch"
 id = "01928f3a-7c4b-7102-8b02-000000000102"
 type = "doc.meeting_note"
@@ -843,7 +854,7 @@ sha256 = "162af15f76d0493282a4a5e666928f6de6a36662faa44a860288766be298e9a0"
 
 ```toml
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "01928f3a-7c4b-7002-8a02-000000000002"
 type = "crm.order_dataset"
@@ -868,7 +879,7 @@ sha256 = "1dd4893612cb1710550acb0624982a21e5ec5267d1dd05431e9aa20d02c16ef7"
 
 ```toml
 str = 1
-spec = "1.6.0"
+spec = "1.7.0"
 kind = "node"
 id = "01928f3a-7c4b-7003-8a03-000000000003"
 type = "crm.tag_system"
@@ -1006,6 +1017,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 17 | 强制指纹 | 删除任 `payload`/`asset` 条目的 `sha256` 或 `size` → `E_MANIFEST_DIGEST_MISSING` |
 | 18 | 错误码覆盖率 | `str-cli/tests/validate_codes.rs` 中 6.1 的**全部 35 个错误码**各有 ≥1 个故意破坏用例，且断言精确到码 |
 | 19 | 幂等 | `str sync` 连续执行两次，第二次输出「已更新 0 份」且无文件差异；`str fmt --check` 返回 0 |
+| 20 | **自举** | 对仓库自身执行 `str validate .` → **0 errors / 0 warnings**（`str-cli/target/` 等构建产物因 `str-cli/` 非分支而不进入清单；`examples/客户运营.str/` 因 3.5 硬边界而被跳过） |
 
 ---
 
@@ -1021,7 +1033,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 1. **只有 `str` 主版本号**需要工具显式支持；`spec` 用于人类追溯。
 2. 一切厂商/实验性扩展必须放 `ext`（键名 `vendor.feature`），不得占用顶层字段。
-3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定。
+3. 修订史：v1.1.0 / v1.2.0 属**语义放宽/收敛**（撤回深度限制、取消素材目录概念）；v1.3.0 属**命名空间变更**（保留前缀统一为 `._`）；v1.4.0 属**载体变更**（JSON → TOML）与**决策收敛**（UUID v7、保留 `refs`、强制 `sha256`）。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现：① 按 6.1「已删除错误码」清单移除对应校验；② 保留名统一为 `._` 前缀并补操作系统噪声豁免；③ 把 `._meta` 从 JSON 改写为 TOML，并补齐「归一化链路」与「保注释写回」；④ v1.5.0 移除 `._audit/`、把深度分界固定为 2；⑤ v1.6.0 允许 `entries` / `refs` 空表省略（TOML 限制）并精确化 `E_RESERVED_NAME` 判定；⑥ v1.7.0 引入 `.str` 子 bundle 硬边界与 `role = "bundle"`、扩展元数据豁免至 VCS、修正 `W_ROOT_STRAY` 与 schema/policy 冲突。
 
 ---
 
