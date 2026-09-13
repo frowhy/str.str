@@ -41,7 +41,7 @@ Resolve the CLI (building it if a source checkout is nearby) before touching any
 
 ```sh
 STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version        # must print: str 0.1.0
+"$STR" --version        # must print: str 0.2.0
 ```
 
 `ensure-str.sh` resolves the CLI in this order and stops at the first hit:
@@ -51,9 +51,10 @@ STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
 3. `$STR_REPO` — a source checkout; builds it with `cargo build --release` when needed.
 4. walk up from the script's own directory, then from the CWD, looking for `str-cli/target/release/str` (building from source when it finds `str-cli/Cargo.toml`).
 5. **download the prebuilt binary for this platform from GitHub Releases** — detects OS/arch, fetches `str-<tag>-<target>.tar.gz` (`.zip` on Windows), **verifies it against that release's `SHA256SUMS.txt` and refuses to use it when the checksum is absent or does not match**, then caches it at `${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/<tag>/<target>/str`. Later calls reuse the cache without downloading again.
-6. otherwise print installation instructions and exit non-zero.
+6. **install from crates.io by compiling the source** — `cargo install str-format --version <tag> --locked --root <cache>`; the install root is the cache dir (`${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/cargo/<tag>/bin/str`), so `~/.cargo/bin` is never touched, and later calls reuse the result instead of recompiling. Needs `cargo`; skipped when it is absent or `STR_NO_CARGO_INSTALL=1`.
+7. otherwise print installation instructions and exit non-zero.
 
-Knobs: `STR_VERSION` (tag, default `latest`), `STR_RELEASE_REPO` (`owner/repo`, for forks), `STR_DOWNLOAD_BASE` (mirror, useful when GitHub is unreachable), `STR_CACHE_DIR`, `STR_NO_DOWNLOAD=1` (offline — local lookup only).
+Knobs: `STR_VERSION` (tag, default `latest`), `STR_RELEASE_REPO` (`owner/repo`, for forks), `STR_DOWNLOAD_BASE` (mirror, useful when GitHub is unreachable), `STR_CACHE_DIR`, `STR_NO_DOWNLOAD=1` (skip the download step), `STR_NO_CARGO_INSTALL=1` (skip the crates.io compile step).
 
 It never falls back to editing files. If it cannot obtain the CLI it fails, and that failure is the correct outcome: report it instead of hand-editing `._meta`.
 

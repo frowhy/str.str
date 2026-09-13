@@ -11,16 +11,18 @@
 #   3. $STR_REPO                    该源码仓库内 str-cli/target/release/str（必要时 cargo build）
 #   4. 向上逐级查找源码仓库          从本脚本所在目录、再从 CWD 依次向上；命中即构建
 #   5. GitHub Releases 预编译二进制  识别平台 → 下载 → 校验 SHA-256 → 解包到缓存 → 之后复用
-#   6. 全部失败                      打印安装指引并以非零码退出
+#   6. crates.io 源码编译安装        cargo install str-format（隔离到缓存目录，不污染 ~/.cargo/bin）
+#   7. 全部失败                      打印安装指引并以非零码退出
 #
 # 环境变量：
 #   STR_BIN             显式指定可执行文件（最高优先级）
 #   STR_REPO            源码仓库根（应含 str-cli/Cargo.toml）
-#   STR_VERSION         版本 tag，如 v0.1.0；默认 latest，解析失败回退到内置默认版本
+#   STR_VERSION         版本 tag，如 v0.2.0；默认 latest，解析失败回退到内置默认版本
 #   STR_RELEASE_REPO    发布仓库 `owner/repo`，默认 frowhy/str.str（fork 时改此值）
 #   STR_DOWNLOAD_BASE   资产下载前缀，默认 https://github.com/<repo>/releases/download
 #                       （网络受限时可指向镜像；`latest` 解析失败不影响它，因为版本已回退）
 #   STR_NO_DOWNLOAD     置 1 则跳过第 5 步（离线 / 禁止网络时）
+#   STR_NO_CARGO_INSTALL 置 1 则跳过第 6 步（禁止源码编译安装时）
 #   STR_CACHE_DIR       缓存根目录，默认 ${XDG_CACHE_HOME:-$HOME/.cache}/str-skill
 #
 # 契约：
@@ -28,7 +30,8 @@
 #   - 下载只取 GitHub Releases 资产，并**必须**用同一 release 的 SHA256SUMS.txt 逐字节校验，
 #     取不到校验和或校验不通过即失败 —— 不允许「未校验就用」；
 #   - 已缓存的版本直接复用，不重复下载；
-#   - 除缓存目录与临时目录外不写入任何文件；
+#   - 除缓存目录与临时目录外不写入任何文件（第 6 步由 cargo 自行使用其 registry 缓存与
+#     临时构建目录，但**安装目标**仍指向缓存目录，不会污染 ~/.cargo/bin）；
 #   - 绝不「降级」为手工编辑 ._meta —— 找不到 CLI 就是失败。
 #
 # ⚠ 维护须知（本文件含大量中文文本，踩过一次）：
@@ -39,7 +42,7 @@
 set -eu
 
 RELEASE_REPO=${STR_RELEASE_REPO:-frowhy/str.str}
-DEFAULT_VERSION=v0.1.0
+DEFAULT_VERSION=v0.2.0
 STR_VERSION=${STR_VERSION:-latest}
 DOWNLOAD_BASE=${STR_DOWNLOAD_BASE:-https://github.com/$RELEASE_REPO/releases/download}
 CACHE_BASE=${STR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/str-skill}
@@ -165,6 +168,14 @@ resolve_version() {
     fi
 }
 
+# ── 平台 → 可执行文件名（仅 Windows 为 str.exe）─────────────────────────────
+detect_bin_name() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT) printf '%s\n' str.exe ;;
+        *) printf '%s\n' str ;;
+    esac
+}
+
 # ── 第 5 步：从 GitHub Releases 下载预编译二进制 ──────────────────────────────
 try_download() {
     if [ "${STR_NO_DOWNLOAD:-0}" = "1" ]; then
@@ -178,13 +189,10 @@ try_download() {
     }
 
     case "$_target" in
-        *windows*)
-            _ext=zip
-            _bin_name=str.exe ;;
-        *)
-            _ext=tar.gz
-            _bin_name=str ;;
+        *windows*) _ext=zip ;;
+        *) _ext=tar.gz ;;
     esac
+    _bin_name=$(detect_bin_name)
 
     _ver=$(resolve_version)
     _asset="str-${_ver}-${_target}.${_ext}"
@@ -240,6 +248,48 @@ try_download() {
     return 0
 }
 
+# ── 第 6 步：从 crates.io 源码编译安装 ────────────────────────────────────────
+#
+# 用 `cargo install --root` **隔离安装到缓存目录**，不写 ~/.cargo/bin；命中缓存即复用。
+# 排在下载之后：源码编译首次需数分钟，而第 5 步是预编译产物且带 SHA-256 校验。
+try_cargo_install() {
+    if [ "${STR_NO_CARGO_INSTALL:-0}" = "1" ]; then
+        log "ensure-str: STR_NO_CARGO_INSTALL=1，跳过源码编译安装"
+        return 1
+    fi
+
+    if ! have_cmd cargo; then
+        log "ensure-str: 本机没有 cargo，跳过源码编译安装"
+        return 1
+    fi
+
+    _ver=$(resolve_version)
+    _crate_ver=${_ver#v}
+    _root="$CACHE_BASE/cargo/$_ver"
+    _bin_name=$(detect_bin_name)
+    _cache_bin="$_root/bin/$_bin_name"
+
+    # 缓存命中：直接复用，不重复编译
+    if is_str_bin "$_cache_bin"; then
+        printf '%s\n' "$_cache_bin"
+        return 0
+    fi
+
+    log "ensure-str: 从 crates.io 编译安装 str-format ${_crate_ver}（首次需数分钟）..."
+    if ! cargo install str-format --version "${_crate_ver}" --locked --root "$_root" >&2; then
+        log "ensure-str: cargo install 失败（crates.io 不可达 / 该版本未发布 / 编译失败）"
+        return 1
+    fi
+    chmod +x "$_cache_bin" 2>/dev/null || true
+
+    if ! is_str_bin "$_cache_bin"; then
+        log "ensure-str: 安装完成但未找到可用的 ${_cache_bin}"
+        return 1
+    fi
+    printf '%s\n' "$_cache_bin"
+    return 0
+}
+
 # ─────────────────────────── 主流程 ───────────────────────────
 
 # 1 — 显式指定
@@ -266,7 +316,7 @@ if [ -n "${STR_REPO:-}" ]; then
     if try_build "$STR_REPO"; then
         exit 0
     fi
-    log "ensure-str: STR_REPO=$STR_REPO 下既无产物也未能构建，继续尝试下载"
+    log "ensure-str: STR_REPO=$STR_REPO 下既无产物也未能构建，继续尝试下载 / 源码安装"
 fi
 
 # 4 — 从脚本目录与 CWD 向上逐级查找源码仓库
@@ -288,11 +338,17 @@ if try_download; then
     exit 0
 fi
 
-# 6 — 全部失败
+# 6 — crates.io 源码编译安装
+if try_cargo_install; then
+    exit 0
+fi
+
+# 7 — 全部失败
 die "未找到 STR CLI，也无法自动获取。任选其一后重试：
-  ① 下载预编译二进制：https://github.com/$RELEASE_REPO/releases
-  ② 在源码仓库执行：cargo install --path str-cli
-  ③ 显式指定：export STR_BIN=<路径>/str  或  export STR_REPO=<源码仓库根>
-  ④ 检查网络 / 代理；也可设 STR_VERSION=<tag>、STR_RELEASE_REPO=<owner/repo>
-  ⑤ 离线环境：若已手动放好二进制，用 STR_BIN 指过去，或设 STR_NO_DOWNLOAD=1 只走本地查找
+  ① 从 crates.io 安装到 PATH：cargo install str-format
+  ② 下载预编译二进制：https://github.com/${RELEASE_REPO}/releases
+  ③ 在源码仓库执行：cargo install --path str-cli
+  ④ 显式指定：export STR_BIN=<路径>/str  或  export STR_REPO=<源码仓库根>
+  ⑤ 检查网络 / 代理；也可设 STR_VERSION=<tag>、STR_RELEASE_REPO=<owner/repo>
+  ⑥ 离线环境：若已手动放好二进制，用 STR_BIN 指过去，或设 STR_NO_DOWNLOAD=1、STR_NO_CARGO_INSTALL=1 只走本地查找
 注意：严禁以手工编辑 ._meta 代替 CLI —— 那是格式违规，不是降级方案。"

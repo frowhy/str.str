@@ -32,14 +32,21 @@ cargo install --path str-cli      # 或从 STR 仓库源码安装，同样装进
 cd str-cli && cargo build --release   # 产物：str-cli/target/release/str
 ```
 
-Agent 不必自己判断走哪条路。`scripts/ensure-str.sh` 依次尝试：`$STR_BIN` → `PATH` 上的 `str` → `$STR_REPO` → 从脚本目录 / 当前目录向上查找源码产物（发现 `str-cli/Cargo.toml` 就 `cargo build --release`）→ **从 GitHub Releases 自动下载当前平台的预编译二进制**。
+Agent 不必自己判断走哪条路。`scripts/ensure-str.sh` 依次尝试：`$STR_BIN` → `PATH` 上的 `str` → `$STR_REPO` → 从脚本目录 / 当前目录向上查找源码产物（发现 `str-cli/Cargo.toml` 就 `cargo build --release`）→ **从 GitHub Releases 自动下载当前平台的预编译二进制** → **用 `cargo install str-format` 从 crates.io 源码编译安装**。
 
 第 5 步（自动下载）的细节：
 
 - 自动识别平台并映射到 release 资产名：`Darwin/arm64`、`Darwin/x86_64`、`Linux/aarch64`、`Linux/x86_64`、`Windows/x86_64`（`.zip`）共 5 种。
 - **下载后必须通过该 release 的 `SHA256SUMS.txt` 逐字节校验**；校验和取不到、缺条目或不匹配一律**中止**，不做「未校验就用」的降级。
 - 结果缓存到 `${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/<tag>/<target>/`，命中即复用，不重复下载。
-- 可用环境变量：`STR_VERSION`（版本 tag，默认 `latest`）、`STR_RELEASE_REPO`（fork 时改 `owner/repo`）、`STR_DOWNLOAD_BASE`（网络受限时指向镜像）、`STR_CACHE_DIR`、`STR_NO_DOWNLOAD=1`（禁用下载，只走本地查找）。
+- 可用环境变量：`STR_VERSION`（版本 tag，默认 `latest`）、`STR_RELEASE_REPO`（fork 时改 `owner/repo`）、`STR_DOWNLOAD_BASE`（网络受限时指向镜像）、`STR_CACHE_DIR`、`STR_NO_DOWNLOAD=1`（禁用下载）、`STR_NO_CARGO_INSTALL=1`（禁用源码编译安装）。
+
+第 6 步（crates.io 源码编译安装）的细节：
+
+- 执行 `cargo install str-format --version <tag> --locked --root <缓存>`，**安装根就是缓存目录**：`${XDG_CACHE_HOME:-$HOME/.cache}/str-skill/cargo/<tag>/bin/str`；**不写 `~/.cargo/bin`**，命中即复用、不重复编译。
+- 排在下载之后：源码编译首次需数分钟，而第 5 步是预编译产物且带 SHA-256 校验。
+- 版本沿用同一套解析（`STR_VERSION` → GitHub `latest` → 内置默认版本），因此编译安装与下载拿到的版本一致；该 tag 未发布到 crates.io 时会失败并继续走最后的失败分支。
+- 要求本机有 `cargo`（无则跳过）；`--locked` 使用 crate 内随包发布的 `Cargo.lock`，保证与仓库验证过的依赖组合一致。
 
 全部失败则打印安装指引并**非零退出**（绝不静默降级为手改 `._meta`）。
 
