@@ -1,0 +1,29 @@
+[package]
+name = "str-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "STR 结构化树资源（.str）bundle 的 GUI 编辑器（Rust + Slint）"
+license = "MIT"
+repository = "https://github.com/frowhy/str.str"
+publish = false
+
+[[bin]]
+name = "str-gui"
+path = "src/main.rs"
+
+[dependencies]
+# 使用本地 master 快照（~/.cache/slint-src，由 GitHub master tarball 解压）以获得
+# DragArea / DropArea（将随 Slint 1.18 发布）；1.18 上 crates.io 后切回 `slint = "1.18"`。
+slint = { path = "/Users/frowhy/.cache/slint-src/api/rs/slint" }
+str-format = { path = "../str-cli" }
+rfd = "0.15"
+trash = "5"
+
+[build-dependencies]
+slint-build = { path = "/Users/frowhy/.cache/slint-src/api/rs/build" }
+
+# 本地 winit 补丁：macOS 拖放代理实现 draggingUpdated:（返回 YES 接受拖放）
+# 并在拖拽悬停/落下时报告光标位置（winit 官方未实现，详见 ~/.cache/winit-0.30.13）
+[patch.crates-io]
+winit = { path = "/Users/frowhy/.cache/winit-0.30.13" }

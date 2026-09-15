@@ -14,6 +14,7 @@ desktop.ini
 # ── 实现产物（str-cli/ 为 Rust 工程根）────────────────────
 # Rust
 str-cli/target/
+str-gui/target/
 # Node
 node_modules/
 dist/
