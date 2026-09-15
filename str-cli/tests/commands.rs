@@ -95,10 +95,11 @@ fn entries_are_sorted_by_order_then_path() {
     let meta = root.join("._meta");
 
     cmd::fmt(&root, false, false).unwrap();
-    let expected = vec![aaa.clone(), bbb.clone(), "._schema".to_string()];
+    // v1.12.0 起保留目录免登记：ROOT 的 entries 只有两条 node。
+    let expected = vec![aaa.clone(), bbb.clone()];
     assert_eq!(entry_paths(&read(&meta)), expected);
 
-    // 交换 `order` → 顺序随之下沉/上浮（`._schema` 没有 `order`，始终在最后）
+    // 交换 `order` → 顺序随之下沉/上浮
     cmd::entry_set(
         &root,
         None,
@@ -109,10 +110,7 @@ fn entries_are_sorted_by_order_then_path() {
         },
     )
     .unwrap();
-    assert_eq!(
-        entry_paths(&read(&meta)),
-        vec![bbb.clone(), aaa.clone(), "._schema".to_string()]
-    );
+    assert_eq!(entry_paths(&read(&meta)), vec![bbb.clone(), aaa.clone()]);
 
     // 幂等：再规范化一次字节不变
     let once = read(&meta);
@@ -134,10 +132,7 @@ fn fmt_detects_and_fixes_out_of_order_entries() {
 
     assert_eq!(cmd::fmt(&root, true, false).unwrap(), 1, "乱序必须被检测出来");
     cmd::fmt(&root, false, false).unwrap();
-    assert_eq!(
-        entry_paths(&read(&meta)),
-        vec![bbb.clone(), aaa.clone(), "._schema".to_string()]
-    );
+    assert_eq!(entry_paths(&read(&meta)), vec![bbb.clone(), aaa.clone()]);
     assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
 }
 

@@ -17,7 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 |
 | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.11.0 | 0.5.0 | 0.3.2 |
+| 工作区（未发布） | — | 1.12.0 | 0.5.1 | 0.3.3 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
@@ -25,6 +25,25 @@
 
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
+
+---
+
+## 工作区（未发布）
+
+规范 1.12.0 · CLI 0.5.1 · 技能包 0.3.3
+
+### 变更
+
+- **规范 1.11.0 → 1.12.0**：保留目录（`._meta` / `._schema/` / `._cache/`）**免登记**、不参与
+  `entries[]` 清单比对（消解「§1.3 约束 5 要求除 `._meta` 外全部登记」与实现放行的落差）；
+  `str init` 与官方示例不再登记 `._schema`。纯放宽，既有已登记的 bundle 仍合法。详见
+  [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
+- **CLI 0.5.0 → 0.5.1**：`str init` 生成的 ROOT `._meta` 不再含 `._schema` 条目；`render_root_meta`
+  去掉仅服务该条目的形参。详见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.3.2 → 0.3.3**：`spec-digest.md` / `cli-reference.md` 头部规范版本与 `str --version`
+  示例同步为 1.12.0 / 0.5.1。
+- `examples/客户运营.str/` 与 `scripts/build-example.sh` 同步（不再登记 `._schema`，spec = 1.12.0）。
+- `VERSIONS.toml`：发行 tag 更新为 `v0.5.1`（status = `unreleased`，上一次发布 `v0.5.0`）。
 
 ---
 

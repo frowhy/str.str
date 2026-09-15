@@ -128,7 +128,6 @@ pub fn init(
         summary.as_deref(),
         &root_id,
         &created,
-        crate::EMBEDDED_SCHEMAS.len(),
         id_version,
     );
     let meta = meta_from_text(&text)?;

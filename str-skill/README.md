@@ -147,8 +147,8 @@ v1.8.0 的实现对齐已消解此前的落差：§4.9 排序不生效、`--fix-
 
 ## 版本
 
-- 技能包版本：**0.3.2**
-- 适配规范：**v1.11.0**（`STR-FORMAT-PROMPT.md`）
+- 技能包版本：**0.3.3**
+- 适配规范：**v1.12.0**（`STR-FORMAT-PROMPT.md`）
 - 依赖 CLI：**>= 0.3.0**（`str spec set` 与 `[uuid]` 位置参数缺省 ROOT 自 0.3.0 起提供）
 - 发布身份：slug **`str-skill`** · 展示名 **`STR 资源树`**（SkillHub）
 
@@ -174,7 +174,7 @@ Default-on activation 条款）；上一版补齐 SkillHub 发布 frontmatter �
 | --- | --- | --- |
 | `slug` | `str-skill` | **全网唯一**、kebab-case、2~128 字符；**首次发布后不要改** —— 改了在平台上就是另一个 skill |
 | `displayName` | `STR 资源树` | 对外展示名（可为中文）。**必须用 camelCase**：平台与 CLI 只认这个键，且为必填（源码 `_validate_metadata()` 缺失即报「SKILL.md 缺少 displayName」） |
-| `version` | `0.3.2` | 必须是合法 SemVer；技能包内容变化时升它 |
+| `version` | `0.3.3` | 必须是合法 SemVer；技能包内容变化时升它 |
 | `summary` | 见 SKILL.md | 一句话简介 |
 | `license` | `MIT` | 开源许可证 |
 

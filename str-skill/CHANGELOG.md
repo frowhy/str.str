@@ -14,6 +14,16 @@
 
 ---
 
+## [0.3.3] — 2026-09-16
+
+### 变更
+
+- `spec-digest.md` / `cli-reference.md` 头部规范版本对齐 **v1.12.0**；`str --version` 示例与
+  `ensure-str.sh` 的 `DEFAULT_VERSION` 同步为 `str 0.5.1` / `v0.5.1`。
+- 保留目录免登记的说明随规范同步（`._schema/` / `._cache/` 不参与 `entries[]` 清单比对）。
+
+---
+
 ## [0.3.2] — 2026-09-14
 
 ### 变更

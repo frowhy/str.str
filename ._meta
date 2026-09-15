@@ -2,16 +2,16 @@
 # ROOT 的 [[entries]] 中 role = "node" 的条目才是「分支」；
 # 其余 role（payload / dir / bundle / cache）是 ROOT 的内容。
 str = 1
-spec = "1.11.0"
+spec = "1.12.0"
 kind = "root"
 id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
 name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 28
+revision = 30
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-15T18:18:00+00:00
+updated_at = 2026-09-15T21:25:50+00:00
 
 [policies]
 id_version = 7
@@ -31,8 +31,8 @@ at = 2026-09-14T01:26:52+08:00
 path = "CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 7594
-sha256 = "b17cd7fd4fa1a85995fbadf4033789150ad5124d6eac976010c3f8c27a71e0ef"
+size = 8655
+sha256 = "0706a78b9bfeaaa612bb7f759c219073a2cf737f68951e35c01c20ca848b5740"
 
 [[entries]]
 path = "LICENSE"
@@ -47,29 +47,29 @@ path = "README.md"
 role = "payload"
 media_type = "text/markdown"
 size = 13756
-sha256 = "df4bf0fab66a961c8a90a4b84f88f3a99b8600f358edc643bc0e870abe1dd707"
+sha256 = "a453beac182ec6fd2ca72bb7100c919166340985445e3576c0e203a438d37bc9"
 
 [[entries]]
 path = "SPEC-CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 4752
-sha256 = "a27e65c3df449e70f7cb2edf94e01a83ffbd6585b2c153fc7ea316317c62f6b6"
+size = 4980
+sha256 = "7c4947885c12d18a47140eabc5eab739b0a34ba90e3e25777455ac966782b4ea"
 
 [[entries]]
 path = "STR-FORMAT-PROMPT.md"
 role = "payload"
 title = "规范正文（唯一真源）"
 media_type = "text/markdown"
-size = 82333
-sha256 = "754df547e41a71024bd6fe33043ac692dbe562ef81fbf44f493e451aacebb655"
+size = 84017
+sha256 = "c99dac7bf1874af06d424f5c29e8f4918705295ad61d23f1f2738477aae44df8"
 
 [[entries]]
 path = "VERSIONS.toml"
 role = "payload"
 media_type = "application/toml"
-size = 4389
-sha256 = "a33c037bfdb96a75036c9748a0c7642f67724abf55bab26071aa07072bb253b6"
+size = 4391
+sha256 = "f927e4b031bbdd896ee74cb553b6c6391ee0715e13f97b8c0760d3eb19906bec"
 
 [[entries]]
 path = "examples"

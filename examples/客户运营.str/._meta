@@ -1,16 +1,16 @@
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.11.0"
+spec = "1.12.0"
 kind = "root"
 id = "01928f3a-7c4b-7000-8000-000000000000"
 name = "客户运营"
 title = "客户运营结构化数据束"
 summary = "以客户为主体的分支树，含跟进记录、订单与标签分支，供 CRM 与 AI 检索使用。"
 tags = ["crm", "demo"]
-revision = 14
+revision = 12
 created_at = 2026-09-01T09:12:00+08:00
-updated_at = 2026-09-14T15:24:30+00:00
+updated_at = 2026-09-14T10:03:11+08:00
 
 [policies]
 id_version = 7
@@ -33,13 +33,6 @@ role = "agent"
 at = 2026-09-14T10:03:11+08:00
 
 [[entries]]
-path = "._schema"
-role = "schema"
-order = 0
-count = 4
-note = "bundle 级校验 Schema 存放处"
-
-[[entries]]
 path = "01928f3a-7c4b-7001-8a01-000000000001"
 role = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
@@ -49,21 +42,21 @@ summary = "企业客户主体档案，含跟进记录分支。"
 order = 1
 
 [[entries]]
-path = "01928f3a-7c4b-7003-8a03-000000000003"
-role = "node"
-id = "01928f3a-7c4b-7003-8a03-000000000003"
-type = "crm.tag_system"
-title = "标签体系"
-summary = "客户与订单共用的标签字典。"
-order = 2
-
-[[entries]]
 path = "01928f3a-7c4b-7002-8a02-000000000002"
 role = "node"
 id = "01928f3a-7c4b-7002-8a02-000000000002"
 type = "crm.order_dataset"
 title = "订单数据集"
 summary = "全部订单明细。"
+order = 2
+
+[[entries]]
+path = "01928f3a-7c4b-7003-8a03-000000000003"
+role = "node"
+id = "01928f3a-7c4b-7003-8a03-000000000003"
+type = "crm.tag_system"
+title = "标签体系"
+summary = "客户与订单共用的标签字典。"
 order = 3
 
 [ext]

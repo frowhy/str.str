@@ -1,6 +1,6 @@
 [package]
 name = "str-format"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 # MSRV：edition 2024 下限为 1.85；实测依赖中最高者（time / icu_*）要求 1.88，
 # 故取二者较大值。发布到 crates.io 后 `cargo install` 会在旧工具链上给出清晰报错。

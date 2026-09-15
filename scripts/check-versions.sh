@@ -129,8 +129,12 @@ check "README.md「规范版本」" "${SPEC_VER}" \
 check "README.md「主版本号」" "${SPEC_MAJOR}" \
   "$(x README.md 's/^- 规范版本：.*主版本号 = `\([0-9]*\)`.*/\1/p')"
 
-# README 只应当出现三条轴的当前版本号；多出第 4 个（典型的「忘了改的旧版本」）即失败
-README_VER_SET="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' README.md | sort -u | paste -sd, -)"
+# README 只应当出现三条轴的当前版本号；多出第 4 个（典型的「忘了改的旧版本」）即失败。
+# 例外：依赖 / 工具版本（如 str-gui 补丁针对的 winit-0.30.13）不是版本轴的声明点，
+# 逐字列入白名单后从集合中剔除 —— 否则门禁会把它误判为漂移。
+README_IGNORE_VERS="0.30.13"
+README_VER_SET="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' README.md \
+  | grep -vxF -f <(printf '%s\n' ${README_IGNORE_VERS}) | sort -u | paste -sd, -)"
 check_set "README.md 中出现的全部版本号（应为 spec / cli / skill 三者）" \
   "$(uniq_set "${SPEC_VER}" "${CLI_VER}" "${SKILL_VER}")" "${README_VER_SET}"
 

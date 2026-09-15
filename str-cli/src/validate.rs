@@ -328,10 +328,10 @@ impl<'a> Checker<'a> {
                 continue; // `._meta` / `.lock` 不参与清单
             }
             if util::is_reserved_name(name) {
-                // 保留命名空间判定：
-                // - `._schema` / `._cache` 是已知保留目录 → 放行；
+                // 保留命名空间判定（规范 v1.12.0 §1.3 约束 5 / §4.8：保留目录免登记、不参与清单比对）：
+                // - `._schema` / `._cache` 是已知保留目录 → **免登记**、放行（显式登记亦合法，属可选声明）；
                 // - 业务**目录**以 `._` 开头 → 必然不是 AppleDouble（该机制只产生文件）→ `E_RESERVED_NAME`；
-                // - 已在 `entries` 中登记的 `._*` 条目 → 作者显式声明其为业务内容 → `E_RESERVED_NAME`；
+                // - 其余以 `._` 开头且**已登记**或为**目录**者 → 作者显式声明为业务内容 → `E_RESERVED_NAME`；
                 // - 其余 `._*` **普通文件** → 视为 macOS AppleDouble 噪声，豁免（规范 3.4）。
                 let known = name == crate::util::SCHEMA_DIR || name == crate::util::CACHE_DIR;
                 let declared_here = entries.iter().any(|e| e.path == *name);
