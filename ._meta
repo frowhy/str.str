@@ -9,9 +9,9 @@ name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 25
+revision = 28
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-14T12:44:19+00:00
+updated_at = 2026-09-15T18:18:00+00:00
 
 [policies]
 id_version = 7
@@ -46,8 +46,8 @@ sha256 = "563e5a728846d6ccf046f433476fb851dc8f106995e23d364b8712ed39a4505c"
 path = "README.md"
 role = "payload"
 media_type = "text/markdown"
-size = 12866
-sha256 = "41dc31ea0b5ca45b10f5e4e7eddbc88ccd02a7f7c26f4745f33d2e9d0b96100e"
+size = 13756
+sha256 = "df4bf0fab66a961c8a90a4b84f88f3a99b8600f358edc643bc0e870abe1dd707"
 
 [[entries]]
 path = "SPEC-CHANGELOG.md"

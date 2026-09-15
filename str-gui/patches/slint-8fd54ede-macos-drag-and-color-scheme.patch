@@ -1,0 +1,597 @@
+diff --git a/internal/backends/qt/qt_widgets/lineedit.rs b/internal/backends/qt/qt_widgets/lineedit.rs
+index 5e8aed4..a4144b5 100644
+--- a/internal/backends/qt/qt_widgets/lineedit.rs
++++ b/internal/backends/qt/qt_widgets/lineedit.rs
+@@ -68,20 +68,17 @@ fn init(self: Pin<&Self>, _self_rc: &ItemRc) {
+ 
+         let paddings = Rc::pin(Property::default());
+ 
+-        let widget = SlintTypeErasedWidgetPtr::qwidget_ptr(&self.widget_ptr);
+-
+         paddings.as_ref().set_binding(move || {
+-            cpp!(unsafe [widget as "QWidget*"] -> qttypes::QMargins as "QMargins" {
++            cpp!(unsafe [] -> qttypes::QMargins as "QMargins" {
+                 ensure_initialized();
+                 QStyleOptionFrame option;
+                 option.state |= QStyle::State_Enabled;
+-                option.lineWidth = qApp->style()->pixelMetric(
+-                    QStyle::PM_DefaultFrameWidth, &option, widget);
++                option.lineWidth = 1;
+                 option.midLineWidth = 0;
+                 // Just some size big enough to be sure that the frame fits in it
+                 option.rect = QRect(0, 0, 10000, 10000);
+                 QRect contentsRect = qApp->style()->subElementRect(
+-                    QStyle::SE_LineEditContents, &option, widget);
++                    QStyle::SE_LineEditContents, &option);
+ 
+                 // ### remove extra margins
+ 
+@@ -200,8 +197,7 @@ fn focus_event(
+             option.styleObject = widget;
+             option.state |= QStyle::State(initial_state);
+             option.rect = QRect(QPoint(), size / dpr);
+-            option.lineWidth = qApp->style()->pixelMetric(
+-                QStyle::PM_DefaultFrameWidth, &option, widget);
++            option.lineWidth = 1;
+             option.midLineWidth = 0;
+             if (enabled) {
+                 option.state |= QStyle::State_Enabled;
+diff --git a/internal/backends/winit/Cargo.toml b/internal/backends/winit/Cargo.toml
+index 7c8f923..b45985b 100644
+--- a/internal/backends/winit/Cargo.toml
++++ b/internal/backends/winit/Cargo.toml
+@@ -126,7 +126,7 @@ arboard = { version = "3.6", default-features = false, optional = true }
+ # To disable macOS automatic shortcut translation
+ objc2 = { workspace = true }
+ # For GL rendering
+-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSColor", "NSView", "NSWindow", "NSResponder", "objc2-core-foundation", "objc2-quartz-core"] }
++objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSColor", "NSView", "NSResponder", "objc2-core-foundation", "objc2-quartz-core"] }
+ objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSString", "NSNotification", "NSOperation", "NSRunLoop", "NSObjCRuntime", "NSUserDefaults"] }
+ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["CADisplayLink"] }
+ block2 = "0.6.2"
+diff --git a/internal/backends/winit/frame_throttle/apple_display_link.rs b/internal/backends/winit/frame_throttle/apple_display_link.rs
+index 787d869..e1a8b56 100644
+--- a/internal/backends/winit/frame_throttle/apple_display_link.rs
++++ b/internal/backends/winit/frame_throttle/apple_display_link.rs
+@@ -104,6 +104,8 @@ pub(super) fn try_create(
+ ) -> Option<Box<dyn super::FrameThrottle>> {
+     use objc2::runtime::AnyClass;
+     use objc2::sel;
++    use objc2_app_kit::NSView;
++    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+ 
+     // -[NSView displayLinkWithTarget:selector:] is only available on macOS
+     // 14.0+. The CADisplayLink class itself is reachable on older macOS via
+@@ -114,7 +116,10 @@ pub(super) fn try_create(
+ 
+     let mtm = MainThreadMarker::new().expect("frame throttle must be created on main thread");
+ 
+-    let ns_view = crate::macos::ns_view(winit_window)?;
++    let RawWindowHandle::AppKit(handle) = winit_window.window_handle().ok()?.as_raw() else {
++        return None;
++    };
++    let ns_view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+ 
+     let target = DisplayLinkTarget::new(mtm, window_adapter);
+     let display_link = unsafe { ns_view.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+diff --git a/internal/backends/winit/lib.rs b/internal/backends/winit/lib.rs
+index 9f7765a..1ea19f7 100644
+--- a/internal/backends/winit/lib.rs
++++ b/internal/backends/winit/lib.rs
+@@ -37,8 +37,6 @@
+ mod frame_throttle;
+ #[cfg(target_os = "ios")]
+ mod ios;
+-#[cfg(target_os = "macos")]
+-mod macos;
+ 
+ /// Re-export of the winit crate.
+ pub use winit;
+diff --git a/internal/backends/winit/winitwindowadapter.rs b/internal/backends/winit/winitwindowadapter.rs
+index 73d9f69..9065a6f 100644
+--- a/internal/backends/winit/winitwindowadapter.rs
++++ b/internal/backends/winit/winitwindowadapter.rs
+@@ -408,16 +408,9 @@ pub struct WinitWindowAdapter {
+     /// Indicate whether we've ever received a resize event from winit after showing the window.
+     pending_resize_event_after_show: Cell<bool>,
+ 
+-    /// Whether the current winit window has presented a frame.
+-    first_frame_presented: Cell<bool>,
+-
+     #[cfg(target_arch = "wasm32")]
+     virtual_keyboard_helper: RefCell<Option<super::wasm_input_helper::WasmInputHelper>>,
+ 
+-    /// Set while a shown window waits for its first frame, see [`crate::macos::RevealOnFirstFrame`].
+-    #[cfg(target_os = "macos")]
+-    reveal_on_first_frame: RefCell<Option<crate::macos::RevealOnFirstFrame>>,
+-
+     #[cfg(any(enable_accesskit, muda))]
+     event_loop_proxy: EventLoopProxy<SlintEvent>,
+ 
+@@ -456,6 +449,14 @@ pub struct WinitWindowAdapter {
+     /// separately via `process_touch_input` and does not affect this flag.
+     pressed: Cell<bool>,
+     current_resize_direction: Cell<Option<ResizeDirection>>,
++    /// Accumulated file paths of an external (OS-level) drag currently hovering
++    /// the window; empty when no external drag is in progress.
++    external_drag_paths: RefCell<Vec<std::path::PathBuf>>,
++    /// Observes the app's color scheme (Palette.color-scheme) and pushes it to the
++    /// native window decoration so the title bar follows the dark/light toggle.
++    color_scheme_tracker: corelib::properties::PropertyTracker,
++    /// Last theme pushed to the native window, to avoid redundant `set_theme` calls.
++    winit_theme: Cell<Option<winit::window::Theme>>,
+     /// Allocates small i32 finger ids for iOS's pointer-valued touch ids.
+     #[cfg(target_os = "ios")]
+     touch_finger_ids: RefCell<crate::ios::TouchFingerIdAllocator>,
+@@ -488,12 +489,9 @@ pub(crate) fn new(
+             physical_size_before_scale_factor: Cell::new(None),
+             has_explicit_size: Default::default(),
+             pending_resize_event_after_show: Default::default(),
+-            first_frame_presented: Default::default(),
+             renderer,
+             #[cfg(target_arch = "wasm32")]
+             virtual_keyboard_helper: Default::default(),
+-            #[cfg(target_os = "macos")]
+-            reveal_on_first_frame: Default::default(),
+             #[cfg(any(enable_accesskit, muda))]
+             event_loop_proxy: proxy,
+             window_event_filter: Cell::new(None),
+@@ -510,6 +508,9 @@ pub(crate) fn new(
+             cursor_pos: Default::default(),
+             pressed: Default::default(),
+             current_resize_direction: Default::default(),
++            external_drag_paths: Default::default(),
++            color_scheme_tracker: Default::default(),
++            winit_theme: Default::default(),
+             #[cfg(target_os = "ios")]
+             touch_finger_ids: Default::default(),
+         });
+@@ -613,7 +614,6 @@ pub fn ensure_window(
+ 
+         let winit_window =
+             self.renderer.resume(active_event_loop, window_attributes, self.self_weak.clone())?;
+-        self.first_frame_presented.set(false);
+ 
+         // Push the host shell's color scheme and accent color to the SlintContext.
+         // With `xdg_desktop_settings` the backend-wide portal watcher (spawned in
+@@ -838,6 +838,30 @@ pub fn draw(&self) -> Result<(), PlatformError> {
+ 
+         self.pending_redraw.set(false);
+ 
++        // Keep the native window title bar in sync with the app's color scheme: when the
++        // user toggles dark/light in the app (Palette.color-scheme), push it to the OS
++        // window decoration (winit set_theme → NSAppearance on macOS, etc.). This covers
++        // the app→system direction, which is otherwise only tracked the other way around.
++        // SAFETY: `self` is owned by an `Rc<Self>`, so the `color_scheme_tracker` field
++        // never moves; pinning it by reference is sound.
++        let tracker = unsafe { core::pin::Pin::new_unchecked(&self.color_scheme_tracker) };
++        corelib::properties::PropertyTracker::evaluate(tracker, || {
++                let scheme =
++                    WindowInner::from_pub(self.window()).context().color_scheme(None);
++                let theme = match scheme {
++                    ColorScheme::Dark => Some(winit::window::Theme::Dark),
++                    ColorScheme::Light => Some(winit::window::Theme::Light),
++                    _ => None,
++                };
++                if self.winit_theme.get() != theme {
++                    self.winit_theme.set(theme);
++                    if let Some(winit_window) = self.winit_window() {
++                        winit_window.set_theme(theme);
++                    }
++                }
++            },
++        );
++
+         if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
+             // on macOS we sometimes don't get a resize event after calling
+             // request_inner_size(), it returning None (promising a resize event), and then delivering RedrawRequested. To work around this,
+@@ -850,15 +874,7 @@ pub fn draw(&self) -> Result<(), PlatformError> {
+         }
+ 
+         let renderer = self.renderer();
+-        let outcome = renderer.render(self.window());
+-        // A timeout or an error ends the wait as well, so that the window can't stay invisible.
+-        #[cfg(target_os = "macos")]
+-        if !matches!(outcome, Ok(DrawOutcome::Occluded | DrawOutcome::Skipped)) {
+-            self.reveal_on_first_frame.take();
+-        }
+-        if matches!(outcome?, DrawOutcome::Success) {
+-            self.first_frame_presented.set(true);
+-        } else {
++        if !matches!(renderer.render(self.window())?, DrawOutcome::Success) {
+             // Frame was skipped (e.g. surface occluded). pending_redraw was already
+             // cleared above, so re-arm it so we try again.
+             self.request_redraw();
+@@ -1307,6 +1323,43 @@ pub(crate) fn dispatch_winit_window_event(
+                 self.activation_changed(have_focus)?;
+             }
+ 
++            WinitWindowEvent::HoveredFile(path) => {
++                // An external drag entered the window; winit delivers one event per file
++                // *before* the drop. These paths are only used for the hover feedback
++                // (`DragMove` transfers); the actual drop content comes from
++                // `DroppedFile`, which repeats the same paths — accumulating both would
++                // import every file twice.
++                self.external_drag_paths.borrow_mut().push(path);
++            }
++            WinitWindowEvent::HoveredFileCancelled => {
++                self.external_drag_paths.borrow_mut().clear();
++                WindowInner::from_pub(self.window())
++                    .process_drag_event(corelib::input::BackendDragEvent::Leave);
++            }
++            WinitWindowEvent::DroppedFile(path) => {
++                // The drag was released. Deliver exactly this file as one `Drop`
++                // (winit sends one event per file), after ending the hover state —
++                // the hover paths must not be merged into the drop content.
++                self.external_drag_paths.borrow_mut().clear();
++                WindowInner::from_pub(self.window())
++                    .process_drag_event(corelib::input::BackendDragEvent::Leave);
++                let pos = self.cursor_pos.get();
++                let mut drop_event = corelib::items::DropEvent::default();
++                drop_event.data.set_file_paths([path.as_path()]);
++                drop_event.position = LogicalPosition::new(pos.x, pos.y);
++                drop_event.proposed_action = corelib::items::DragAction::Copy;
++                WindowInner::from_pub(self.window()).process_drag_event(
++                    corelib::input::BackendDragEvent::Drop {
++                        event: drop_event,
++                        allowed: corelib::items::AllowedDragActions {
++                            copy: true,
++                            move_: true,
++                            link: false,
++                        },
++                    },
++                );
++            }
++
+             WinitWindowEvent::KeyboardInput { event, is_synthetic, .. } => {
+                 let key_code = event.logical_key.clone();
+                 // For now: Match Qt's behavior of mapping command to control and control to meta (LWin/RWin).
+@@ -1433,6 +1486,32 @@ macro_rules! winit_key_to_char {
+                 self.dispatch_internal_event(event);
+             }
+             WinitWindowEvent::CursorMoved { position, .. } => {
++                // While an external (OS-level) drag hovers the window, feed the cursor
++                // movement to `DropArea`s as drag-move events so they can offer
++                // position-dependent hover feedback and negotiate the action.
++                if !self.external_drag_paths.borrow().is_empty() {
++                    let logical = position.to_logical(runtime_window.scale_factor() as f64);
++                    self.cursor_pos.set(euclid::point2(logical.x, logical.y));
++                    let mut drop_event = corelib::items::DropEvent::default();
++                    drop_event.data = {
++                        let mut data = corelib::data_transfer::DataTransfer::default();
++                        let paths = self.external_drag_paths.borrow();
++                        data.set_file_paths(paths.iter().map(|p| p.as_path()));
++                        data
++                    };
++                    drop_event.position =
++                        corelib::api::LogicalPosition::new(logical.x as f32, logical.y as f32);
++                    drop_event.proposed_action = corelib::items::DragAction::Copy;
++                    runtime_window.process_drag_event(corelib::input::BackendDragEvent::Move {
++                        event: drop_event,
++                        allowed: corelib::items::AllowedDragActions {
++                            copy: true,
++                            move_: true,
++                            link: false,
++                        },
++                    });
++                    return Ok(());
++                }
+                 self.current_resize_direction.set(handle_cursor_move_for_resize(
+                     winit_window,
+                     position,
+@@ -1555,15 +1634,8 @@ macro_rules! winit_key_to_char {
+                 });
+                 self.update_accent_color();
+             }
+-            WinitWindowEvent::Occluded(occluded) => {
+-                self.renderer.occluded(occluded);
+-
+-                // wgpu hands out no drawable while the window isn't visible, see
+-                // `macos::RevealOnFirstFrame`. Draw now instead of at the next display link tick.
+-                #[cfg(target_os = "macos")]
+-                if !occluded && self.pending_redraw.get() {
+-                    self.draw()?;
+-                }
++            WinitWindowEvent::Occluded(x) => {
++                self.renderer.occluded(x);
+ 
+                 // Same hack as in the Resized arm above, so that we handle Minimized changes
+                 self.window_state_event();
+@@ -1667,13 +1739,10 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
+             // Pre-render the first frame before mapping the window to avoid a flash of
+             // uninitialized VRAM on X11 (no background_pixmap). Skipped on Wayland, where
+             // rendering before the initial configure makes the compositor mis-size the window.
+-            if !self.first_frame_presented.get() && !self.shared_backend_data.is_wayland {
++            if matches!(visibility, WindowVisibility::ShownFirstTime)
++                && !self.shared_backend_data.is_wayland
++            {
+                 let _ = self.draw();
+-                #[cfg(target_os = "macos")]
+-                if !self.first_frame_presented.get() {
+-                    *self.reveal_on_first_frame.borrow_mut() =
+-                        crate::macos::RevealOnFirstFrame::new(&winit_window);
+-                }
+             }
+ 
+             winit_window.set_visible(true);
+@@ -1726,11 +1795,6 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
+             if let Some(existing_blinker) = self.cursor_blinker.borrow().upgrade() {
+                 existing_blinker.stop();
+             }*/
+-
+-            // After the window is ordered out, so that the reveal can't show it.
+-            #[cfg(target_os = "macos")]
+-            self.reveal_on_first_frame.take();
+-
+             Ok(())
+         }
+     }
+diff --git a/internal/compiler/generator/cpp_live_preview.rs b/internal/compiler/generator/cpp_live_preview.rs
+index 8dd8a94..9485f68 100644
+--- a/internal/compiler/generator/cpp_live_preview.rs
++++ b/internal/compiler/generator/cpp_live_preview.rs
+@@ -1,8 +1,6 @@
+ // Copyright © SixtyFPS GmbH <info@slint.dev>
+ // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+ 
+-// cSpell: ignore Wunused
+-
+ use super::accessor_names::{self, AccessorKind};
+ use super::cpp::{Config, concatenate_ident, cpp_ast::*, ident};
+ use crate::CompilerConfiguration;
+@@ -40,9 +38,7 @@ pub fn generate(
+     }
+ 
+     for glob in &llr.globals {
+-        // Only exported globals are reachable through the `global<T>()`
+-        // accessor; the rust_live_preview generator applies the same filter.
+-        if glob.exported && glob.must_generate() {
++        if glob.must_generate() {
+             generate_global(&mut file, glob);
+             file.definitions.extend(glob.aliases.iter().map(|name| {
+                 Declaration::TypeAlias(TypeAlias {
+@@ -250,11 +246,7 @@ fn generate_global(file: &mut File, global: &llr::GlobalComponent) {
+     global_struct.members.push((
+         Access::Private,
+         Declaration::Var(Var {
+-            // A global without public properties generates no accessor that
+-            // reads the member; clang's -Wunused-private-field rejects it
+-            // under -Werror.
+-            ty: "[[maybe_unused]] const slint::private_api::live_preview::LiveReloadingComponent&"
+-                .into(),
++            ty: "const slint::private_api::live_preview::LiveReloadingComponent&".into(),
+             name: "live_preview".into(),
+             ..Default::default()
+         }),
+diff --git a/internal/compiler/widgets/common/datepicker_base.slint b/internal/compiler/widgets/common/datepicker_base.slint
+index 22fbf32..44601fd 100644
+--- a/internal/compiler/widgets/common/datepicker_base.slint
++++ b/internal/compiler/widgets/common/datepicker_base.slint
+@@ -336,7 +336,7 @@ export component DatePickerBase {
+             IconButton {
+                 icon: root.selection-mode ? root.style.input-icon : root.style.calendar-icon;
+                 style: root.style.icon-button-style;
+-                accessible-label: @tr("Toggle selection mode");
++                accessible-label: "Toggle selection mode";
+ 
+                 clicked => {
+                     root.toggle-selection-mode();
+@@ -369,7 +369,7 @@ export component DatePickerBase {
+             IconButton {
+                 icon: root.style.previous-icon;
+                 style: root.style.icon-button-style;
+-                accessible-label: @tr("Previous month");
++                accessible-label: "Previous month";
+ 
+                 clicked => {
+                     root.show-previous();
+@@ -379,7 +379,7 @@ export component DatePickerBase {
+             IconButton {
+                 icon: root.style.next-icon;
+                 style: root.style.icon-button-style;
+-                accessible-label: @tr("Next month");
++                accessible-label: "Next month";
+ 
+                 clicked => {
+                     root.show-next();
+diff --git a/internal/compiler/widgets/common/time-picker-base.slint b/internal/compiler/widgets/common/time-picker-base.slint
+index dce2951..01e30b0 100644
+--- a/internal/compiler/widgets/common/time-picker-base.slint
++++ b/internal/compiler/widgets/common/time-picker-base.slint
+@@ -279,7 +279,7 @@ export component PeriodSelector {
+     callback update-period(bool);
+ 
+     min-width: max(38px, layout.min-width);
+-    accessible-label: @tr("AM or PM");
++    accessible-label: "AM or PM";
+     accessible-role: checkbox;
+     accessible-checked: root.am-selected;
+ 
+@@ -417,7 +417,7 @@ export component TimePickerBase {
+ 
+                 accessible-role: AccessibleRole.text-input;
+                 accessible-value: self.text;
+-                accessible-label: @tr("hour");
++                accessible-label: "hour";
+ 
+                 clicked => {
+                     root.minutes-selected = false;
+@@ -440,7 +440,7 @@ export component TimePickerBase {
+ 
+                 accessible-role: AccessibleRole.text-input;
+                 accessible-value: self.text;
+-                accessible-label: @tr("minute");
++                accessible-label: "minute";
+ 
+                 clicked => {
+                     root.minutes-selected = true;
+diff --git a/internal/core/api.rs b/internal/core/api.rs
+index 35b6d16..4ac802c 100644
+--- a/internal/core/api.rs
++++ b/internal/core/api.rs
+@@ -516,6 +516,15 @@ pub fn hide(&self) -> Result<(), PlatformError> {
+         self.0.hide()
+     }
+ 
++    /// Sets the color scheme the window should use and forwards it to the windowing
++    /// system, so that native window decorations (for example the title bar on macOS)
++    /// follow the chosen dark/light appearance. This is the write counterpart to the
++    /// system-theme observer and updates the process-wide color scheme that
++    /// [`Palette`](crate::Palette)-style bindings read from.
++    pub fn set_color_scheme(&self, scheme: crate::items::ColorScheme) {
++        self.0.context().set_color_scheme(scheme);
++    }
++
+     /// This function allows registering a callback that's invoked during the different phases of
+     /// rendering. This allows custom rendering on top or below of the scene.
+     pub fn set_rendering_notifier(
+@@ -714,6 +723,27 @@ pub fn dispatch_event_with_result(
+                 WindowEventDispatchResult::Accepted
+             }
+ 
++            crate::platform::WindowEvent::FilesDropped { position, paths } => {
++                // An external drag (e.g. from the OS file manager) dropped files onto the
++                // window: deliver a synthetic `Drop` to any `DropArea` under the cursor.
++                let mut data = crate::data_transfer::DataTransfer::default();
++                data.set_file_paths(paths.iter().map(|p| p.as_path()));
++                self.0
++                    .process_mouse_input(MouseEvent::Drop {
++                        event: crate::items::DropEvent {
++                            data,
++                            position,
++                            proposed_action: crate::items::DragAction::Copy,
++                        },
++                        allowed: crate::items::AllowedDragActions {
++                            copy: true,
++                            move_: true,
++                            link: false,
++                        },
++                    })
++                    .into()
++            }
++
+             crate::platform::WindowEvent::KeyPressed { text } => self
+                 .0
+                 .process_key_input(InternalKeyEvent {
+diff --git a/internal/core/platform.rs b/internal/core/platform.rs
+index 470dd83..b7766c4 100644
+--- a/internal/core/platform.rs
++++ b/internal/core/platform.rs
+@@ -461,6 +461,19 @@ pub enum WindowEvent {
+     /// and false when the window loses focus.
+     WindowActiveChanged(bool),
+ 
++    /// One or more files were dropped onto the window by an external drag,
++    /// for example from the operating system's file manager.
++    ///
++    /// Backends should dispatch this event when the platform delivers file-drop
++    /// data (`winit::event::WindowEvent::DroppedFile` on winit platforms). The
++    /// runtime converts it into a `Drop` event for any `DropArea` under `position`.
++    FilesDropped {
++        /// The cursor position at drop time, in logical window coordinates.
++        position: LogicalPosition,
++        /// The dropped file paths.
++        paths: std::vec::Vec<std::path::PathBuf>,
++    },
++
+     /// An event that one of Slint's own backends delivers in the runtime's internal representation.
+     ///
+     /// This isn't public API, use [`WindowEvent::internal()`] to construct it.
+@@ -476,6 +489,7 @@ pub fn position(&self) -> Option<LogicalPosition> {
+             WindowEvent::PointerReleased { position, .. } => Some(*position),
+             WindowEvent::PointerMoved { position } => Some(*position),
+             WindowEvent::PointerScrolled { position, .. } => Some(*position),
++            WindowEvent::FilesDropped { position, .. } => Some(*position),
+             WindowEvent::Internal(event) => event.position(),
+             _ => None,
+         }
+diff --git a/internal/interpreter/instance.rs b/internal/interpreter/instance.rs
+index d326f7a..2e462ed 100644
+--- a/internal/interpreter/instance.rs
++++ b/internal/interpreter/instance.rs
+@@ -507,7 +507,7 @@ pub fn ensure_updated(&self, tree_index: u32) -> bool {
+                 // core calls `RepeatedItemTree::init` on each row, so the
+                 // height/width/geometry bindings must be in place
+                 // immediately; `init_code` stays deferred to `init()`.
+-                init_items_and_bindings(&vrc);
++                install_bindings_for_repeated_row(&vrc);
+             }
+             vrc
+         };
+@@ -796,9 +796,13 @@ fn build_instance(
+ /// instance, then run `init_code`.
+ ///
+ /// Idempotent: separate `OnceCell` flags guard the bindings install and
+-/// the `init_code` step so each side can be called independently.
++/// the `init_code` step so each side can be called independently. The
++/// listview virtualization path uses
++/// [`install_bindings_for_repeated_row`] to install bindings before the
++/// first measurement and defers `init_code` to the core's
++/// `init_instances` callback (`<Instance as RepeatedItemTree>::init`).
+ pub(crate) fn finalize_instance(vrc: &VRc<ItemTreeVTable, Instance>) {
+-    init_items_and_bindings(vrc);
++    install_bindings_for_repeated_row(vrc);
+     if vrc.init_code_run.get().is_some() {
+         return;
+     }
+@@ -813,22 +817,29 @@ pub(crate) fn finalize_instance(vrc: &VRc<ItemTreeVTable, Instance>) {
+     if vrc.public_component_index.is_some() && vrc.embedded_in.get().is_none() {
+         vrc.attach_to_window();
+     }
++    // Call Item::init() on every native item and register the item tree
++    // with the window adapter. Registration matters: the rendering backend
++    // keeps per-component caches (text shaping, bounding rects) released
++    // only by the matching `unregister_item_tree` on Drop, and skipping
++    // the pair leaks entries until the renderer serves stale data for
++    // reused item addresses.
++    {
++        let dyn_rc = vtable::VRc::into_dyn(vrc.self_weak.get().unwrap().upgrade().unwrap());
++        let adapter = vrc.window_adapter_or_default();
++        i_slint_core::item_tree::register_item_tree(&dyn_rc, adapter);
++    }
+     crate::bindings::run_init_code_for_instance(vrc);
+ }
+ 
+-/// Everything [`finalize_instance`] does except running `init_code`:
+-/// `Item::init()`, bindings, two-way links and timers.
+-pub(crate) fn init_items_and_bindings(vrc: &VRc<ItemTreeVTable, Instance>) {
++/// Install bindings, two-way links and timers on `vrc` without running
++/// `init_code`. Used by the listview row factory; safe to call from any
++/// other path that needs bindings in place but doesn't want to fire user
++/// init handlers yet.
++pub(crate) fn install_bindings_for_repeated_row(vrc: &VRc<ItemTreeVTable, Instance>) {
+     if vrc.bindings_installed.get().is_some() {
+         return;
+     }
+     let _ = vrc.bindings_installed.set(());
+-    // `register_item_tree` calls `Item::init()`, which `ItemVTable::init`
+-    // requires to run before the bindings below.
+-    i_slint_core::item_tree::register_item_tree(
+-        &vtable::VRc::into_dyn(vrc.clone()),
+-        vrc.window_adapter_or_default(),
+-    );
+     let is_root = vrc.parent_instance.upgrade().is_none();
+     if is_root {
+         crate::globals::install_global_bindings(&vrc.globals);
+diff --git a/internal/interpreter/popup.rs b/internal/interpreter/popup.rs
+index e48e193..4145d1b 100644
+--- a/internal/interpreter/popup.rs
++++ b/internal/interpreter/popup.rs
+@@ -92,7 +92,7 @@ pub(crate) fn show_popup_window(ctx: &mut EvalContext, arguments: &[Expression])
+     // Install bindings now but defer `init_code` until after `show_popup`,
+     // so `forward-focus` calls reach a popup the window adapter already
+     // considers active.
+-    crate::instance::init_items_and_bindings(&popup_vrc);
++    crate::instance::install_bindings_for_repeated_row(&popup_vrc);
+ 
+     // The position expression is evaluated lazily so the window can
+     // re-query it after measuring the popup.
+@@ -306,7 +306,7 @@ pub(crate) fn show_popup_menu(ctx: &mut EvalContext, arguments: &[Expression]) -
+     // Install bindings now but defer `init_code` until after `show_popup`,
+     // so `forward-focus` calls reach a popup the window adapter already
+     // considers active.
+-    crate::instance::init_items_and_bindings(&popup_vrc);
++    crate::instance::install_bindings_for_repeated_row(&popup_vrc);
+ 
+     // Wire entries/sub_menu/activated on the popup. Two flavors:
+     //

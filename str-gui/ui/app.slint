@@ -100,13 +100,15 @@ export component AppWindow inherits Window {
     min-height: 580px;
     background: c-window;
 
+    // Slint 内置 Widget 的主题走 Palette：pre-release/1.18 没有 Window::set_color_scheme
+    // （该 API 仅存在于本地 master 快照），而 Palette.color-scheme 正是官方推荐开关。
     init => {
         Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
-        root.apply-color-scheme(root.dark-mode ? ColorScheme.dark : ColorScheme.light);
+        root.report-app-appearance(root.dark-mode);
     }
     changed dark-mode => {
         Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
-        root.apply-color-scheme(root.dark-mode ? ColorScheme.dark : ColorScheme.light);
+        root.report-app-appearance(root.dark-mode);
     }
 
     // ── 主题 ──
@@ -201,7 +203,9 @@ export component AppWindow inherits Window {
     callback refresh();
     callback run-validate();
     callback toggle-dark();
-    callback apply-color-scheme(ColorScheme);
+    // 把当前深浅色偏好通报给宿主，由 Rust 侧上报 OS（macOS 为 NSApp 的 NSAppearance；
+    // Slint 自己的 Widget 主题由下面的 Palette.color-scheme 负责）。
+    callback report-app-appearance(bool);
     callback set-view(bool);
     callback row-click(int);
     callback toggle-expand(int);

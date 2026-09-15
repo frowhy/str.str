@@ -1002,6 +1002,40 @@ fn mac_read_clipboard_files() -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+// ── 向 OS 上报窗口配色偏好 ──────────────────────────────────────────────────
+// Slint 的 `Window::set_color_scheme` 在本题所用的 pre-release/1.18 上并不存在；
+// 退一步说，即便在有该 API 的版本里，它也只有 Windows(muda) 与 Linux(xdg) 两条
+// 实现分支（见 internal/backends/winit/winitwindowadapter.rs），macOS 一侧根本没有
+// 通向系统的通路。所以 macOS 的下游只能自己走 AppKit：设置 NSApp 的 NSAppearance，
+// 让窗口装饰与原生控件跟随主题；Widget 侧主题由 .slint 的 Palette.color-scheme 负责。
+#[cfg(target_os = "macos")]
+fn report_app_appearance(dark: bool) {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    };
+
+    // AppKit 只能在主线程碰；不在主线程就干脆不上报，好过崩溃。
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return;
+    };
+    // 这两个是 Objective-C 侧的 extern static（NSAppearanceName* 常量），取值必须 unsafe；
+    // 它们由 AppKit 提供且生命周期贯穿整个进程，取引用后即交给 AppKit 持有，安全边界成立。
+    let name = unsafe {
+        if dark {
+            NSAppearanceNameDarkAqua
+        } else {
+            NSAppearanceNameAqua
+        }
+    };
+    let Some(appearance) = NSAppearance::appearanceNamed(name) else {
+        return;
+    };
+    NSApplication::sharedApplication(mtm).setAppearance(Some(&appearance));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn report_app_appearance(_dark: bool) {}
+
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
     let editor = Rc::new(RefCell::new(Editor::new()));
@@ -1338,14 +1372,8 @@ fn main() -> Result<(), slint::PlatformError> {
             app.set_dark_mode(!app.get_dark_mode());
         });
     }
-    {
-        let app_weak = app.as_weak();
-        app.on_apply_color_scheme(move |scheme| {
-            if let Some(app) = app_weak.upgrade() {
-                app.window().set_color_scheme(scheme);
-            }
-        });
-    }
+    // .slint 侧在 init 与 dark-mode 变更时各调用一次（窗口装饰/原生控件跟随主题）
+    app.on_report_app_appearance(report_app_appearance);
 
     // ── 保存详情 ──
     {
