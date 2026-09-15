@@ -20,6 +20,9 @@ path = "src/main.rs"
 # 源码由 `str-gui/scripts/vendor-slint.sh` 从「钉死的 base rev + 仓库内补丁」生成，
 # 因此这里是仓库内相对路径：任何人 clone 后执行该脚本都得到字节一致的结果。
 slint = { path = "vendor/slint/api/rs/slint" }
+# 直接依赖 i-slint-core：Window::set_color_scheme 的 ColorScheme 参数类型来自此 crate，
+# 而 slint crate 未对外导出该枚举。指向与 slint 完全相同的内部包，Cargo 合并为同一份。
+i-slint-core = { version = "=1.18.0", path = "vendor/slint/internal/core", default-features = false }
 str-format = { path = "../str-cli" }
 rfd = "0.15"
 trash = "5"

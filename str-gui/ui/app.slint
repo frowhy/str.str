@@ -100,19 +100,32 @@ export component AppWindow inherits Window {
     min-height: 580px;
     background: c-window;
 
-    // Slint 内置 Widget 的主题走 Palette：pre-release/1.18 没有 Window::set_color_scheme
-    // （该 API 仅存在于本地 master 快照），而 Palette.color-scheme 正是官方推荐开关。
+    // 主题：三态选择 → 生效态 → ①写 Slint 内置 Palette（Widget 主题）②通报宿主上报 OS
     init => {
-        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
-        root.report-app-appearance(root.dark-mode);
+        root.apply-appearance();
     }
     changed dark-mode => {
-        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
-        root.report-app-appearance(root.dark-mode);
+        root.apply-appearance();
     }
 
     // ── 主题 ──
-    in-out property <bool> dark-mode: false;
+    // 0 = 跟随系统，1 = 浅色，2 = 深色
+    in-out property <int> appearance-mode: 0;
+    // 系统当前是否为深色：Rust 启动时向 OS 查询后写入（非 macOS 恒 false）
+    in-out property <bool> system-dark: false;
+    // 生效的深色态：显式深色，或「跟随系统」且系统当前为深色
+    in property <bool> dark-mode: root.appearance-mode == 2
+        || (root.appearance-mode == 0 && root.system-dark);
+
+    function apply-appearance() {
+        // Widget 侧配色（含菜单弹出层）由进程级 ColorScheme 驱动：Rust 端通过
+        // Window::set_color_scheme 把它设为「跟随系统的真实值 / 浅色 / 深色」，
+        // 从而让 FluentPalette 不再依赖后端时序、菜单背景稳定。
+        // 这里仍显式写 Palette.color-scheme 作为兜底（StyleMetrics.dark-color-scheme 读它），
+        // 真正的确定性来源在 Rust 侧。
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+        root.report-app-appearance(root.appearance-mode);
+    }
     in property <color> c-window: root.dark-mode ? #1b1d22 : #f5f6f8;
     in property <color> c-panel: root.dark-mode ? #24262c : #ffffff;
     in property <color> c-text: root.dark-mode ? #e5e7eb : #1f2937;
@@ -202,10 +215,9 @@ export component AppWindow inherits Window {
     callback new-bundle();
     callback refresh();
     callback run-validate();
-    callback toggle-dark();
-    // 把当前深浅色偏好通报给宿主，由 Rust 侧上报 OS（macOS 为 NSApp 的 NSAppearance；
-    // Slint 自己的 Widget 主题由下面的 Palette.color-scheme 负责）。
-    callback report-app-appearance(bool);
+    // 把用户的外观选择（0 跟随系统 / 1 浅色 / 2 深色）通报给宿主，由 Rust 侧上报 OS：
+    // macOS 上 0 表示把 NSApp 的 appearance 置空（交还系统），1/2 则显式指定。
+    callback report-app-appearance(int);
     callback set-view(bool);
     callback row-click(int);
     callback toggle-expand(int);
@@ -270,22 +282,43 @@ export component AppWindow inherits Window {
     MenuBar {
         Menu {
             title: "文件";
-            MenuItem { title: "打开…"; activated => { root.open-bundle(); } }
-            MenuItem { title: "新建…"; activated => { root.new-bundle(); } }
+            MenuItem { title: "打开文件…"; shortcut: @keys(Control + O); activated => { root.open-bundle(); } }
+            MenuItem { title: "新建文件…"; shortcut: @keys(Control + N); activated => { root.new-bundle(); } }
         }
         Menu {
             title: "操作";
-            MenuItem { title: "刷新"; enabled: root.has-bundle; activated => { root.refresh(); } }
-            MenuItem { title: "校验"; enabled: root.has-bundle; activated => { root.run-validate(); } }
+            MenuItem { title: "刷新"; shortcut: @keys(Control + R); enabled: root.has-bundle; activated => { root.refresh(); } }
+            MenuItem { title: "校验"; shortcut: @keys(Control + Shift + V); enabled: root.has-bundle; activated => { root.run-validate(); } }
         }
         Menu {
             title: "视图";
-            MenuItem { title: "列表视图"; enabled: root.has-bundle; activated => { root.set-view(false); } }
-            MenuItem { title: "导图视图"; enabled: root.has-bundle; activated => { root.set-view(true); } }
+            MenuItem {
+                title: root.view-mind ? "　列表视图" : "✓ 列表视图";
+                shortcut: @keys(Control + Digit1);
+                enabled: root.has-bundle;
+                activated => { root.set-view(false); }
+            }
+            MenuItem {
+                title: root.view-mind ? "✓ 导图视图" : "　导图视图";
+                shortcut: @keys(Control + Digit2);
+                enabled: root.has-bundle;
+                activated => { root.set-view(true); }
+            }
         }
         Menu {
             title: "外观";
-            MenuItem { title: "深色/浅色主题"; activated => { root.toggle-dark(); } }
+            MenuItem {
+                title: root.appearance-mode == 0 ? "✓ 跟随系统" : "　跟随系统";
+                activated => { root.appearance-mode = 0; }
+            }
+            MenuItem {
+                title: root.appearance-mode == 1 ? "✓ 浅色模式" : "　浅色模式";
+                activated => { root.appearance-mode = 1; }
+            }
+            MenuItem {
+                title: root.appearance-mode == 2 ? "✓ 深色模式" : "　深色模式";
+                activated => { root.appearance-mode = 2; }
+            }
         }
     }
 
@@ -957,9 +990,7 @@ export component AppWindow inherits Window {
 
                             HorizontalLayout {
                                 spacing: 8px;
-                                Text { text: "id：" + root.d-id; font-size: 11px; color: c-sub; overflow: elide; width: 55%; }
-                                Text { text: "rev " + root.d-revision; font-size: 11px; color: c-sub; }
-                                Text { text: root.d-updated; font-size: 11px; color: c-sub; overflow: elide; }
+                                Text { text: "id：" + root.d-id; font-size: 11px; color: c-sub; overflow: elide; }
                             }
 
                             Rectangle { height: 1px; background: c-line; }
@@ -1018,6 +1049,15 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { vertical-stretch: 1; }
+
+                            // 底部信息：修订号与更新时间（置于弹性空白之后，贴面板底部）
+                            // 左 rev、右更新时间：用横向弹性空白把二者顶到两端。
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text { text: "rev " + root.d-revision; font-size: 11px; color: c-sub; }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text { text: root.d-updated; font-size: 11px; color: c-sub; overflow: elide; }
+                            }
                         }
                     }
 

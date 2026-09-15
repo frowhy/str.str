@@ -1002,42 +1002,101 @@ fn mac_read_clipboard_files() -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
-// ── 向 OS 上报窗口配色偏好 ──────────────────────────────────────────────────
-// Slint 的 `Window::set_color_scheme` 在本题所用的 pre-release/1.18 上并不存在；
-// 退一步说，即便在有该 API 的版本里，它也只有 Windows(muda) 与 Linux(xdg) 两条
-// 实现分支（见 internal/backends/winit/winitwindowadapter.rs），macOS 一侧根本没有
-// 通向系统的通路。所以 macOS 的下游只能自己走 AppKit：设置 NSApp 的 NSAppearance，
-// 让窗口装饰与原生控件跟随主题；Widget 侧主题由 .slint 的 Palette.color-scheme 负责。
-#[cfg(target_os = "macos")]
-fn report_app_appearance(dark: bool) {
-    use objc2_app_kit::{
-        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    };
+// ── 外观：进程级配色 + 向 OS 上报原生外观 ───────────────────────────────────
+// Widget 侧主题（含菜单弹出层）由「进程级 ColorScheme」驱动：它经
+// `ColorSchemeSelector.color-scheme ← SlintInternal.color-scheme` 最终落到
+// `FluentPalette.background` 等。仅写 .slint 的 `Palette.color-scheme` 不够 ——
+// 它的来源是后端上报的系统值，时序不定会让菜单在 #1C1C1C（近黑）与浅色间抖动（偶发黑底）。
+// 故由 Rust 经 Window::set_color_scheme 显式设定该进程级值（确定性来源）；原生窗口装饰
+// （标题栏）macOS 上 Slint 无通路，仍走 AppKit 的 NSAppearance。
 
-    // AppKit 只能在主线程碰；不在主线程就干脆不上报，好过崩溃。
-    let Some(mtm) = objc2::MainThreadMarker::new() else {
-        return;
-    };
-    // 这两个是 Objective-C 侧的 extern static（NSAppearanceName* 常量），取值必须 unsafe；
-    // 它们由 AppKit 提供且生命周期贯穿整个进程，取引用后即交给 AppKit 持有，安全边界成立。
-    let name = unsafe {
-        if dark {
-            NSAppearanceNameDarkAqua
-        } else {
-            NSAppearanceNameAqua
+// 与 .slint 的 `appearance-mode` 保持一致
+const APPEARANCE_SYSTEM: i32 = 0;
+const APPEARANCE_LIGHT: i32 = 1;
+const APPEARANCE_DARK: i32 = 2;
+
+/// 统一入口：先设进程级配色（驱动 FluentPalette/菜单背景），再上报原生外观。
+fn apply_appearance(app: &AppWindow, mode: i32) {
+    use i_slint_core::items::ColorScheme;
+    // 跟随系统：必须用「真实的系统值」，绝不能传 Unknown —— FluentPalette.dark-color-scheme
+    // 对 unknown 会走 `unknown == dark → false`，即强制浅色，反而破坏跟随系统。
+    let scheme = match mode {
+        APPEARANCE_DARK => ColorScheme::Dark,
+        APPEARANCE_LIGHT => ColorScheme::Light,
+        APPEARANCE_SYSTEM | _ => {
+            if system_prefers_dark() {
+                ColorScheme::Dark
+            } else {
+                ColorScheme::Light
+            }
         }
     };
-    let Some(appearance) = NSAppearance::appearanceNamed(name) else {
-        return;
-    };
-    NSApplication::sharedApplication(mtm).setAppearance(Some(&appearance));
+    app.window().set_color_scheme(scheme);
+    report_app_appearance_native(mode);
+}
+
+#[cfg(target_os = "macos")]
+fn report_app_appearance_native(_mode: i32) {
+    // 原生菜单（Slint 经 muda 生成、挂在系统菜单栏上）的外观必须且只能跟随系统：
+    // 一旦显式设置 `NSApp.appearance` 或强制 `NSWindow.appearance`，菜单弹窗会继承「被强制的
+    // 外观」而与系统外观冲突，出现「浅色↔深色」的闪烁；`NSApp.appearance` 设成深色时还会造成
+    // 深底黑字（文字仍按系统浅色绘制）。
+    // 因此这里**什么都不做**——`NSApp`/`NSWindow` 保持默认（nil → 跟随系统），菜单自然跟随
+    // 系统。窗口内容区（Slint 控件）的明暗由 FluentPalette + `set_color_scheme` 控制，与本
+    // 函数无关。appearance-mode 的「浅色/深色」仅作用于 Slint 自绘内容，不波及原生菜单。
 }
 
 #[cfg(not(target_os = "macos"))]
-fn report_app_appearance(_dark: bool) {}
+fn report_app_appearance_native(_mode: i32) {}
+
+/// 系统当前是否为深色外观（macOS 走 NSApp 的 effectiveAppearance）。
+#[cfg(target_os = "macos")]
+fn system_prefers_dark() -> bool {
+    use objc2_app_kit::{NSAppearanceNameDarkAqua, NSApplication};
+
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    let name = NSApplication::sharedApplication(mtm)
+        .effectiveAppearance()
+        .name();
+    // NSAppearanceName 是 NSString 的子类，比较走 isEqualToString
+    unsafe { name.isEqualToString(NSAppearanceNameDarkAqua) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_prefers_dark() -> bool {
+    false
+}
 
 fn main() -> Result<(), slint::PlatformError> {
     let app = AppWindow::new()?;
+    // 先让 UI 知道系统当前是否为深色：「跟随系统」模式下生效态与 Palette 都依赖它。
+    // 此后 dark-mode 重算会触发 .slint 的 `changed dark-mode`，配色与上报随之刷新。
+    app.set_system_dark(system_prefers_dark());
+
+    // 系统外观可能在运行中变化，而 AppKit 没有现成的 Rust 侧通知回调可用，
+    // 故用 UI 线程定时器低频复查（2s，开销可忽略）；只在结果变化时写回属性，
+    // 避免每次都触发 dark-mode 重算与 Palette 重写。
+    let app_weak = app.as_weak();
+    let appearance_timer = slint::Timer::default();
+    appearance_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_secs(2),
+        move || {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            let dark = system_prefers_dark();
+            if app.get_system_dark() != dark {
+                app.set_system_dark(dark);
+            }
+            // 顺带补一次外观：启动时窗口可能尚未进入 NSApp.windows()，
+            // 周期复查可让标题栏装饰最终生效（函数内部已做「已匹配则跳过」）。
+            apply_appearance(&app, app.get_appearance_mode());
+        },
+    );
+
     let editor = Rc::new(RefCell::new(Editor::new()));
     let clipboard: Rc<RefCell<Option<ClipItem>>> = Rc::new(RefCell::new(None));
 
@@ -1365,15 +1424,14 @@ fn main() -> Result<(), slint::PlatformError> {
             app_weak.upgrade().unwrap().set_view_mind(mind);
         });
     }
-    {
-        let app_weak = app.as_weak();
-        app.on_toggle_dark(move || {
-            let app = app_weak.upgrade().unwrap();
-            app.set_dark_mode(!app.get_dark_mode());
-        });
-    }
-    // .slint 侧在 init 与 dark-mode 变更时各调用一次（窗口装饰/原生控件跟随主题）
-    app.on_report_app_appearance(report_app_appearance);
+    // .slint 侧在 init 与生效态变更时各调用一次：经 apply_appearance 同时设定
+    // 进程级配色（驱动 Widget/菜单主题）与 macOS 原生窗口装饰。
+    let app_weak = app.as_weak();
+    app.on_report_app_appearance(move |mode| {
+        if let Some(app) = app_weak.upgrade() {
+            apply_appearance(&app, mode);
+        }
+    });
 
     // ── 保存详情 ──
     {

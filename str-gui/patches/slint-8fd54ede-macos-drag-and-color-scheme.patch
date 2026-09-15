@@ -88,7 +88,7 @@ index 9f7765a..1ea19f7 100644
  /// Re-export of the winit crate.
  pub use winit;
 diff --git a/internal/backends/winit/winitwindowadapter.rs b/internal/backends/winit/winitwindowadapter.rs
-index 73d9f69..9065a6f 100644
+index 73d9f69..9bdcf2e 100644
 --- a/internal/backends/winit/winitwindowadapter.rs
 +++ b/internal/backends/winit/winitwindowadapter.rs
 @@ -408,16 +408,9 @@ pub struct WinitWindowAdapter {
@@ -154,7 +154,7 @@ index 73d9f69..9065a6f 100644
  
          // Push the host shell's color scheme and accent color to the SlintContext.
          // With `xdg_desktop_settings` the backend-wide portal watcher (spawned in
-@@ -838,6 +838,30 @@ pub fn draw(&self) -> Result<(), PlatformError> {
+@@ -838,6 +838,38 @@ pub fn draw(&self) -> Result<(), PlatformError> {
  
          self.pending_redraw.set(false);
  
@@ -175,6 +175,14 @@ index 73d9f69..9065a6f 100644
 +                };
 +                if self.winit_theme.get() != theme {
 +                    self.winit_theme.set(theme);
++                    // On macOS we must NOT push the scheme to the OS window: forcing
++                    // `NSWindow.appearance` flattens the native (muda) menu popups —
++                    // they lose the system frosted/translucent material and turn
++                    // solid — and can make them flicker. The window (hence the
++                    // native menus) keeps its default `nil` appearance and follows
++                    // the system. In-window Slint content still follows the scheme
++                    // via the context color scheme set in `set_color_scheme`.
++                    #[cfg(not(target_os = "macos"))]
 +                    if let Some(winit_window) = self.winit_window() {
 +                        winit_window.set_theme(theme);
 +                    }
@@ -185,7 +193,7 @@ index 73d9f69..9065a6f 100644
          if let Some(winit_window) = self.winit_window_or_none.borrow().as_window() {
              // on macOS we sometimes don't get a resize event after calling
              // request_inner_size(), it returning None (promising a resize event), and then delivering RedrawRequested. To work around this,
-@@ -850,15 +874,7 @@ pub fn draw(&self) -> Result<(), PlatformError> {
+@@ -850,15 +882,7 @@ pub fn draw(&self) -> Result<(), PlatformError> {
          }
  
          let renderer = self.renderer();
@@ -202,7 +210,7 @@ index 73d9f69..9065a6f 100644
              // Frame was skipped (e.g. surface occluded). pending_redraw was already
              // cleared above, so re-arm it so we try again.
              self.request_redraw();
-@@ -1307,6 +1323,43 @@ pub(crate) fn dispatch_winit_window_event(
+@@ -1307,6 +1331,43 @@ pub(crate) fn dispatch_winit_window_event(
                  self.activation_changed(have_focus)?;
              }
  
@@ -246,7 +254,7 @@ index 73d9f69..9065a6f 100644
              WinitWindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                  let key_code = event.logical_key.clone();
                  // For now: Match Qt's behavior of mapping command to control and control to meta (LWin/RWin).
-@@ -1433,6 +1486,32 @@ macro_rules! winit_key_to_char {
+@@ -1433,6 +1494,32 @@ macro_rules! winit_key_to_char {
                  self.dispatch_internal_event(event);
              }
              WinitWindowEvent::CursorMoved { position, .. } => {
@@ -279,7 +287,7 @@ index 73d9f69..9065a6f 100644
                  self.current_resize_direction.set(handle_cursor_move_for_resize(
                      winit_window,
                      position,
-@@ -1555,15 +1634,8 @@ macro_rules! winit_key_to_char {
+@@ -1555,15 +1642,8 @@ macro_rules! winit_key_to_char {
                  });
                  self.update_accent_color();
              }
@@ -297,7 +305,7 @@ index 73d9f69..9065a6f 100644
  
                  // Same hack as in the Resized arm above, so that we handle Minimized changes
                  self.window_state_event();
-@@ -1667,13 +1739,10 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
+@@ -1667,13 +1747,10 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
              // Pre-render the first frame before mapping the window to avoid a flash of
              // uninitialized VRAM on X11 (no background_pixmap). Skipped on Wayland, where
              // rendering before the initial configure makes the compositor mis-size the window.
@@ -314,7 +322,7 @@ index 73d9f69..9065a6f 100644
              }
  
              winit_window.set_visible(true);
-@@ -1726,11 +1795,6 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
+@@ -1726,11 +1803,6 @@ fn set_visibility(&self, visibility: WindowVisibility) -> Result<(), PlatformErr
              if let Some(existing_blinker) = self.cursor_blinker.borrow().upgrade() {
                  existing_blinker.stop();
              }*/
