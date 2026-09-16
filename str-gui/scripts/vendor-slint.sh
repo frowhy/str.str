@@ -94,7 +94,15 @@ main() {
     echo "✓ sha256 校验通过（${got:0:16}…）"
 
     mkdir -p "$tmp/x"
-    tar -xzf "$tmp/slint.tar.gz" -C "$tmp/x"
+    # Windows runner 的 tar 无法创建 tarball 内的符号链接（需管理员/开发者模式；
+    # GitHub 的 codeload tarball 含若干 README 软链）——缺的只是软链文件本身，
+    # 不参与编译，容忍后靠特征断言兜底。macOS/Linux 正常解压、失败即中止。
+    if uname -s | grep -qiE 'mingw|msys'; then
+        tar -xzf "$tmp/slint.tar.gz" -C "$tmp/x" \
+            || echo "注意：Windows 上跳过无法创建的符号链接文件（不影响编译）"
+    else
+        tar -xzf "$tmp/slint.tar.gz" -C "$tmp/x"
+    fi
     local src="$tmp/x/slint-${SLINT_REV}"
     [ -d "$src" ] || die "tarball 内容异常：缺少 slint-${SLINT_REV}/ 目录"
 
