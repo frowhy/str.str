@@ -45,6 +45,9 @@ TARBALL_SHA256="1810ed5d233f21c90176ba76b008c9ac22eac2ba58f4ab9a0b9b47d47e1fdd0f
 TARBALL_URL="${SLINT_TARBALL_URL:-https://codeload.github.com/slint-ui/slint/tar.gz/${SLINT_REV}}"
 
 PATCH="$ROOT/str-gui/patches/slint-$(echo "$SLINT_REV" | cut -c1-8)-macos-drag-and-color-scheme.patch"
+# 追加补丁目录：目录内的 .patch 在主补丁之后按文件名顺序依次应用。
+# 用于小粒度增量改动（如拖拽光标），避免频繁重造大补丁。
+EXTRA_DIR="$ROOT/str-gui/patches/extra"
 DEST="$ROOT/str-gui/vendor/slint"
 STAMP="$DEST/.str-vendor-stamp"
 
@@ -101,6 +104,16 @@ main() {
     echo "↓ 应用补丁"
     (cd "$src" && git apply -p1 "$PATCH") \
         || die "补丁应用失败，请检查 $PATCH 是否与 rev ${SLINT_REV} 匹配"
+
+    # 追加补丁（patches/extra/*.patch，按文件名顺序）：每个都必须干净应用。
+    if [ -d "$EXTRA_DIR" ]; then
+        for extra in "$EXTRA_DIR"/*.patch; do
+            [ -f "$extra" ] || continue
+            echo "↓ 应用追加补丁 $(basename "$extra")"
+            (cd "$src" && git apply -p1 "$extra") \
+                || die "追加补丁应用失败：$(basename "$extra")"
+        done
+    fi
 
     grep -q "$ASSERT_PATTERN" "$src/$ASSERT_FILE" \
         || die "补丁未生效：$ASSERT_FILE 中找不到 ${ASSERT_PATTERN}"

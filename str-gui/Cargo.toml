@@ -35,7 +35,7 @@ slint-build = { path = "vendor/slint/api/rs/build" }
 # NSAppearance。版本号刻意与依赖树中的现有版本一致，避免引入第二份 objc2。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSAppearance"] }
+objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSWindow"] }
 
 # macOS 拖放补丁：winit 0.30.x 未实现 draggingUpdated:（返回 YES 才允许落下），
 # 也不在拖拽悬停时上报光标位置，而本 GUI 的树形/行内拖放依赖二者。

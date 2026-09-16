@@ -1,0 +1,249 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 4bfded8..c2621ee 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -508,6 +508,7 @@ features = [
+     "NSProcessInfo",
+     "NSRunLoop",
+     "NSString",
++    "NSTimer",
+     "NSThread",
+     "NSValue",
+ ]
+diff --git a/src/platform_impl/macos/view.rs b/src/platform_impl/macos/view.rs
+index c7ca5bc..33fbb76 100644
+--- a/src/platform_impl/macos/view.rs
++++ b/src/platform_impl/macos/view.rs
+@@ -13,7 +13,8 @@ use objc2_app_kit::{
+ use objc2_foundation::{
+     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
+     NSMutableAttributedString, NSNotFound, NSNotificationCenter, NSObject, NSObjectProtocol,
+-    NSPoint, NSRange, NSRect, NSSize, NSString, NSUInteger,
++    NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
++    NSUInteger,
+ };
+ 
+ use super::app_state::ApplicationDelegate;
+@@ -114,6 +115,13 @@ pub struct ViewState {
+     app_delegate: Retained<ApplicationDelegate>,
+ 
+     cursor_state: RefCell<CursorState>,
++    /// str-gui patch: an external file drag is hovering this view; while set,
++    /// cursor rects use the copy (+) cursor so window activation does not reset
++    /// the drag cursor to the default arrow.
++    drag_cursor_active: Cell<bool>,
++    /// str-gui patch: repeating timer (common modes) that re-asserts the copy
++    /// cursor while the drag hovers, without requiring mouse motion.
++    drag_cursor_timer: RefCell<Option<Retained<NSTimer>>>,
+     ime_position: Cell<NSPoint>,
+     ime_size: Cell<NSSize>,
+     modifiers: Cell<Modifiers>,
+@@ -230,6 +238,15 @@ declare_class!(
+         fn reset_cursor_rects(&self) {
+             trace_scope!("resetCursorRects");
+             let bounds = self.bounds();
++            // str-gui patch: during an external file drag, keep the copy (+) cursor
++            // even when window activation invalidates cursor rects mid-drag.
++            if self.ivars().drag_cursor_active.get() {
++                self.addCursorRect_cursor(
++                    bounds,
++                    &super::cursor::cursor_from_icon(crate::window::CursorIcon::Copy),
++                );
++                return;
++            }
+             let cursor_state = self.ivars().cursor_state.borrow();
+             // We correctly invoke `addCursorRect` only from inside `resetCursorRects`
+             if cursor_state.visible {
+@@ -238,6 +255,26 @@ declare_class!(
+                 self.addCursorRect_cursor(bounds, &invisible_cursor());
+             }
+         }
++
++        /// str-gui patch: cursor rects are invalidated (and this message sent) when
++        /// the window is activated mid-drag; re-assert the copy (+) cursor instead of
++        /// letting the default arrow flash back.
++        #[method(cursorUpdate:)]
++        fn cursor_update(&self, event: &NSEvent) {
++            let _ = event;
++            if self.ivars().drag_cursor_active.get() {
++                unsafe { NSCursor::dragCopyCursor().set() };
++            } else {
++                let cursor_state = self.ivars().cursor_state.borrow();
++                unsafe {
++                    if cursor_state.visible {
++                        cursor_state.cursor.set();
++                    } else {
++                        invisible_cursor().set();
++                    }
++                }
++            }
++        }
+     }
+ 
+     unsafe impl NSTextInputClient for WinitView {
+@@ -794,6 +831,8 @@ impl WinitView {
+         let this = mtm.alloc().set_ivars(ViewState {
+             app_delegate: app_delegate.retain(),
+             cursor_state: Default::default(),
++            drag_cursor_active: Default::default(),
++            drag_cursor_timer: Default::default(),
+             ime_position: Default::default(),
+             ime_size: Default::default(),
+             modifiers: Default::default(),
+@@ -864,6 +903,43 @@ impl WinitView {
+         cursor_state.cursor = icon;
+     }
+ 
++    /// str-gui patch: mark whether an external file drag is hovering this view.
++    /// While set, `resetCursorRects` installs the copy (+) cursor so window
++    /// activation mid-drag does not reset the cursor to the default arrow.
++    pub(super) fn set_drag_cursor_active(&self, active: bool) {
++        self.ivars().drag_cursor_active.set(active);
++    }
++
++    pub(super) fn drag_cursor_active(&self) -> bool {
++        self.ivars().drag_cursor_active.get()
++    }
++
++    /// str-gui patch: while an external file drag hovers the view, a repeating
++    /// timer (scheduled in common modes, so it fires during the event-tracking
++    /// drag session) re-asserts the copy (+) cursor every 0.1 s — AppKit resets
++    /// the cursor when the window is activated mid-drag, and without mouse
++    /// motion no `draggingUpdated:` fires to correct it.
++    pub(super) fn start_drag_cursor_timer(&self) {
++        self.stop_drag_cursor_timer();
++        let block = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
++            unsafe { NSCursor::dragCopyCursor().set() };
++        });
++        let timer = unsafe {
++            NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.1, true, &block)
++        };
++        unsafe {
++            let run_loop = NSRunLoop::mainRunLoop();
++            run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes);
++        }
++        self.ivars().drag_cursor_timer.replace(Some(timer));
++    }
++
++    pub(super) fn stop_drag_cursor_timer(&self) {
++        if let Some(timer) = self.ivars().drag_cursor_timer.take() {
++            unsafe { timer.invalidate() };
++        }
++    }
++
+     /// Set whether the cursor should be visible or not.
+     ///
+     /// Returns whether the state changed.
+diff --git a/src/platform_impl/macos/window_delegate.rs b/src/platform_impl/macos/window_delegate.rs
+index f32716e..e943bcc 100644
+--- a/src/platform_impl/macos/window_delegate.rs
++++ b/src/platform_impl/macos/window_delegate.rs
+@@ -13,7 +13,7 @@ use objc2::{declare_class, msg_send_id, mutability, sel, ClassType, DeclaredClas
+ use objc2_app_kit::{
+     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
+     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
+-    NSColor, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard,
++    NSColor, NSCursor, NSDragOperation, NSDraggingDestination, NSFilenamesPboardType, NSPasteboard,
+     NSRequestUserAttentionType, NSScreen, NSView, NSWindowButton, NSWindowDelegate,
+     NSWindowFullScreenButton, NSWindowLevel, NSWindowOcclusionState, NSWindowOrderingMode,
+     NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+@@ -208,8 +208,11 @@ declare_class!(
+         #[method(windowDidBecomeKey:)]
+         fn window_did_become_key(&self, _: Option<&AnyObject>) {
+             trace_scope!("windowDidBecomeKey:");
+-            // TODO: center the cursor if the window had mouse grab when it
+-            // lost focus
++            // str-gui patch: window activation invalidates cursor rects; while an
++            // external file drag hovers the view, re-assert the copy (+) cursor.
++            if self.view().drag_cursor_active() {
++                unsafe { NSCursor::dragCopyCursor().set() };
++            }
+             self.queue_event(WindowEvent::Focused(true));
+         }
+ 
+@@ -366,9 +369,12 @@ declare_class!(
+     }
+ 
+     unsafe impl NSDraggingDestination for WindowDelegate {
+-        /// Invoked when the dragged image enters destination bounds or frame
++        /// Invoked when the dragged image enters destination bounds or frame.
++        ///
++        /// str-gui patch: return `NSDragOperation` (as the protocol requires) instead
++        /// of a plain `BOOL`, so macOS draws the proper copy (+) cursor badge.
+         #[method(draggingEntered:)]
+-        fn dragging_entered(&self, sender: &NSObject) -> bool {
++        fn dragging_entered(&self, sender: &NSObject) -> NSDragOperation {
+             trace_scope!("draggingEntered:");
+ 
+             use std::path::PathBuf;
+@@ -376,7 +382,7 @@ declare_class!(
+             let pb: Retained<NSPasteboard> = unsafe { msg_send_id![sender, draggingPasteboard] };
+             let filenames = match pb.propertyListForType(unsafe { NSFilenamesPboardType }) {
+                 Some(filenames) => filenames,
+-                None => return false.into(),
++                None => return NSDragOperation::None,
+             };
+             let filenames: Retained<NSArray<NSString>> = unsafe { Retained::cast(filenames) };
+ 
+@@ -386,19 +392,34 @@ declare_class!(
+             });
+             self.emit_drag_cursor_moved(sender);
+ 
+-            true
++            // str-gui patch: window activation mid-drag invalidates cursor rects
++            // (resetting the cursor to the default arrow); keep the copy (+) cursor
++            // installed via cursor rects for as long as the drag hovers this view.
++            self.view().set_drag_cursor_active(true);
++            // str-gui patch: additionally re-assert the cursor from a repeating
++            // timer (common modes — fires during the event-tracking drag session),
++            // covering the stationary period before any draggingUpdated fires.
++            self.view().start_drag_cursor_timer();
++            self.window().invalidateCursorRectsForView(&self.view());
++            unsafe { NSCursor::dragCopyCursor().set() };
++
++            NSDragOperation::Copy
+         }
+ 
+         /// Invoked when the dragged image is repositioned within the window.
+         ///
+-        /// Returning `YES` is required for the drop to be accepted at all; we also
++        /// Returning a non-`None` operation is required for the drop to be accepted at
++        /// all; the operation also drives the macOS cursor badge (+ for Copy). We also
+         /// deliver the drag cursor position as a `CursorMoved` event so applications
+         /// can offer position-dependent drop targets (e.g. tree rows).
+         #[method(draggingUpdated:)]
+-        fn dragging_updated(&self, sender: &NSObject) -> bool {
++        fn dragging_updated(&self, sender: &NSObject) -> NSDragOperation {
+             trace_scope!("draggingUpdated:");
+             self.emit_drag_cursor_moved(sender);
+-            true
++            // str-gui patch: re-assert the copy cursor on every update, so an
++            // activation-induced reset is corrected by the next mouse motion.
++            unsafe { NSCursor::dragCopyCursor().set() };
++            NSDragOperation::Copy
+         }
+ 
+         /// Invoked when the image is released
+@@ -427,6 +448,11 @@ declare_class!(
+                 self.queue_event(WindowEvent::DroppedFile(path));
+             });
+ 
++            // str-gui patch: the drag is over; restore the regular cursor rect.
++            self.view().set_drag_cursor_active(false);
++            self.view().stop_drag_cursor_timer();
++            self.window().invalidateCursorRectsForView(&self.view());
++
+             true
+         }
+ 
+@@ -440,6 +466,10 @@ declare_class!(
+         #[method(draggingExited:)]
+         fn dragging_exited(&self, _sender: Option<&NSObject>) {
+             trace_scope!("draggingExited:");
++            // str-gui patch: drag left this view; restore the regular cursor rect.
++            self.view().set_drag_cursor_active(false);
++            self.view().stop_drag_cursor_timer();
++            self.window().invalidateCursorRectsForView(&self.view());
+             self.queue_event(WindowEvent::HoveredFileCancelled);
+         }
+     }

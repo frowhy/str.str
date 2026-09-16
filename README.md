@@ -186,8 +186,8 @@ str validate .
 | `scripts/*.sh` | `build-example.sh` 幂等重建示例 bundle；`sync-schema.sh` 同步 Schema 派生副本；`check-versions.sh` 版本一致性门禁；（另有 `str-gui/scripts/` 下的 vendor 脚本，见 `str-gui/` 一行） |
 | `str-cli/` | Rust 参考实现（`str` 二进制；crates.io 包名 `str-format`） |
 | `str-cli/schema/*.json` | 三份 Schema 的 **crate 内派生副本**（crates.io 只打包 crate 目录内的文件，故为发版必需）；由 `sync-schema.sh` 生成、`tests/schema_sync.rs` 守卫与真源逐字节一致 |
-| `str-gui/` | STR bundle 的桌面编辑器（Rust + Slint）：树形浏览、元信息编辑、分支增删与内置校验；其依赖的两份上游补丁源码由 `str-gui/scripts/vendor-winit.sh`、`vendor-slint.sh` 生成（首次构建前两个都要跑） |
-| `str-gui/patches/*.patch` | 两处上游缺失能力的补丁：`winit-0.30.13` 未实现 `draggingUpdated:`（不返回 YES 则 AppKit 不允许落下）且不上报拖拽光标位置；Slint 各公开分支均无「winit 拖文件事件 → `DropEvent` 带文件路径」的转换链路（外部文件拖入依赖它，落点靠上述 winit 补丁补发的 `CursorMoved`）。分别由 `vendor-winit.sh` / `vendor-slint.sh` 施加到 sha256 钉死的官方源码 —— 任何人 clone 后执行脚本都得到字节一致的依赖源码 |
+| `str-gui/` | STR bundle 的桌面编辑器（Rust + Slint）：**列表 / 思维导图双视图**（无限画布缩放与平移、小地图导航与连接线、非实际大小时显示缩放比例）、Finder 风格内容列表（拖拽重排、外部文件拖入）、分支与内容条目的增删 / 重命名 / 复制粘贴 / 制作副本、菜单栏编辑与视图缩放快捷键、内置校验；其依赖的两份上游补丁源码由 `str-gui/scripts/vendor-winit.sh`、`vendor-slint.sh` 生成（首次构建前两个都要跑） |
+| `str-gui/patches/*.patch` `str-gui/patches/extra/*.patch` | 四份上游缺失能力的补丁：`winit-0.30.13` 未实现 `draggingUpdated:`（不返回 YES 则 AppKit 不允许落下）且不上报拖拽光标位置；Slint 各公开分支均无「winit 拖文件事件 → `DropEvent` 带文件路径」的转换链路（外部文件拖入依赖它，落点靠上述 winit 补丁补发的 `CursorMoved`）；`extra/` 下两份是拖拽落地后的追加修正（AppKit 拖放操作类型与拖拽光标位置上报）。分别由 `vendor-winit.sh` / `vendor-slint.sh` 施加到 sha256 钉死的官方源码 —— 任何人 clone 后执行脚本都得到字节一致的依赖源码 |
 | `str-skill/` | Agent 技能包（含 CLI 安装器与下载校验） |
 
 > 自举（dogfooding）：本仓库根目录自身就是一个 `.str` bundle，
@@ -229,7 +229,7 @@ str validate .
 - [x] Agent 技能包（`str-skill`）
 - [ ] 规范评审 → `APPROVED` / `IMPLEMENTED`
 - [ ] 领域词汇表：`work.*` / `art.*` / `video.*` / `lit.*` / `code.*` 逐领域定稿
-- [ ] GUI 编辑器（思维导图视图，读 ROOT 一层即可渲染）
+- [x] GUI 编辑器（列表 + 思维导图双视图，读 ROOT 一层即可渲染）
 - [ ] 公开生态：bundle 模板市场、跨 bundle 引用、发布与校验流水线
 
 ---

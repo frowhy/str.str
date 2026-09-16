@@ -18,11 +18,30 @@ use str_format::validate;
 slint::include_modules!();
 
 // ── 思维导图布局常量（px）──
-const NODE_H: f32 = 40.0;
+/// 节点标题行高（需与 app.slint 节点标题行、EntryListPanel 高度扣减一致）。
+const NODE_H: f32 = 28.0;
 const NODE_VGAP: f32 = 10.0;
 const NODE_HGAP: f32 = 70.0;
-const COL_W: f32 = 300.0;
 const MIND_PAD: f32 = 20.0;
+/// 导图节点内嵌面板行高（对标 Finder 列表视图行高，需与 app.slint 中
+/// 条目的 `height` 及上下半区放置区高度（各行高一半）保持一致）。
+const ENTRY_ROW_H: f32 = 24.0;
+/// 面板末尾放置区高度。
+const ENTRY_END_H: f32 = 16.0;
+/// 节点内容区底部留白。
+const ENTRY_PAD_BOTTOM: f32 = 4.0;
+/// 分支内底部「内容」伸缩条高度。
+const CONTENT_BAR_H: f32 = 22.0;
+/// 未展开内容时的节点高度：标题行 + 内容伸缩箭头复用标题行下方留白
+/// （箭头贴标题文字底，即 NODE_H / 2 + 6 → 20px；+ 按钮 18px + 底距 2px）。
+/// 不再额外占用整行 22px，避免标题与箭头之间出现两段留白叠加的间距。
+const NODE_H_COMPACT: f32 = 40.0;
+/// 外置子树按钮占位（按钮 18px + 间隙）：连线起点与画布右缘需越过它。
+const SUBTREE_BTN_EXTENT: f32 = 26.0;
+/// 连线线宽（px）。
+const EDGE_W: f32 = 2.0;
+/// 内容展开时节点宽度：与列表视图行同构的四列布局（display 40% + title + role 56 + size 60）。
+const NODE_EXPANDED_W: f32 = 360.0;
 
 /// 左侧列表 / 导图共用的可视行。
 struct VisibleRow {
@@ -48,6 +67,8 @@ struct Editor {
     selected_entry_path: Option<String>,
     /// 「内容」页已展开的内容文件夹（以分支内绝对路径为键）。
     expanded_dirs: HashSet<String>,
+    /// 导图节点内已展开内容的分支 id 集合（跨 rescan 稳定）。
+    content_expanded: HashSet<String>,
     /// 结构树模型句柄：行点击时原地更新选中标记，避免重建模型破坏双击手势。
     rows_model: RefCell<Option<Rc<VecModel<BranchRow>>>>,
 }
@@ -62,6 +83,7 @@ impl Editor {
             selected: None,
             selected_entry_path: None,
             expanded_dirs: HashSet::new(),
+            content_expanded: HashSet::new(),
             rows_model: RefCell::new(None),
         }
     }
@@ -80,6 +102,7 @@ impl Editor {
         self.bundle = Some(bundle);
         self.scan = Some(scan);
         self.selected_entry_path = None;
+        self.content_expanded.clear();
         self.rebuild();
         Ok(())
     }
@@ -171,8 +194,38 @@ fn ordered_children(scan: &Scan, idx: usize) -> Vec<usize> {
     children
 }
 
-fn dfs_rows(scan: &Scan, idx: usize, expanded: &HashSet<String>, out: &mut Vec<VisibleRow>) {
-    let visit = &scan.visits[idx];
+/// 收缩 `visit` 分支时的状态清理：递归收集子树内所有下级分支，移除它们的
+/// 分支展开与内容展开状态；激活态（选中分支 / 条目选中）位于子树内时一并移除。
+fn collapse_subtree_state(e: &mut Editor, visit: usize) {
+    let Some(scan) = e.scan.as_ref() else {
+        return;
+    };
+    let mut stack = vec![visit];
+    let mut subtree_ids: Vec<String> = Vec::new();
+    let mut selected_in_subtree = false;
+    while let Some(i) = stack.pop() {
+        let id_i = scan.visits[i].meta.as_ref().and_then(|m| m.id.clone());
+        if e.selected.as_ref() == id_i.as_ref() {
+            selected_in_subtree = true;
+        }
+        for c in ordered_children(scan, i) {
+            stack.push(c);
+            if let Some(cid) = scan.visits[c].meta.as_ref().and_then(|m| m.id.clone()) {
+                subtree_ids.push(cid);
+            }
+        }
+    }
+    for cid in &subtree_ids {
+        e.expanded.remove(cid);
+        e.content_expanded.remove(cid);
+    }
+    if selected_in_subtree {
+        e.selected = None;
+        e.selected_entry_path = None;
+    }
+}
+
+fn dfs_rows(scan: &Scan, idx: usize, expanded: &HashSet<String>, out: &mut Vec<VisibleRow>) {    let visit = &scan.visits[idx];
     let id = visit.meta.as_ref().and_then(|m| m.id.clone());
     let children = ordered_children(scan, idx);
     out.push(VisibleRow {
@@ -216,120 +269,239 @@ fn visit_type(visit: &Visit) -> String {
         .unwrap_or_else(|| "（._meta 解析失败）".into())
 }
 
-// ── 思维导图布局：水平树，叶子均分垂直空间，父节点居中 ──
+// ── 思维导图布局：水平树 + 子树垂直带（band）模型 ──
+// 每个子树预留 sub_h = max(自身高度, 子带跨度) 的垂直带；节点固定在自己带中心，
+// 子带围绕该中心对称堆叠。内容展开使父节点变高时只会撑大自己所在的带，
+// 数学上保证任何节点都不会越出带外与兄弟子树重叠；单子分支连线恒为水平直线。
 struct MindOut {
     nodes: Vec<MindNode>,
     edges: Vec<MindEdge>,
+    /// 小地图专用连线：缩略图不画外置子树按钮、无需为它让位，且竖线取间距的
+    /// 1/3 处（左段短、右段长）——小尺寸下分叉点更靠近父节点，右侧分叉更易辨认。
+    mini_edges: Vec<MindEdge>,
     w: f32,
     h: f32,
 }
 
-fn mind_layout(scan: &Scan, expanded: &HashSet<String>, selected: Option<&str>) -> MindOut {
+/// 生成一条肘形连线的三段（水平 → 竖直 → 水平）。
+/// `x_from`/`x_end` 为连线两端（调用方负责与两端节点留出间距）。
+fn push_elbow_edges(
+    out: &mut Vec<MindEdge>,
+    x_from: f32,
+    y_parent: f32,
+    x_mid: f32,
+    x_end: f32,
+    y_end: f32,
+) {
+    out.push(MindEdge {
+        x: x_from,
+        y: y_parent,
+        w: x_mid - x_from,
+        h: EDGE_W,
+    });
+    let (vy, vh) = if y_end >= y_parent {
+        (y_parent, y_end - y_parent)
+    } else {
+        (y_end, y_parent - y_end)
+    };
+    out.push(MindEdge {
+        x: x_mid,
+        y: vy,
+        w: EDGE_W,
+        h: vh,
+    });
+    out.push(MindEdge {
+        x: x_mid,
+        y: y_end,
+        w: x_end - x_mid,
+        h: EDGE_W,
+    });
+}
+
+fn mind_layout(e: &Editor) -> MindOut {
     let mut out = MindOut {
         nodes: Vec::new(),
         edges: Vec::new(),
+        mini_edges: Vec::new(),
         w: 0.0,
         h: 0.0,
+    };
+    let Some(scan) = e.scan.as_ref() else {
+        return out;
     };
     if scan.root_index.is_none() {
         return out;
     }
-    let mut top = NODE_VGAP;
-    mind_dfs(scan, expanded, selected, 0, 0, &mut top, &mut out);
-    out.h = top + NODE_VGAP;
-    out.w = out.nodes.iter().map(|n| n.x + n.w).fold(0.0f32, f32::max) + MIND_PAD;
+    // 预计算各节点自身高度（内容展开时含内嵌面板）。
+    let n = scan.visits.len();
+    let mut node_hs = vec![NODE_H; n];
+    for (i, v) in scan.visits.iter().enumerate() {
+        let id = v.meta.as_ref().and_then(|m| m.id.clone());
+        let show = id.as_deref().is_some_and(|id| e.content_expanded.contains(id));
+        let rows_n = if show { build_entry_rows_for(e, i).len() } else { 0 };
+        let has_entries = v
+            .meta
+            .as_ref()
+            .map(|m| m.entries.iter().any(|en| !en.is_branch()))
+            .unwrap_or(false);
+        node_hs[i] = if rows_n == 0 {
+            if has_entries { NODE_H_COMPACT } else { NODE_H }
+        } else {
+            // 标题行 + 行列表 + 末尾放置区 + 底部留白 + 内容伸缩条。
+            NODE_H + rows_n as f32 * ENTRY_ROW_H + ENTRY_END_H + ENTRY_PAD_BOTTOM + CONTENT_BAR_H
+        };
+    }
+    // 子树带高自深向浅递推：子节点深度必然大于父节点。
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(scan.visits[i].depth));
+    let mut sub_hs = node_hs.clone();
+    for &i in &order {
+        let id = scan.visits[i].meta.as_ref().and_then(|m| m.id.clone());
+        if !id.as_deref().is_some_and(|id| e.expanded.contains(id)) {
+            continue;
+        }
+        let children = ordered_children(scan, i);
+        if children.is_empty() {
+            continue;
+        }
+        let span: f32 = children.iter().map(|&c| sub_hs[c] + NODE_VGAP).sum::<f32>() - NODE_VGAP;
+        sub_hs[i] = span.max(node_hs[i]);
+    }
+    mind_dfs(e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], &mut out);
+    out.h = NODE_VGAP + sub_hs[0] + NODE_VGAP;
+    // 画布右缘需覆盖外置子树按钮的横向占位。
+    out.w = out
+        .nodes
+        .iter()
+        .map(|n| n.x + n.w + if n.has_children { SUBTREE_BTN_EXTENT } else { 0.0 })
+        .fold(0.0f32, f32::max)
+        + MIND_PAD;
     out
 }
 
+/// 在垂直带 [band_top, band_top + band_h] 内布置节点及其子树，返回节点中心 y。
+/// 带高由调用方保证 ≥ 节点自身高度：父节点中心 = 首/末子中心的中点并钳制在带内。
 fn mind_dfs(
-    scan: &Scan,
-    expanded: &HashSet<String>,
-    selected: Option<&str>,
+    e: &Editor,
+    node_hs: &[f32],
+    sub_hs: &[f32],
     idx: usize,
-    depth: usize,
-    top: &mut f32,
+    x: f32,
+    band_top: f32,
+    band_h: f32,
     out: &mut MindOut,
 ) -> f32 {
+    let scan = e.scan.as_ref().unwrap();
     let visit = &scan.visits[idx];
     let id = visit.meta.as_ref().and_then(|m| m.id.clone());
     let is_root = visit.depth == 0;
-    let children: Vec<usize> = if id.as_deref().is_some_and(|id| expanded.contains(id)) {
-        ordered_children(scan, idx)
+    let children_all = ordered_children(scan, idx);
+    let children: Vec<usize> = if id.as_deref().is_some_and(|id| e.expanded.contains(id)) {
+        children_all.clone()
     } else {
         Vec::new()
     };
 
-    let x = MIND_PAD + depth as f32 * COL_W;
-    let title = visit_title(visit);
-    let w = est_node_w(&title);
-    let y = if children.is_empty() {
-        let c = *top + NODE_H / 2.0;
-        *top += NODE_H + NODE_VGAP;
-        c
+    // 节点内容展开时内嵌完整内容列表面板（与列表视图同一 EntryRow 模型）。
+    let show_entries = id.as_deref().is_some_and(|id| e.content_expanded.contains(id));
+    let rows: Vec<EntryRow> = if show_entries {
+        visible_to_rows(&build_entry_rows_for(e, idx))
     } else {
-        let mut centers = Vec::new();
-        for &c in &children {
-            centers.push(mind_dfs(scan, expanded, selected, c, depth + 1, top, out));
-        }
-        (centers[0] + centers[centers.len() - 1]) / 2.0
+        Vec::new()
     };
 
-    let is_selected = selected.is_some_and(|s| id.as_deref() == Some(s));
+    let title = visit_title(visit);
+    let type_str = visit_type(visit);
+    // 是否存在内容条目（控制内容按钮可见性，与展开态无关）。
+    let has_any_entries = visit
+        .meta
+        .as_ref()
+        .map(|m| m.entries.iter().any(|en| !en.is_branch()))
+        .unwrap_or(false);
+    // 内容展开时节点加宽以容纳面板；子列位置随实际宽度右移。
+    let w = if rows.is_empty() {
+        est_node_w(&title, &type_str)
+    } else {
+        NODE_EXPANDED_W
+    };
+    let node_h = node_hs[idx];
+
+    // 节点固定在自己垂直带的中心；子带围绕该中心对称堆叠（越界时钳制在带内）。
+    // 单子带恰好关于节点中心对称 → 连接线为一条水平直线；多子带时仅上下两端出肘。
+    let y = band_top + band_h / 2.0;
+    let child_x = x + w + NODE_HGAP;
+    let mut centers: Vec<f32> = Vec::new();
+    if !children.is_empty() {
+        let total: f32 = children.iter().map(|&c| sub_hs[c] + NODE_VGAP).sum::<f32>() - NODE_VGAP;
+        let mut cursor = (y - total / 2.0).clamp(band_top, band_top + band_h - total);
+        for &c in &children {
+            centers.push(mind_dfs(e, node_hs, sub_hs, c, child_x, cursor, sub_hs[c], out));
+            cursor += sub_hs[c] + NODE_VGAP;
+        }
+    }
+
+    let is_selected = e.selected.as_deref().is_some_and(|s| id.as_deref() == Some(s));
+    let children_expanded = id.as_deref().is_some_and(|id| e.expanded.contains(id));
     out.nodes.push(MindNode {
         visit: idx as i32,
         x,
-        y: y - NODE_H / 2.0,
+        y: y - node_h / 2.0,
         w,
-        h: NODE_H,
+        h: node_h,
         title: title.into(),
-        type_str: visit_type(visit).into(),
+        type_str: type_str.into(),
         is_root,
         is_selected,
+        expanded: show_entries && has_any_entries,
+        children_expanded,
+        has_children: !children_all.is_empty(),
+        has_entries: has_any_entries,
+        entry_rows: ModelRc::from(Rc::new(VecModel::from(rows))),
     });
 
     if !children.is_empty() {
-        for &c in &children {
-            let cx = MIND_PAD + (visit.depth + 1) as f32 * COL_W;
-            let cy = out
+        for (i, &c) in children.iter().enumerate() {
+            // 连线终点取子节点实际位置。
+            let cx = out
                 .nodes
                 .iter()
                 .find(|n| n.visit == c as i32)
-                .map(|n| n.y + n.h / 2.0)
-                .unwrap_or(y);
-            // 肘形连接线：父右缘 → 中线 → 子左缘（三段）。
-            let x1 = x + w;
-            let xm = x1 + NODE_HGAP / 2.0;
-            out.edges.push(MindEdge {
-                x: x1,
-                y,
-                w: xm - x1,
-                h: 2.0,
-            });
-            let (vy, vh) = if cy >= y { (y, cy - y) } else { (cy, y - cy) };
-            out.edges.push(MindEdge {
-                x: xm,
-                y: vy,
-                w: 2.0,
-                h: vh,
-            });
-            out.edges.push(MindEdge {
-                x: xm,
-                y: cy,
-                w: cx - xm,
-                h: 2.0,
-            });
+                .map(|n| n.x)
+                .unwrap_or(child_x);
+            let cy = centers[i];
+            // 画布连线：起点越过外置子树按钮，竖线取间距中点。
+            let x1 = x + w + SUBTREE_BTN_EXTENT;
+            push_elbow_edges(&mut out.edges, x1, y, x1 + NODE_HGAP / 2.0, cx, cy);
+            // 缩略图连线：不画按钮无需让位；两端各留半个按钮占位的呼吸间距
+            // （不接到两端节点上），中段按 1:2 划分 → 左段短、右段长。
+            let g = SUBTREE_BTN_EXTENT / 2.0;
+            let x_from = x + w + g;
+            let x_end = cx - g;
+            let x_mid = x_from + (x_end - x_from) / 3.0;
+            push_elbow_edges(&mut out.mini_edges, x_from, y, x_mid, x_end, cy);
         }
     }
     y
 }
 
-/// 依据标题长度估算节点宽度（CJK 按双宽计）。
-fn est_node_w(title: &str) -> f32 {
-    let units: usize = title
-        .chars()
-        .map(|c| if c.is_ascii() { 1 } else { 2 })
-        .sum();
-    (units as f32 * 8.0 + 34.0).clamp(120.0, COL_W - 40.0)
+/// 估算文本渲染宽度（px）：CJK 字形宽于 ASCII，按字体字号分别计。
+fn est_text_w(text: &str, cjk_px: f32, ascii_px: f32) -> f32 {
+    text.chars()
+        .map(|c| if c.is_ascii() { ascii_px } else { cjk_px })
+        .sum()
+}
+
+/// 依据标题 + 类型估算节点宽度：布局中类型文本按首选宽度分配、
+/// 弹性标题只能拿剩余空间，因此节点宽度必须先容纳二者，否则标题被挤没。
+/// （两个伸缩按钮均外置于节点之外，不占节点宽度。）
+fn est_node_w(title: &str, type_str: &str) -> f32 {
+    let title_w = est_text_w(title, 12.0, 7.0) + 6.0;
+    let type_w = if type_str.is_empty() {
+        0.0
+    } else {
+        est_text_w(type_str, 10.0, 6.0) + 4.0
+    };
+    (16.0 + title_w + type_w).clamp(120.0, 520.0)
 }
 
 /// 解析标签输入：逗号 / 中文逗号 / 空白分隔，去空项。
@@ -535,9 +707,17 @@ struct VisibleEntry {
     title: Option<String>,
 }
 
-/// 构建可见内容行（展开的文件夹列出磁盘子项，按名排序）。
+/// 构建当前选中分支的可见内容行。
 fn build_entry_rows(e: &Editor) -> Vec<VisibleEntry> {
-    let Some(visit) = e.selected_visit() else {
+    match e.selected_idx_in_visits() {
+        Some(idx) => build_entry_rows_for(e, idx),
+        None => Vec::new(),
+    }
+}
+
+/// 构建指定分支的可见内容行（展开的文件夹列出磁盘子项，按名排序）。
+fn build_entry_rows_for(e: &Editor, visit_idx: usize) -> Vec<VisibleEntry> {
+    let Some(visit) = e.scan.as_ref().and_then(|s| s.visits.get(visit_idx)) else {
         return Vec::new();
     };
     let Some(meta) = visit.meta.as_ref() else {
@@ -927,6 +1107,172 @@ fn import_paths_into(
     Ok(names)
 }
 
+/// 跨节点移动条目：把 src 分支的条目移入 dst 分支，按悬停位置插入目标序列。
+/// 落点策略：悬停文件夹行 → 移入该文件夹（不登记顶层）；
+/// 悬停目标顶层条目行 → 登记并插到其前/后；其余（末尾/子行）→ 登记到顶层序列末尾。
+fn move_entry_across(
+    e: &mut Editor,
+    src_visit: usize,
+    path: &str,
+    dst_visit: usize,
+    dst_vis: &[VisibleEntry],
+    at_end: bool,
+    to_index: usize,
+    after: bool,
+) -> Result<String, String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+    let (src_dir, dst_dir) = {
+        let scan = e.scan.as_ref().ok_or("未打开 bundle")?;
+        if src_visit >= scan.visits.len() || dst_visit >= scan.visits.len() {
+            return Err("源或目标分支无效".into());
+        }
+        (
+            scan.visits[src_visit].dir.clone(),
+            scan.visits[dst_visit].dir.clone(),
+        )
+    };
+    let src_meta = read_meta(&bundle, &src_dir)?;
+    let dst_meta = read_meta(&bundle, &dst_dir)?;
+
+    // 目的地目录与插入位（None = 目标顶层序列末尾）。
+    let hovered = if at_end || to_index >= dst_vis.len() {
+        None
+    } else {
+        dst_vis.get(to_index)
+    };
+    let (dst_folder, insert_pos) = match hovered {
+        Some(row) if row.is_dir => (Some(row.drop_dir.clone()), None),
+        Some(row) if row.entries_idx.is_some() => {
+            let before = dst_vis[..to_index]
+                .iter()
+                .filter(|v| v.entries_idx.is_some())
+                .count();
+            (None, Some(before + usize::from(after)))
+        }
+        _ => (None, None),
+    };
+
+    let registered = src_meta.entries.iter().find(|x| x.path == path).cloned();
+
+    let existing: HashSet<String> = dst_meta.entries.iter().map(|x| x.path.clone()).collect();
+    let base_name = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    let name = dedup_name(&existing, &base_name);
+    let dest_dir = dst_folder.clone().unwrap_or_else(|| dst_dir.clone());
+
+    let src_fs = src_dir.join(path);
+    if !src_fs.exists() {
+        return Err("源文件不存在".into());
+    }
+    move_file(&src_fs, &dest_dir.join(&name))?;
+
+    // 源分支：移除顶层登记（文件夹子行本就无登记）。
+    if registered.is_some() {
+        let mut sm = src_meta;
+        sm.remove_entry_path(path);
+        sm.touch();
+        sm.save(&bundle.meta_path(&src_dir))
+            .map_err(|err| err.to_string())?;
+    }
+
+    let mut dm = dst_meta;
+    let mut highlight = name.clone();
+    match (registered.as_ref(), dst_folder.as_ref()) {
+        (Some(entry), None) => {
+            // 登记到目标顶层序列的插入位。
+            let ne = if entry.role == "dir" {
+                let count =
+                    std::fs::read_dir(dest_dir.join(&name)).map(|rd| rd.count()).unwrap_or(0);
+                Entry {
+                    path: name.clone(),
+                    role: "dir".to_string(),
+                    count: Some(count as i64),
+                    title: entry.title.clone(),
+                    note: entry.note.clone(),
+                    ..Default::default()
+                }
+            } else {
+                let bytes = std::fs::read(dest_dir.join(&name)).map_err(|err| err.to_string())?;
+                Entry {
+                    path: name.clone(),
+                    role: entry.role.clone(),
+                    title: entry.title.clone(),
+                    note: entry.note.clone(),
+                    size: Some(bytes.len() as i64),
+                    sha256: Some(util::sha256_bytes(&bytes)),
+                    ..Default::default()
+                }
+            };
+            let mut seq: Vec<Entry> = dm
+                .entries
+                .iter()
+                .filter(|en| !en.is_branch())
+                .cloned()
+                .collect();
+            seq.insert(insert_pos.unwrap_or(seq.len()).min(seq.len()), ne);
+            let snapshot = dm.entries.clone();
+            for en in snapshot.iter().filter(|en| !en.is_branch()) {
+                dm.remove_entry_path(&en.path);
+            }
+            for (i, mut en) in seq.into_iter().enumerate() {
+                en.order = Some(i as i64);
+                dm.upsert_entry(&en);
+            }
+        }
+        (_, Some(folder)) => {
+            // 移入目标分支内的文件夹：更新该文件夹条目的 count。
+            if let Ok(rel) = folder.strip_prefix(&dst_dir) {
+                let rel = rel.to_string_lossy().to_string();
+                if let Some(den) = dm
+                    .entries
+                    .iter()
+                    .find(|x| x.path == rel && x.role == "dir")
+                    .cloned()
+                {
+                    let count = std::fs::read_dir(folder).map(|rd| rd.count()).unwrap_or(0);
+                    let mut ne = den;
+                    ne.count = Some(count as i64);
+                    dm.upsert_entry(&ne);
+                }
+                if registered.is_some() {
+                    highlight = format!("{rel}/{name}");
+                }
+            }
+        }
+        (None, None) => {
+            // 文件夹子行移到目标根目录：按类型登记。
+            if src_fs.is_dir() {
+                let count =
+                    std::fs::read_dir(dest_dir.join(&name)).map(|rd| rd.count()).unwrap_or(0);
+                dm.upsert_entry(&Entry {
+                    path: name.clone(),
+                    role: "dir".to_string(),
+                    count: Some(count as i64),
+                    ..Default::default()
+                });
+            } else {
+                let bytes = std::fs::read(dest_dir.join(&name)).map_err(|err| err.to_string())?;
+                dm.upsert_entry(&Entry {
+                    path: name.clone(),
+                    role: "payload".to_string(),
+                    size: Some(bytes.len() as i64),
+                    sha256: Some(util::sha256_bytes(&bytes)),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    dm.touch();
+    dm.save(&bundle.meta_path(&dst_dir))
+        .map_err(|err| err.to_string())?;
+    e.rescan()?;
+    e.selected_entry_path = Some(highlight);
+    Ok(format!("已移动 {path} → 目标分支"))
+}
+
 /// 运行多行 AppleScript（每行一个 `-e`），返回 stdout。
 #[cfg(target_os = "macos")]
 fn run_applescript(lines: &[&str], args: &[&str]) -> Result<String, String> {
@@ -1036,14 +1382,42 @@ fn apply_appearance(app: &AppWindow, mode: i32) {
 }
 
 #[cfg(target_os = "macos")]
-fn report_app_appearance_native(_mode: i32) {
-    // 原生菜单（Slint 经 muda 生成、挂在系统菜单栏上）的外观必须且只能跟随系统：
-    // 一旦显式设置 `NSApp.appearance` 或强制 `NSWindow.appearance`，菜单弹窗会继承「被强制的
-    // 外观」而与系统外观冲突，出现「浅色↔深色」的闪烁；`NSApp.appearance` 设成深色时还会造成
-    // 深底黑字（文字仍按系统浅色绘制）。
-    // 因此这里**什么都不做**——`NSApp`/`NSWindow` 保持默认（nil → 跟随系统），菜单自然跟随
-    // 系统。窗口内容区（Slint 控件）的明暗由 FluentPalette + `set_color_scheme` 控制，与本
-    // 函数无关。appearance-mode 的「浅色/深色」仅作用于 Slint 自绘内容，不波及原生菜单。
+fn report_app_appearance_native(mode: i32) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+        NSAppearanceCustomization,
+    };
+
+    // 只设置**窗口级** `NSWindow.appearance`，不碰 `NSApp.appearance`：
+    // 标题栏 / 交通灯与窗口内容一同明暗；而主菜单栏与 muda 生成的菜单弹窗
+    // 仍走 NSApp（nil → 跟随系统），不会出现「被强制外观」与系统冲突的闪烁。
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let appearance = unsafe {
+        match mode {
+            APPEARANCE_DARK => NSAppearance::appearanceNamed(NSAppearanceNameDarkAqua),
+            APPEARANCE_LIGHT => NSAppearance::appearanceNamed(NSAppearanceNameAqua),
+            // 跟随系统：清空强制外观（nil → 窗口跟随系统）。
+            _ => None,
+        }
+    };
+    let windows = NSApplication::sharedApplication(mtm).windows();
+    if windows.is_empty() {
+        // 窗口尚未创建：等下一轮复查（调用方为 2s 周期）。
+        return;
+    }
+    std::thread_local! {
+        static APPLIED: std::cell::Cell<i32> = const { std::cell::Cell::new(i32::MIN) };
+    }
+    if APPLIED.with(|c| c.get()) == mode {
+        return;
+    }
+    for window in windows.iter() {
+        window.setAppearance(appearance.as_deref());
+    }
+    APPLIED.with(|c| c.set(mode));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1127,8 +1501,45 @@ fn main() -> Result<(), slint::PlatformError> {
         f(&mut e)
     }
 
+    // ── 无限画布：把视口居中到内容包围盒（flick 布局变化时由 slint 触发）──
+    {
+        let app_weak = app.as_weak();
+        app.on_center_canvas(move |vp_w, vp_h| {
+            if vp_w <= 0.0 || vp_h <= 0.0 {
+                return;
+            }
+            let app = app_weak.upgrade().unwrap();
+            let mw = app.get_mind_w();
+            let mh = app.get_mind_h();
+            let zoom = app.get_mind_zoom();
+            let canvas_w = (mw * 2.0).max(4000.0);
+            let canvas_h = (mh * 2.0).max(3000.0);
+            // 内容中心对齐视口中心（像素坐标含缩放）。content-x 是 viewport 在
+            // Flickable 内的位置：滚动到内容像素坐标 p 时 content-x = -p。
+            let off_x = (canvas_w - mw) / 2.0;
+            let off_y = (canvas_h - mh) / 2.0;
+            let scroll_x = (off_x + mw / 2.0) * zoom - vp_w / 2.0;
+            let scroll_y = (off_y + mh / 2.0) * zoom - vp_h / 2.0;
+            app.set_mind_vpx(-scroll_x);
+            app.set_mind_vpy(-scroll_y);
+        });
+    }
+
     // ── 选中分支 → 信息页表单 ──
     fn sync_detail(app: &AppWindow, e: &Editor) {
+        // 思维导图不依赖选中状态：无选中时仍渲染完整布局（仅无高亮），
+        // 否则点击空白取消选中会把整个画布清空。
+        let mind = mind_layout(e);
+        app.set_mind_nodes(ModelRc::from(Rc::new(VecModel::from(mind.nodes))));
+        app.set_mind_edges(ModelRc::from(Rc::new(VecModel::from(mind.edges))));
+        app.set_mind_mini_edges(ModelRc::from(Rc::new(VecModel::from(mind.mini_edges))));
+        // 缩略图内容宽度需扣掉子树按钮占位（面板宽度公式用），否则右侧多一段空白。
+        app.set_mind_edge_offset(SUBTREE_BTN_EXTENT);
+        app.set_mind_w(mind.w);
+        app.set_mind_h(mind.h);
+
+        // 内容尺寸变化时 slint 侧会经 flick 的 changed width 触发 center-canvas 居中。
+
         let Some(v) = e.selected_visit() else {
             app.set_has_selection(false);
             app.set_is_root(false);
@@ -1143,8 +1554,7 @@ fn main() -> Result<(), slint::PlatformError> {
             app.set_entries(ModelRc::default());
             app.set_refs(ModelRc::default());
             app.set_entry_selected(-1);
-            app.set_mind_nodes(ModelRc::default());
-            app.set_mind_edges(ModelRc::default());
+            app.global::<DndApi>().set_src_visit(-1);
             return;
         };
         let meta = v.meta.as_deref();
@@ -1205,15 +1615,9 @@ fn main() -> Result<(), slint::PlatformError> {
         // 条目编辑区
         fill_entry_fields(app, e);
 
-        // 思维导图
-        let mind = mind_layout(e.scan.as_ref().unwrap(), &e.expanded, e.selected.as_deref());
-        app.set_mind_nodes(ModelRc::from(Rc::new(VecModel::from(mind.nodes))));
-        app.set_mind_edges(ModelRc::from(Rc::new(VecModel::from(mind.edges))));
-        app.set_mind_w(mind.w);
-        app.set_mind_h(mind.h);
-
         // 拖拽源分支（当前选中分支）。
-        app.set_dnd_src_visit(e.selected_idx_in_visits().map(|i| i as i32).unwrap_or(-1));
+        app.global::<DndApi>()
+            .set_src_visit(e.selected_idx_in_visits().map(|i| i as i32).unwrap_or(-1));
     }
 
     fn fill_entry_fields(app: &AppWindow, e: &Editor) {
@@ -1399,11 +1803,58 @@ fn main() -> Result<(), slint::PlatformError> {
                 .and_then(|v| v.meta.as_ref())
                 .and_then(|m| m.id.clone());
             if let Some(id) = id {
-                if !e.expanded.remove(&id) {
+                if e.expanded.remove(&id) {
+                    collapse_subtree_state(&mut e, visit);
+                } else {
                     e.expanded.insert(id);
                 }
                 e.rebuild();
                 sync_ui(&app, &e);
+            }
+        });
+    }
+    {
+        // 导图节点双击：展开/收起该分支的子分支（与列表树共用 expanded 集合）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_toggle_visit_expand(move |visit| {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let id = e
+                .scan
+                .as_ref()
+                .and_then(|s| s.visits.get(visit as usize))
+                .and_then(|v| v.meta.as_ref())
+                .and_then(|m| m.id.clone());
+            if let Some(id) = id {
+                if e.expanded.remove(&id) {
+                    collapse_subtree_state(&mut e, visit as usize);
+                } else {
+                    e.expanded.insert(id);
+                }
+                e.rebuild();
+                sync_ui(&app, &e);
+            }
+        });
+    }
+    {
+        // 导图节点 ▶：展开/收起节点内的内容条目（仅影响导图布局与节点渲染）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_toggle_node_content(move |visit| {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let id = e
+                .scan
+                .as_ref()
+                .and_then(|s| s.visits.get(visit as usize))
+                .and_then(|v| v.meta.as_ref())
+                .and_then(|m| m.id.clone());
+            if let Some(id) = id {
+                if !e.content_expanded.remove(&id) {
+                    e.content_expanded.insert(id);
+                }
+                sync_detail(&app, &e);
             }
         });
     }
@@ -1413,6 +1864,38 @@ fn main() -> Result<(), slint::PlatformError> {
         app.on_select_visit(move |visit| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
+            let target = e
+                .scan
+                .as_ref()
+                .and_then(|s| s.visits.get(visit as usize))
+                .and_then(|v| v.meta.as_ref())
+                .and_then(|m| m.id.clone());
+            // 已选中该节点：跳过重建，保住正在弹出的右键菜单。
+            if target.is_some() && e.selected == target {
+                return;
+            }
+            e.select_visit(visit as usize);
+            sync_ui(&app, &e);
+            app.set_info_tab(0);
+        });
+    }
+    {
+        // EntryApi 面板交互前调用：确保目标分支为当前选中分支（与 select-visit 同逻辑）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_activate_visit(move |visit| {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let target = e
+                .scan
+                .as_ref()
+                .and_then(|s| s.visits.get(visit as usize))
+                .and_then(|v| v.meta.as_ref())
+                .and_then(|m| m.id.clone());
+            // 已选中该分支：跳过重建——否则模型替换会销毁正在弹出右键菜单的元素。
+            if target.is_some() && e.selected == target {
+                return;
+            }
             e.select_visit(visit as usize);
             sync_ui(&app, &e);
             app.set_info_tab(0);
@@ -1421,6 +1904,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let app_weak = app.as_weak();
         app.on_set_view(move |mind| {
+            // 切视图后 mind 区域重建，flick 的 changed width 会触发 center-canvas 居中。
             app_weak.upgrade().unwrap().set_view_mind(mind);
         });
     }
@@ -1432,6 +1916,21 @@ fn main() -> Result<(), slint::PlatformError> {
             apply_appearance(&app, mode);
         }
     });
+    {
+        // 点击导图空白：取消分支选中与条目选中（无变化时跳过重建）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_clear_activation(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            if e.selected.is_none() && e.selected_entry_path.is_none() {
+                return;
+            }
+            e.selected = None;
+            e.selected_entry_path = None;
+            sync_ui(&app, &e);
+        });
+    }
 
     // ── 保存详情 ──
     {
@@ -1645,7 +2144,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_select_entry(move |index| {
+        app.global::<EntryApi>().on_select_entry(move |index| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
             e.selected_entry_path = build_entry_rows(&e)
@@ -1659,7 +2158,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // 展开/收起内容文件夹（仅视图状态，从磁盘列出子项）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_toggle_dir(move |index| {
+        app.global::<EntryApi>().on_toggle_dir(move |index| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
             let vis = build_entry_rows(&e);
@@ -1678,7 +2177,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_save_entry(move || {
+        app.global::<EntryApi>().on_save_entry(move || {
             let app = app_weak.upgrade().unwrap();
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
@@ -1758,7 +2257,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_delete_entry(move || {
+        app.global::<EntryApi>().on_delete_entry(move || {
             let app = app_weak.upgrade().unwrap();
             // 移到废纸篓可找回，无需确认。
             let result = with_editor(&editor, |e| {
@@ -1879,7 +2378,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_clear_entry_selection(move || {
+        app.global::<EntryApi>().on_clear_selection(move || {
             let app = app_weak.upgrade().unwrap();
             editor.borrow_mut().selected_entry_path = None;
             fill_entry_fields(&app, &editor.borrow());
@@ -1892,7 +2391,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let editor = editor.clone();
-        app.on_entry_reveal(move |index| {
+        app.global::<EntryApi>().on_entry_reveal(move |index| {
             let e = editor.borrow();
             let Some(visit) = e.selected_visit() else {
                 return;
@@ -1905,7 +2404,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     {
         let editor = editor.clone();
-        app.on_entry_open(move |index| {
+        app.global::<EntryApi>().on_entry_open(move |index| {
             let e = editor.borrow();
             let Some(path) = e
                 .selected_visit()
@@ -1929,7 +2428,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.on_entry_copy(move |index| {
+        app.global::<EntryApi>().on_entry_copy(move |index| {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = e.selected_visit() else {
@@ -1970,7 +2469,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.on_entry_cut(move |index| {
+        app.global::<EntryApi>().on_entry_cut(move |index| {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = e.selected_visit() else {
@@ -1997,7 +2496,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // 制作副本：在当前分支内复制一份（重名自动「副本」后缀）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_entry_duplicate(move |index| {
+        app.global::<EntryApi>().on_entry_duplicate(move |index| {
             let app = app_weak.upgrade().unwrap();
             let result = with_editor(&editor, |e| {
                 let clip = {
@@ -2038,7 +2537,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let editor = editor.clone();
             let pending = pending.clone();
             let app_weak = app.as_weak();
-            app.on_entry_rename_open(move |index| {
+            app.global::<EntryApi>().on_entry_rename_open(move |index| {
                 let app = app_weak.upgrade().unwrap();
                 let e = editor.borrow();
                 let Some(visit) = e.selected_visit() else {
@@ -2124,7 +2623,7 @@ fn main() -> Result<(), slint::PlatformError> {
         // 新建文件夹：创建目录 + 登记 role = dir。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_entry_new_folder(move || {
+        app.global::<EntryApi>().on_new_folder(move || {
             let app = app_weak.upgrade().unwrap();
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
@@ -2161,7 +2660,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.on_entry_paste(move || {
+        app.global::<EntryApi>().on_paste(move || {
             let app = app_weak.upgrade().unwrap();
             let result = with_editor(&editor, |e| {
                 // 优先读系统剪贴板（Finder 复制的文件 / 本应用复制的内容）。
@@ -2202,13 +2701,13 @@ fn main() -> Result<(), slint::PlatformError> {
         // 拖到列表某行 = 在本分支内重排（写入显式 order）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_entry_dropped(move |transfer, files, row_index, into_dir, after| {
+        app.global::<EntryApi>().on_drop_row(move |transfer, files, row_index, into_dir, after| {
             let app = app_weak.upgrade().unwrap();
             // data-transfer 文本不可靠时回退到拖拽开始时记录的全局载荷。
             let transfer = if parse_entry_transfer(&transfer).is_some() {
                 transfer
             } else {
-                app.get_dnd_payload()
+                app.global::<DndApi>().get_payload()
             };
             let result = with_editor(&editor, |e| {
                 let vis = build_entry_rows(e);
@@ -2308,7 +2807,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 let (src_visit, path) = parse_entry_transfer(&transfer)
                     .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
                 if src_visit != visit_idx {
-                    return Err("重排仅限本分支内；跨分支请拖到左侧树".into());
+                    // 跨节点拖放 = 移动到目标节点，并按悬停位置插入目标序列。
+                    return move_entry_across(
+                        e,
+                        src_visit,
+                        &path,
+                        visit_idx,
+                        &vis,
+                        at_end,
+                        to_index,
+                        after,
+                    );
                 }
                 let src_row = vis
                     .iter()
@@ -2591,7 +3100,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let transfer = if parse_entry_transfer(&transfer).is_some() {
                 transfer
             } else {
-                app.get_dnd_payload()
+                app.global::<DndApi>().get_payload()
             };
             let result = with_editor(&editor, |e| {
                 let Ok(to_visit) = usize::try_from(to_visit) else {
@@ -2841,7 +3350,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let root_id = util::new_uuid_v7();
                 let created = util::now_rfc3339();
                 let text =
-                    meta_edit::render_root_meta(&name, Some(&name), None, &root_id, &created, 0, 7);
+                    meta_edit::render_root_meta(&name, Some(&name), None, &root_id, &created, 7);
                 std::fs::write(bundle_dir.join("._meta"), text).map_err(|err| err.to_string())?;
                 Ok(())
             })();
@@ -2866,4 +3375,157 @@ fn main() -> Result<(), slint::PlatformError> {
 
     sync_ui(&app, &editor.borrow());
     app.run()
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    fn demo_editor() -> Editor {
+        let mut e = Editor::new();
+        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/客户运营.str");
+        e.open(&demo).expect("打开示例 bundle");
+        e
+    }
+
+    /// 小地图连线几何：两端各留半个子树按钮占位的间距（不接到两端节点上，
+    /// 左右一致），中段按 1:2 划分（左段短、右段长）；大画布连线仍为按钮全让位。
+    #[test]
+    fn mini_edges_split_one_to_two() {
+        let mut e = demo_editor();
+        let root_id = e
+            .scan
+            .as_ref()
+            .and_then(|s| s.visits.first())
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.id.clone())
+            .expect("根分支有 id");
+        e.expanded.insert(root_id);
+        let out = mind_layout(&e);
+        assert!(!out.mini_edges.is_empty(), "展开根子树后应有缩略图连线");
+
+        let root = out.nodes.iter().find(|n| n.is_root).expect("有根节点");
+        let gap = SUBTREE_BTN_EXTENT / 2.0; // 两端各留的呼吸间距
+        let mini_start = root.x + root.w + gap; // 缩略图左端
+        let canvas_start = root.x + root.w + SUBTREE_BTN_EXTENT; // 画布左端
+        let eps = 0.01;
+
+        // 水平段判据：宽度明显大于线宽（借此排除竖线段）。
+        let left = out
+            .mini_edges
+            .iter()
+            .find(|s| (s.x - mini_start).abs() < eps && s.w > EDGE_W + eps)
+            .expect("找到缩略图左段");
+        let mid = left.x + left.w;
+        let right = out
+            .mini_edges
+            .iter()
+            .find(|s| (s.x - mid).abs() < eps && s.w > EDGE_W + eps)
+            .expect("找到缩略图右段");
+
+        assert!(left.w > 0.0 && right.w > 0.0, "两段都应可见");
+        let ratio = right.w / left.w;
+        assert!(
+            (ratio - 2.0).abs() < 0.05,
+            "右段应为左段的 2 倍，实际 左 {:.2} / 右 {:.2}",
+            left.w,
+            right.w
+        );
+
+        // 右端不接到分支上：与子节点左缘之间留与左端相同的间距。
+        // 子节点左缘 = 对应画布右段的终点。
+        let canvas_right = out
+            .edges
+            .iter()
+            .find(|s| {
+                (s.x - (canvas_start + NODE_HGAP / 2.0)).abs() < eps && s.w > EDGE_W + eps
+            })
+            .expect("找到画布右段");
+        let child_left = canvas_right.x + canvas_right.w;
+        let mini_right_end = right.x + right.w;
+        assert!(
+            (mini_right_end - (child_left - gap)).abs() < eps,
+            "右端应距子节点左缘 {}px（与左端一致），实际 右端 {:.2} / 子左缘 {:.2}",
+            gap,
+            mini_right_end,
+            child_left
+        );
+        // 画布连线起点仍越过按钮：同一父节点在画布侧的左段起点更靠右。
+        assert!(
+            out.edges
+                .iter()
+                .any(|s| (s.x - canvas_start).abs() < eps && s.w > EDGE_W + eps),
+            "画布连线起点应为父右缘 + 整个按钮占位"
+        );
+    }
+
+    #[test]
+    fn collapse_clears_descendant_expand_and_activation() {
+        let mut e = demo_editor();
+        // 找「客户档案」分支（rel / dir 路径含名字）。
+        let idx = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .position(|v| {
+                v.rel.contains("客户") || v.dir.to_string_lossy().contains("客户")
+            })
+            .expect("找到客户档案分支");
+        let scan = e.scan.as_ref().unwrap();
+        let kids = ordered_children(scan, idx);
+        assert!(!kids.is_empty(), "客户档案应有子分支");
+        let root_id = scan.visits[idx]
+            .meta
+            .as_ref()
+            .and_then(|m| m.id.clone())
+            .expect("客户档案有 id");
+        let kid_ids: Vec<String> = kids
+            .iter()
+            .map(|&i| {
+                scan.visits[i]
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.id.clone())
+                    .expect("子分支有 id")
+            })
+            .collect();
+        // 展开客户档案与全部子分支，并激活第一个子分支。
+        e.expanded.insert(root_id);
+        for id in &kid_ids {
+            e.expanded.insert(id.clone());
+        }
+        e.selected = Some(kid_ids[0].clone());
+        e.content_expanded.insert(kid_ids[0].clone());
+        e.rebuild();
+        assert!(
+            e.rows.iter().any(|r| r.visit == kids[0]),
+            "展开后子分支行可见"
+        );
+
+        // 收缩客户档案 → 子树展开态与激活态应全部清除。
+        e.expanded.remove(
+            e.scan.as_ref().unwrap().visits[idx]
+                .meta
+                .as_ref()
+                .and_then(|m| m.id.clone())
+                .as_deref()
+                .unwrap_or(""),
+        );
+        collapse_subtree_state(&mut e, idx);
+        e.rebuild();
+
+        for id in &kid_ids {
+            assert!(!e.expanded.contains(id), "子分支展开态应被移除");
+            assert!(!e.content_expanded.contains(id), "子分支内容展开态应被移除");
+        }
+        assert_eq!(e.selected, None, "子树内的激活分支应被移除");
+        assert_eq!(e.selected_entry_path, None);
+        assert!(
+            e.rows.iter().all(|r| r.visit != kids[0]),
+            "收缩后子分支行不应可见"
+        );
+    }
 }

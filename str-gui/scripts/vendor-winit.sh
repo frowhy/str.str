@@ -93,6 +93,16 @@ main() {
     (cd "$tmp/x/winit-${WINIT_VERSION}" && git apply -p1 "$PATCH") \
         || die "补丁应用失败，请检查 $PATCH 是否与 winit ${WINIT_VERSION} 匹配"
 
+    # 追加补丁目录：目录内的 .patch 在主补丁之后按文件名顺序依次应用。
+    if [ -d "$ROOT/str-gui/patches/extra" ]; then
+        for extra in "$ROOT"/str-gui/patches/extra/winit-*.patch; do
+            [ -f "$extra" ] || continue
+            echo "↓ 应用追加补丁 $(basename "$extra")"
+            (cd "$tmp/x/winit-${WINIT_VERSION}" && git apply -p1 "$extra") \
+                || die "追加补丁应用失败：$(basename "$extra")"
+        done
+    fi
+
     # 补丁后断言：宁可失败，也不要带着未修补的产物继续（上面那次假成功的教训）。
     grep -q "draggingUpdated" "$tmp/x/winit-${WINIT_VERSION}/$patched_file" \
         || die "补丁未生效：$patched_file 中找不到 draggingUpdated"

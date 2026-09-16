@@ -4,6 +4,7 @@
 import {
     Button,
     LineEdit,
+    TextEdit,
     ListView,
     VerticalBox,
     HorizontalBox,
@@ -38,6 +39,52 @@ export global DndApi {
     in-out property <bool> hover-external: false;
     // 当前手势是否为"移入/导入到某个文件夹"（整行高亮）。
     in-out property <bool> hover-into-dir: false;
+    // 悬停状态所属面板（src-visit）：面板有多个实例（每个导图节点一个），
+    // 行高亮/指示线只允许归属面板响应，否则拖拽时所有节点的同行同时触发。
+    in-out property <int> hover-panel: -2;
+    // 悬停状态所属导图节点（visit）：拖拽悬停到某分支上时该节点高亮反馈。
+    in-out property <int> hover-node: -2;
+    // 被拖条目所属分支的 visits 下标（Rust 侧随选中分支更新；拖拽开始时面板写入自身值）。
+    in-out property <int> src-visit: -1;
+    // 内部条目拖拽的载荷（拖拽开始时写入，规避 data-transfer 文本往返问题）。
+    in-out property <string> payload;
+    // ── 导图边缘自动滚动 ──
+    // 光标在 mind 可视区内的坐标（由画布级 / 节点级 DropArea 的 can-drop 持续上报）。
+    in-out property <length> mind-pos-x: -1px;
+    in-out property <length> mind-pos-y: -1px;
+    // 拖拽是否悬于导图区域（驱动边缘滚动定时器；离开导图区 / 拖放结束复位）。
+    in-out property <bool> mind-drag: false;
+}
+
+// 内容条目交互回调：面板（列表视图 / 导图节点）与 Rust 处理器之间的统一入口。
+// 面板交互一律先 activate-visit(src-visit) 确保分支选中，再调用具体动作 ——
+// Rust 侧处理器因此无需感知面板归属，列表与导图节点得以完全复用同一套逻辑。
+export global EntryApi {
+    callback activate-visit(int);
+    callback select-entry(int);
+    callback clear-selection();
+    callback toggle-dir(int);
+    callback entry-open(int);
+    callback entry-reveal(int);
+    callback entry-rename-open(int);
+    callback entry-copy(int);
+    callback entry-cut(int);
+    callback entry-duplicate(int);
+    callback delete-entry();
+    callback save-entry();
+    callback new-folder();
+    callback paste();
+    // 落点处理：transfer / files / 行号(-1=末尾) / 是否移入文件夹 / 是否插到行后。
+    callback drop-row(string, string, int, bool, bool);
+    public function end-drop() {
+        DndApi.hover-row = -2;
+        DndApi.hover-files = false;
+        DndApi.hover-sortable = false;
+        DndApi.hover-into-dir = false;
+        DndApi.hover-panel = -2;
+        DndApi.hover-node = -2;
+        DndApi.mind-drag = false;
+    }
 }
 
 export struct BranchRow {
@@ -73,6 +120,7 @@ export struct RefRow {
     title: string,
 }
 
+/// 导图节点内的内容条目：直接携带完整 EntryRow 模型（与列表视图同一数据结构）。
 export struct MindNode {
     visit: int,
     x: float,
@@ -83,6 +131,560 @@ export struct MindNode {
     type-str: string,
     is-root: bool,
     is-selected: bool,
+    // 内容展开态：true 时节点内嵌完整内容列表面板（与列表视图功能一致）。
+    expanded: bool,
+    // 子树是否展开（控制 ▶/▼ 图标）。
+    children-expanded: bool,
+    has-children: bool,
+    // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
+    has-entries: bool,
+    entry-rows: [EntryRow],
+}
+
+// 内容条目四列视图：列表视图与导图节点共用（同列宽、同字体、同配色）。
+component EntryCols inherits HorizontalLayout {
+    in property <string> display;
+    in property <string> title;
+    in property <string> role;
+    in property <string> size;
+    in property <color> main-color;
+    in property <color> sub-color;
+    spacing: 4px;
+    Text {
+        text: display;
+        font-size: 12px;
+        color: main-color;
+        overflow: elide;
+        vertical-alignment: center;
+        width: 40%;
+    }
+    Text {
+        text: title;
+        font-size: 12px;
+        color: sub-color;
+        overflow: elide;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    Text {
+        text: role;
+        font-size: 11px;
+        color: sub-color;
+        overflow: elide;
+        vertical-alignment: center;
+        width: 56px;
+    }
+    Text {
+        text: size;
+        font-size: 11px;
+        color: sub-color;
+        vertical-alignment: center;
+        width: 60px;
+        horizontal-alignment: right;
+    }
+}
+
+// 导图节点图标按钮：圆角小方块 + 折线箭头标（随展开态变向，悬停高亮）。
+// horizontal = 水平轴（子树：› 收起 / ‹ 展开）；垂直轴（内容：⌄ 收起 / ⌃ 展开）。
+component MindIconButton inherits Rectangle {
+    in property <bool> expanded;
+    in property <bool> horizontal;
+    in property <color> fg;
+    in property <color> bg-hover;
+    callback clicked;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: ta.has-hover ? bg-hover : transparent;
+    ta := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+    Path {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        fill: transparent;
+        stroke: parent.fg;
+        stroke-width: 1.5px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: parent.horizontal
+            // 子树伸缩：仅「展开且悬停」时显示左箭头（点击收起），其余为右箭头。
+            ? (parent.expanded && ta.has-hover
+                ? "M 6.5 1.5 L 3 5 L 6.5 8.5"
+                : "M 3.5 1.5 L 7 5 L 3.5 8.5")
+            : (parent.expanded
+                ? "M 1.5 6.5 L 5 3 L 8.5 6.5"
+                : "M 1.5 3.5 L 5 7 L 8.5 3.5");
+    }
+}
+
+// 内容条目列表面板：列表视图（中栏）与导图节点内容区完全复用 ——
+// 选中 / 文件夹展开 / 右键菜单 / 拖拽重排 / 外部文件导入 / 末尾放置区，功能与样式一致。
+// 约定：所有交互先 EntryApi.activate-visit(src-visit) 确保该分支为当前选中分支，
+// 再调用既有动作回调，Rust 侧处理器无需感知面板归属。
+component EntryListPanel inherits Rectangle {
+    in property <int> src-visit: -1;
+    in property <[EntryRow]> entries;
+    in property <int> selected-index: -1;
+    in property <color> col-text;
+    in property <color> col-sub;
+    in property <color> col-sel;
+    in property <color> col-badge;
+    in property <color> col-hover;
+    in property <color> col-accent;
+    clip: true;
+
+    // 底层：分支级菜单（仅手动 show，避免自动触发）。
+    blankmenu := ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "新建文件夹";
+                activated => {
+                    EntryApi.activate-visit(src-visit);
+                    EntryApi.new-folder();
+                }
+            }
+            MenuItem {
+                title: "粘贴";
+                activated => {
+                    EntryApi.activate-visit(src-visit);
+                    EntryApi.paste();
+                }
+            }
+        }
+    }
+    // 空白处点击 = 取消选中（TouchArea 消费所有按键，
+    // 因此右键也在这里处理：取消选中 + 手动弹分支菜单）。
+    TouchArea {
+        clicked => {
+            EntryApi.activate-visit(src-visit);
+            EntryApi.clear-selection();
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right
+                && event.kind == PointerEventKind.up) {
+                // 右键不改变任何状态，直接弹菜单（激活延迟到菜单项点击）。
+                blankmenu.show({x: self.mouse-x, y: self.mouse-y});
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
+    }
+    VerticalLayout {
+        spacing: 0px;
+        if entries.length == 0: Rectangle {
+            Text {
+                text: "（此分支暂无内容条目——可从 Finder 拖入文件）";
+                font-size: 12px;
+                color: col-sub;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: parent.width;
+                height: parent.height;
+            }
+        }
+        if entries.length > 0: ListView {
+            // 节点内嵌时容器高度固定：禁止 ListView 隐式最小高度把末尾放置区推出裁剪区。
+            min-height: 0px;
+            vertical-stretch: 1;
+            for entry[index] in entries: Rectangle {
+                // 行高对标 Finder 列表视图（默认 24px / 字号 13），
+                // 本列表字号 12px，24px 行高上下各留 6px。
+                height: 24px;
+                property <bool> hover-top: DndApi.hover-panel == src-visit
+                    && DndApi.hover-row == index
+                    && DndApi.hover-half == 0;
+                property <bool> hover-bottom: DndApi.hover-panel == src-visit
+                    && DndApi.hover-row == index
+                    && DndApi.hover-half == 1;
+                // 文件夹行：内部拖到下半区 / 外部文件落到其上 = 移入（整行高亮）。
+                property <bool> hover-folder: entry.is-dir
+                    && DndApi.hover-panel == src-visit
+                    && DndApi.hover-into-dir && DndApi.hover-row == index;
+                // 插入点渲染约定：插到"行后"一律画在下一行的顶边
+                // （最后一行除外，画在该行行底）。这样光标在同一插入点
+                // 附近上下移动时，指示线位置稳定不跳。
+                // 指示线只用于根路径条目排序；文件夹子行拖拽不显示。
+                property <bool> insert-before: DndApi.hover-panel == src-visit
+                    && DndApi.hover-sortable
+                    && (hover-top
+                        || (index > 0 && DndApi.hover-row == index - 1
+                            && DndApi.hover-half == 1
+                            && entries[index - 1].depth == 0));
+                property <bool> insert-after: DndApi.hover-panel == src-visit
+                    && DndApi.hover-sortable
+                    && hover-bottom && !entry.is-dir
+                    && index == entries.length - 1;
+                property <bool> is-dragging: dragarea.dragging;
+                background: selected-index == index ? col-sel
+                    : hover-folder ? col-badge
+                    : (Math.mod(index, 2) == 0 ? transparent : col-hover);
+                // 源行在拖动中半透明。
+                opacity: is-dragging ? 0.4 : 1.0;
+                Rectangle {
+                    y: 0;
+                    height: 3px;
+                    width: 100%;
+                    background: col-accent;
+                    visible: insert-before;
+                }
+                Rectangle {
+                    y: parent.height - 3px;
+                    height: 3px;
+                    width: 100%;
+                    background: col-accent;
+                    visible: insert-after;
+                }
+                // 层级（先声明在底层）：ctxmenu（手动 show）→ rowdrop → dragarea{内容+TouchArea}。
+                // 右键菜单（原生样式，对标 Finder）；TouchArea 消费右键后手动 show()。
+                ctxmenu := ContextMenuArea {
+                    Menu {
+                        MenuItem {
+                            title: "打开";
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-open(index);
+                            }
+                        }
+                        MenuItem {
+                            title: "在 Finder 中显示";
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-reveal(index);
+                            }
+                        }
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "重命名…";
+                            enabled: entry.depth == 0;
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-rename-open(index);
+                            }
+                        }
+                        MenuItem {
+                            title: "复制";
+                            enabled: entry.depth == 0;
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-copy(index);
+                            }
+                        }
+                        MenuItem {
+                            title: "剪切";
+                            enabled: entry.depth == 0;
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-cut(index);
+                            }
+                        }
+                        MenuItem {
+                            title: "制作副本";
+                            enabled: entry.depth == 0;
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.entry-duplicate(index);
+                            }
+                        }
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "移到废纸篓";
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.select-entry(index);
+                                EntryApi.delete-entry();
+                            }
+                        }
+                    }
+                }
+                // 上半区：内部条目拖到 = 插到该行之前。
+                topzone := DropArea {
+                    y: 0;
+                    height: 12px;
+                    can-drop(event) => {
+                        // 命中面板行级落点：精确放置，暂停导图边缘自动滚动。
+                        DndApi.mind-drag = false;
+                        // 顶层源：自身行 / 下一行顶边 = 顺序不变的无效点，直接拒绝。
+                        // 该抑制只对拖拽源面板本身生效（src-visit 相同）——
+                        // 跨节点拖放时源行号属于另一面板，不能套用。
+                        if (DndApi.transfer-to-entry(event.data) != ""
+                            && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
+                                && entry.depth == 0
+                                && (index == DndApi.hover-src-row
+                                    || index == DndApi.hover-src-row + 1))) {
+                            DndApi.hover-row = index;
+                            DndApi.hover-half = 0;
+                            DndApi.hover-files = false;
+                            DndApi.hover-external = false;
+                            DndApi.hover-into-dir = false;
+                            DndApi.hover-sortable = entry.depth == 0;
+                            DndApi.hover-panel = src-visit;
+                            DndApi.hover-node = src-visit;
+                            DragAction.move
+                        } else if (DndApi.transfer-has-files(event.data)) {
+                            // 外部文件与应用内一致：根层级行 = 插入位（可排序）。
+                            DndApi.hover-row = index;
+                            DndApi.hover-half = 0;
+                            DndApi.hover-files = true;
+                            DndApi.hover-external = true;
+                            DndApi.hover-into-dir = false;
+                            DndApi.hover-sortable = entry.depth == 0;
+                            DndApi.hover-panel = src-visit;
+                            DndApi.hover-node = src-visit;
+                            DragAction.copy
+                        } else {
+                            DndApi.hover-row = -2;
+                            DndApi.hover-files = false;
+                            DndApi.hover-into-dir = false;
+                            DndApi.hover-panel = -2;
+                            DndApi.hover-node = -2;
+                            DragAction.none
+                        }
+                    }
+                    dropped(event) => {
+                        EntryApi.activate-visit(src-visit);
+                        EntryApi.drop-row(
+                            DndApi.transfer-to-entry(event.data),
+                            DndApi.transfer-to-files(event.data),
+                            index,
+                            entry.is-dir,
+                            DndApi.hover-half == 1);
+                        EntryApi.end-drop();
+                        return event.proposed-action;
+                    }
+                }
+                // 下半区：文件行 = 插到该行之后；文件夹行 = 移入文件夹。
+                bottomzone := DropArea {
+                    y: 12px;
+                    height: 12px;
+                    can-drop(event) => {
+                        // 命中面板行级落点：精确放置，暂停导图边缘自动滚动。
+                        DndApi.mind-drag = false;
+                        // "上一行的下半区"是重排的无序位；但文件夹行下半区
+                        // = 移入文件夹（与源位置无关，始终有效），不能拒绝。
+                        // 源行抑制同样只对拖拽源面板本身生效。
+                        if (DndApi.transfer-to-entry(event.data) != ""
+                            && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
+                                && entry.depth == 0
+                                && (index == DndApi.hover-src-row
+                                    || (!entry.is-dir
+                                        && index == DndApi.hover-src-row - 1)))) {
+                            DndApi.hover-row = index;
+                            DndApi.hover-half = 1;
+                            DndApi.hover-files = false;
+                            DndApi.hover-external = false;
+                            DndApi.hover-into-dir = entry.is-dir;
+                            DndApi.hover-sortable = entry.depth == 0
+                                && !entry.is-dir;
+                            DndApi.hover-panel = src-visit;
+                            DndApi.hover-node = src-visit;
+                            DragAction.move
+                        } else if (DndApi.transfer-has-files(event.data)) {
+                            // 外部文件：文件夹行 = 导入其内部；根层级行 = 插入位。
+                            DndApi.hover-row = index;
+                            DndApi.hover-half = 1;
+                            DndApi.hover-files = true;
+                            DndApi.hover-external = true;
+                            DndApi.hover-into-dir = entry.is-dir;
+                            DndApi.hover-sortable = entry.depth == 0
+                                && !entry.is-dir;
+                            DndApi.hover-panel = src-visit;
+                            DndApi.hover-node = src-visit;
+                            DragAction.copy
+                        } else {
+                            DndApi.hover-row = -2;
+                            DndApi.hover-files = false;
+                            DndApi.hover-into-dir = false;
+                            DndApi.hover-panel = -2;
+                            DndApi.hover-node = -2;
+                            DragAction.none
+                        }
+                    }
+                    dropped(event) => {
+                        EntryApi.activate-visit(src-visit);
+                        EntryApi.drop-row(
+                            DndApi.transfer-to-entry(event.data),
+                            DndApi.transfer-to-files(event.data),
+                            index,
+                            entry.is-dir,
+                            DndApi.hover-half == 1);
+                        EntryApi.end-drop();
+                        return event.proposed-action;
+                    }
+                }
+                // 整行外部文件拖入：文件夹行 = 移入文件夹；文件行 = 导入分支。
+                filedrop := DropArea {
+                    can-drop(event) => {
+                        // 整行区域只作为 Drop 的接收层：语义由上半区/下半区写入的
+                        // 全局悬停状态决定，这里一律不接受，避免抢写状态。
+                        DndApi.mind-drag = false;
+                        DragAction.none
+                    }
+                    dropped(event) => {
+                        EntryApi.activate-visit(src-visit);
+                        EntryApi.drop-row(
+                            DndApi.transfer-to-entry(event.data),
+                            DndApi.transfer-to-files(event.data),
+                            index,
+                            entry.is-dir,
+                            DndApi.hover-half == 1);
+                        EntryApi.end-drop();
+                        return event.proposed-action;
+                    }
+                }
+                // 整行可拖拽；TouchArea 在内容层之下（后声明者在上），
+                // 三角按钮的点击才能落在自己的 TouchArea 上。
+                dragarea := DragArea {
+                    data: DndApi.entry-to-transfer("\{src-visit}|\{entry.path}");
+                    allow-copy: true;
+                    allow-move: true;
+                    changed dragging => {
+                        if (self.dragging) {
+                            DndApi.src-visit = src-visit;
+                            DndApi.payload = "\{src-visit}|\{entry.path}";
+                            DndApi.hover-src-row = index;
+                            DndApi.hover-src-top = entry.depth == 0;
+                        }
+                    }
+                    // 拖拽结束（落下或取消）清理全局悬停状态。
+                    drag-finished(action) => {
+                        DndApi.hover-row = -2;
+                        DndApi.hover-files = false;
+                        DndApi.hover-panel = -2;
+                        DndApi.hover-node = -2;
+                        DndApi.hover-src-row = -1;
+                        DndApi.hover-src-top = false;
+                        DndApi.hover-sortable = false;
+                        DndApi.hover-external = false;
+                        DndApi.hover-into-dir = false;
+                    }
+                    TouchArea {
+                        clicked => {
+                            EntryApi.activate-visit(src-visit);
+                            EntryApi.select-entry(index);
+                        }
+                        double-clicked => {
+                            EntryApi.activate-visit(src-visit);
+                            if (entry.is-dir) {
+                                EntryApi.toggle-dir(index);
+                            } else {
+                                EntryApi.entry-open(index);
+                            }
+                        }
+                        // 右键弹菜单（不触发任何状态变更——activate 延迟到菜单项
+                        // 点击时执行，否则模型重建会销毁正在弹出的菜单）。
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.right
+                                && event.kind == PointerEventKind.up) {
+                                EntryApi.select-entry(index);
+                                ctxmenu.show({x: self.mouse-x, y: self.mouse-y});
+                                return EventResult.accept;
+                            }
+                            return EventResult.reject;
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px + entry.depth * 18px;
+                        padding-right: 10px;
+                        spacing: 4px;
+                        // 文件夹展开/收缩三角。
+                        Rectangle {
+                            width: 16px;
+                            visible: entry.is-dir;
+                            Text {
+                                text: entry.expanded ? "▼" : "▶";
+                                font-size: 9px;
+                                color: col-sub;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                                width: parent.width;
+                                height: parent.height;
+                            }
+                            TouchArea {
+                                clicked => {
+                                    EntryApi.activate-visit(src-visit);
+                                    EntryApi.toggle-dir(index);
+                                }
+                            }
+                        }
+                        Rectangle { width: 4px; visible: !entry.is-dir; }
+                        EntryCols {
+                            display: entry.display;
+                            title: entry.title;
+                            role: entry.role;
+                            size: entry.size;
+                            main-color: col-text;
+                            sub-color: col-sub;
+                        }
+                    }
+                }
+            }
+        }
+        // 列表底部放置区 = 移到末尾。
+        Rectangle {
+            height: 16px;
+            property <bool> end-hover: DndApi.hover-panel == src-visit
+                && DndApi.hover-row == -1;
+            Text {
+                width: 100%;
+                height: 100%;
+                text: DndApi.hover-external
+                    ? (end-hover ? "松开导入到分支" : "拖到此处导入到分支")
+                    : (end-hover
+                        ? (DndApi.hover-src-top ? "松开移到末尾" : "松开移回根目录")
+                        : (DndApi.hover-src-top ? "拖到此处移到末尾" : "拖到此处移回根目录"));
+                font-size: 10px;
+                color: end-hover ? col-accent : col-sub;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                y: 0;
+                height: 3px;
+                width: 100%;
+                background: col-accent;
+                visible: end-hover;
+            }
+            enddrop := DropArea {
+                can-drop(event) => {
+                    if ((DndApi.transfer-to-entry(event.data) != ""
+                        || DndApi.transfer-has-files(event.data))
+                        && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
+                            && DndApi.hover-src-row == entries.length - 1)) {
+                        DndApi.hover-row = -1;
+                        DndApi.hover-files = false;
+                        DndApi.hover-panel = src-visit;
+                        DndApi.hover-node = src-visit;
+                        DndApi.hover-external = DndApi.transfer-has-files(event.data);
+                        if (DndApi.hover-external) {
+                            DragAction.copy
+                        } else {
+                            DragAction.move
+                        }
+                    } else {
+                        DndApi.hover-row = -2;
+                        DndApi.hover-files = false;
+                        DndApi.hover-panel = -2;
+                        DndApi.hover-node = -2;
+                        DragAction.none
+                    }
+                }
+                dropped(event) => {
+                    EntryApi.activate-visit(src-visit);
+                    EntryApi.drop-row(
+                        DndApi.transfer-to-entry(event.data),
+                        DndApi.transfer-to-files(event.data),
+                        -1,
+                        false,
+                        true);
+                    EntryApi.end-drop();
+                    return event.proposed-action;
+                }
+            }
+        }
+    }
 }
 
 export struct MindEdge {
@@ -183,16 +785,58 @@ export component AppWindow inherits Window {
     in-out property <string> r-title;
 
     // ── 思维导图 ──
+    // 无限画布：内容画在超大画布中央，四周留白可自由平移（Flickable 边界几乎不可达）。
+    property <length> mind-canvas-w: max(4000px, root.mind-w * 2 * 1px);
+    property <length> mind-canvas-h: max(3000px, root.mind-h * 2 * 1px);
+    // 内容在画布中的居中偏移。
+    property <length> mind-off-x: (mind-canvas-w - root.mind-w * 1px) / 2;
+    property <length> mind-off-y: (mind-canvas-h - root.mind-h * 1px) / 2;
     in property <[MindNode]> mind-nodes;
     in property <[MindEdge]> mind-edges;
+    // 小地图专用连线：几何已按「缩略图不画子树按钮」单独生成
+    // （起点留呼吸间距、竖线取间距 1/3 处，左段短右段长）。
+    in property <[MindEdge]> mind-mini-edges;
+    // 子树按钮的横向占位（值由 Rust 侧 SUBTREE_BTN_EXTENT 提供）：
+    // 缩略图内容宽度需据此扣除，否则右侧多一段空白、左右留白不对称。
+    in property <float> mind-edge-offset: 0.0;
     in property <float> mind-w: 600;
     in property <float> mind-h: 400;
+    // 画布缩放（鼠标滚轮，光标为锚点；档位 0.5~3）。
+    in-out property <float> mind-zoom: 1.0;
+    // 菜单/快捷键缩放的来源标记：置位后由 flick 内的 changed mind-zoom
+    // 以「视口中心」为锚点重算视口并夹取。滚轮路径自行按光标锚点计算，
+    // 不使用该标记（避免两种锚点互相覆盖）。
+    property <bool> zoom-anchor: false;
+    // 缩放档位跳变（与滚轮 zoom-at 同一组档位；对齐档位避免矢量字亚像素柔化）。
+    function zoom-next(dir: int) -> float {
+        let z = root.mind-zoom;
+        return dir > 0
+            ? (z < 0.5 ? 0.5 : z < 0.75 ? 0.75 : z < 1.0 ? 1.0 : z < 1.25 ? 1.25
+                : z < 1.5 ? 1.5 : z < 2.0 ? 2.0 : 3.0)
+            : (z > 3.0 ? 3.0 : z > 2.0 ? 2.0 : z > 1.5 ? 1.5 : z > 1.25 ? 1.25
+                : z > 1.0 ? 1.0 : z > 0.75 ? 0.75 : 0.5);
+    }
+    // 档位未变化时不置标记：否则 changed 不触发，标记会残留并污染后续滚轮缩放。
+    function zoom-by(dir: int) {
+        let target = root.zoom-next(dir);
+        if (target != root.mind-zoom) {
+            root.zoom-anchor = true;
+            root.mind-zoom = target;
+        }
+    }
+    function zoom-reset() {
+        if (root.mind-zoom != 1.0) {
+            root.zoom-anchor = true;
+            root.mind-zoom = 1.0;
+        }
+    }
+    // 画布视口（content-x/y 的双向镜像）：居中逻辑见 center-canvas 回调。
+    in-out property <length> mind-vpx;
+    in-out property <length> mind-vpy;
+    // 居中画布视口（参数 = 视口尺寸，逻辑 px；由 flick 布局变化时触发）。
+    callback center-canvas(float, float);
 
     // ── 拖拽：被拖条目所属分支的 visits 下标（Rust 侧随选中分支更新）──
-    in property <int> dnd-src-visit: -1;
-    // 内部条目拖拽的载荷（拖拽开始时写入，规避 data-transfer 文本往返问题）。
-    in-out property <string> dnd-payload;
-
     // ── 对话框 ──
     in property <bool> dialog-visible: false;
     in-out property <string> new-name;
@@ -211,6 +855,13 @@ export component AppWindow inherits Window {
     // ── 状态栏 ──
     in property <string> status: "打开或新建一个 .str bundle 开始编辑。";
 
+    // 编辑菜单可用性：需选中条目，且无模态对话框——否则对话框内的文本编辑
+    // 会被菜单快捷键（⌘C/⌘V 等）截获，无法正常复制粘贴文字。
+    property <bool> entry-cmd-ok: root.entry-selected >= 0
+        && !root.dialog-visible
+        && !root.rename-visible
+        && !root.branch-dialog-visible;
+
     callback open-bundle();
     callback new-bundle();
     callback refresh();
@@ -222,48 +873,26 @@ export component AppWindow inherits Window {
     callback row-click(int);
     callback toggle-expand(int);
     callback select-visit(int);
+    // 点击导图空白处：取消分支选中（激活）状态。
+    callback clear-activation();
+    // 导图：双击节点伸缩子树；▶ 展开/收起节点内内容条目。
+    callback toggle-visit-expand(int);
+    callback toggle-node-content(int);
     callback save-details();
     callback add-child();
     callback delete-branch();
-    callback select-entry(int);
-    callback save-entry();
-    callback delete-entry();
     callback add-entry();
-    callback entry-copy(int);
-    callback entry-cut(int);
-    callback entry-open(int);
-    callback entry-duplicate(int);
-    callback toggle-dir(int);
-    callback entry-rename-open(int);
-    callback entry-new-folder();
-    callback entry-paste();
-    callback entry-reveal(int);
-    // 拖放落点：transfer=载荷 files=外部文件路径 row=悬停行(-1=末尾)
-    // into-dir=手势指向文件夹内部 after=插到该行之后(否则之前)。
-    callback entry-dropped(string, string, int, bool, bool);
-    // 条目行落点（唯一入口）：语义统一取自全局悬停状态，与指示线/行高亮同源。
-    // 因为 Drop 事件只会命中行内最上层 DropArea（整行覆盖的 filedrop），
-    // 若下半区/上半区各自传参就会出现"线在前、落在后"的错位。
-    public function drop-on-row(transfer: string, files: string, row: int, is-dir: bool) {
-        root.entry-dropped(
-            transfer,
-            files,
-            row,
-            is-dir && DndApi.hover-half == 1,
-            DndApi.hover-half == 1);
-        // 落下后立即清理指示（外部文件拖拽没有 drag-finished 可依赖）。
-        root.clear-dnd-hover();
-    }
     // 清理所有拖拽悬停指示。
     public function clear-dnd-hover() {
         DndApi.hover-row = -2;
         DndApi.hover-files = false;
         DndApi.hover-sortable = false;
         DndApi.hover-into-dir = false;
+        DndApi.hover-panel = -2;
+        DndApi.hover-node = -2;
     }
     callback entry-drop-to-branch(string, string, int);
     callback external-files-dropped(string);
-    callback clear-entry-selection();
     callback reveal-branch();
     callback child-dialog-open();
     callback child-dialog-create();
@@ -285,6 +914,59 @@ export component AppWindow inherits Window {
             MenuItem { title: "打开文件…"; shortcut: @keys(Control + O); activated => { root.open-bundle(); } }
             MenuItem { title: "新建文件…"; shortcut: @keys(Control + N); activated => { root.new-bundle(); } }
         }
+        // 编辑：统一作用于「当前激活分支内选中的内容条目」（entry-selected），
+        // 与内容面板右键菜单同一批回调；未选中条目时相应项置灰。
+        Menu {
+            title: "编辑";
+            MenuItem {
+                title: "复制";
+                shortcut: @keys(Control + C);
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.entry-copy(root.entry-selected); }
+            }
+            MenuItem {
+                title: "剪切";
+                shortcut: @keys(Control + X);
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.entry-cut(root.entry-selected); }
+            }
+            MenuItem {
+                title: "粘贴";
+                shortcut: @keys(Control + V);
+                enabled: root.has-bundle;
+                activated => { EntryApi.paste(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "制作副本";
+                shortcut: @keys(Control + D);
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.entry-duplicate(root.entry-selected); }
+            }
+            MenuItem {
+                title: "重命名…";
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.entry-rename-open(root.entry-selected); }
+            }
+            MenuItem {
+                title: "删除";
+                shortcut: @keys(Control + Delete);
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.delete-entry(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "新建文件夹";
+                enabled: root.has-bundle;
+                activated => { EntryApi.new-folder(); }
+            }
+            MenuItem {
+                title: "保存条目修改";
+                shortcut: @keys(Control + S);
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.save-entry(); }
+            }
+        }
         Menu {
             title: "操作";
             MenuItem { title: "刷新"; shortcut: @keys(Control + R); enabled: root.has-bundle; activated => { root.refresh(); } }
@@ -303,6 +985,26 @@ export component AppWindow inherits Window {
                 shortcut: @keys(Control + Digit2);
                 enabled: root.has-bundle;
                 activated => { root.set-view(true); }
+            }
+            MenuSeparator { }
+            // 画布缩放：仅在导图视图可用（列表视图没有画布），档位与滚轮一致。
+            MenuItem {
+                title: "放大";
+                shortcut: @keys(Control + Plus);
+                enabled: root.view-mind;
+                activated => { root.zoom-by(1); }
+            }
+            MenuItem {
+                title: "缩小";
+                shortcut: @keys(Control + HyphenMinus);
+                enabled: root.view-mind;
+                activated => { root.zoom-by(-1); }
+            }
+            MenuItem {
+                title: "实际大小";
+                shortcut: @keys(Control + Digit0);
+                enabled: root.view-mind;
+                activated => { root.zoom-reset(); }
             }
         }
         Menu {
@@ -327,6 +1029,7 @@ export component AppWindow inherits Window {
             // 光标在列表空白处：清除条目行悬停指示。
             DndApi.hover-row = -2;
             DndApi.hover-files = false;
+            DndApi.hover-panel = -2;
             DndApi.transfer-to-entry(event.data) == "" && DndApi.transfer-has-files(event.data)
                 ? DragAction.copy : DragAction.none;
         }
@@ -346,8 +1049,8 @@ export component AppWindow inherits Window {
             spacing: 12px;
             vertical-stretch: 1;
 
-            // 左：结构（列表 / 导图）
-            Rectangle {
+            // 左：结构列表（仅列表视图）
+            if !root.view-mind: Rectangle {
                 width: 320px;
                 background: c-panel;
                 border-radius: 10px;
@@ -365,7 +1068,8 @@ export component AppWindow inherits Window {
                     ListView {
                         vertical-stretch: 1;
                         for row[index] in root.rows: Rectangle {
-                            height: 34px;
+                            // 行高与导图内容条目同基准（Finder 列表 24px）。
+                            height: 24px;
                             property <bool> drag-hover: treedrop.has-drag;
                             background: drag-hover ? c-badge-bg
                                 : (row.is-selected ? c-sel : (Math.mod(index, 2) == 0 ? transparent : c-hover));
@@ -383,7 +1087,7 @@ export component AppWindow inherits Window {
                                     }
                                     MenuItem {
                                         title: "粘贴";
-                                        activated => { root.entry-paste(); }
+                                        activated => { EntryApi.paste(); }
                                     }
                                     MenuSeparator { }
                                     MenuItem {
@@ -415,6 +1119,8 @@ export component AppWindow inherits Window {
                                     // 光标在树上：清除条目行悬停指示。
                                     DndApi.hover-row = -2;
                                     DndApi.hover-files = false;
+                                    DndApi.hover-panel = -2;
+                                    DndApi.hover-node = -2;
                                     DndApi.transfer-to-entry(event.data) != "" || DndApi.transfer-has-files(event.data)
                                         ? DragAction.move : DragAction.none;
                                 }
@@ -469,68 +1175,602 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.view-mind: VerticalBox {
-                    padding: 10px;
-                    spacing: 8px;
-                    Text {
-                        text: "思维导图（拖拽平移 · 点击选中 · ▶ 伸缩）";
-                        font-size: 12px;
-                        color: c-sub;
-                    }
-                    Flickable {
+            }
+
+            // 导图视图：导图占满主区域，仅保留右侧信息栏（隐藏结构列表与内容区）。
+            if root.view-mind: Rectangle {
+                horizontal-stretch: 1;
+                background: c-panel;
+                border-radius: 10px;
+                clip: true;
+
+                // 内层容器：Slint 不允许布局与绝对定位元素混排，Flickable 包在内层。
+                Rectangle {
+                    flick := Flickable {
                         vertical-stretch: 1;
-                        content-width: max(root.mind-w * 1px, self.width);
-                        content-height: max(root.mind-h * 1px, self.height);
+                        // 内容像素尺寸随缩放变化（canvas 容器被 scale-factor 缩放）。
+                        content-width: max(root.mind-canvas-w * root.mind-zoom, self.width);
+                        content-height: max(root.mind-canvas-h * root.mind-zoom, self.height);
+                        // 视口位置由 Rust 端在内容尺寸变化时居中；用户平移经双向绑定回传。
+                        content-x <=> root.mind-vpx;
+                        content-y <=> root.mind-vpy;
+
+                        // 内容尺寸变化（展开/收缩节点）会使居中偏移 mind-off 漂移，
+                        // 内容在画布坐标系里整体平移——补偿视口偏移，保持视口中心
+                        // 对准的内容点不动（用户平移位置不丢失）。缩放已计入像素换算。
+                        property <length> last-off-x;
+                        property <length> last-off-y;
+
+                        // 以画布坐标 (px, py) 为锚点切换到目标缩放值。
+                        // 屏幕位置 = c*zoom + content-x；保持光标处内容点
+                        // 不动 → content-x' = content-x - c*(zoom' - zoom)。
+                        function apply-zoom(target: float, px: length, py: length) {
+                            if (target == root.mind-zoom) {
+                                return;
+                            }
+                            let dx = px * (root.mind-zoom - target);
+                            let dy = py * (root.mind-zoom - target);
+                            root.mind-zoom = target;
+                            // 先更新缩放再 clamp（范围绑定随 zoom 重算），
+                            // 防止锚点在空白处缩放时把内容推出视野。
+                            flick.content-x = clamp(
+                                flick.content-x + dx,
+                                flick.sc-min-x,
+                                flick.sc-max-x);
+                            flick.content-y = clamp(
+                                flick.content-y + dy,
+                                flick.sc-min-y,
+                                flick.sc-max-y);
+                        }
+
+                        // 滚轮缩放：按档位跳变（0.5/0.75/1/1.25/1.5/2/3）。
+                        // 档位对齐避免任意比例缩放时矢量字形的亚像素柔化。
+                        function zoom-at(px: length, py: length, delta: length) {
+                            let z = root.mind-zoom;
+                            let target = delta < 0px
+                                ? (z < 0.5 ? 0.5
+                                    : z < 0.75 ? 0.75
+                                    : z < 1.0 ? 1.0
+                                    : z < 1.25 ? 1.25
+                                    : z < 1.5 ? 1.5
+                                    : z < 2.0 ? 2.0
+                                    : 3.0)
+                                : (z > 3.0 ? 3.0
+                                    : z > 2.0 ? 2.0
+                                    : z > 1.5 ? 1.5
+                                    : z > 1.25 ? 1.25
+                                    : z > 1.0 ? 1.0
+                                    : z > 0.75 ? 0.75
+                                    : 0.5);
+                            apply-zoom(target, px, py);
+                        }
+                        // 视口范围（像素坐标）：保证内容中心始终在视口内——
+                        // 视口中心 c = -content-x + vp/2 ∈ [中心z - vp/2, 中心z + vp/2]
+                        // → cx ∈ [-中心z, -中心z + vp]（中心z = (off + w/2) * zoom）。
+                        // 滚轮缩放与边缘滚动共用，任何操作后内容都不会滚出视野。
+                        property <length> sc-min-x:
+                            -((root.mind-off-x + root.mind-w * 1px / 2) * root.mind-zoom);
+                        property <length> sc-max-x:
+                            -((root.mind-off-x + root.mind-w * 1px / 2) * root.mind-zoom)
+                                + self.width;
+                        property <length> sc-min-y:
+                            -((root.mind-off-y + root.mind-h * 1px / 2) * root.mind-zoom);
+                        property <length> sc-max-y:
+                            -((root.mind-off-y + root.mind-h * 1px / 2) * root.mind-zoom)
+                                + self.height;
+                        // 菜单/快捷键缩放：以视口中心为锚点重算视口并夹取。
+                        // 滚轮路径已在 apply-zoom 内按光标锚点算好，这里靠
+                        // zoom-anchor 标记区分，避免两种锚点互相覆盖。
+                        // 说明：Slint 的 changed 只能监听本元素属性，故用
+                        // zoom-watch 代理 root.mind-zoom 后再监听。
+                        // zoom-prev 必须是常量初值 + 手动同步：写成 root.mind-zoom
+                        // 会成为绑定，处理器里读到的永远是「新值」而非缩放前值。
+                        property <float> zoom-prev: 1.0;
+                        property <float> zoom-watch: root.mind-zoom;
+                        changed zoom-watch => {
+                            if (root.zoom-anchor) {
+                                root.zoom-anchor = false;
+                                let vpx = self.width / 2;
+                                let vpy = self.height / 2;
+                                // 缩放前视口中心处的内容点（保持它不动）。
+                                let cx = (vpx - self.content-x) / zoom-prev;
+                                let cy = (vpy - self.content-y) / zoom-prev;
+                                self.content-x = clamp(
+                                    vpx - cx * root.mind-zoom, sc-min-x, sc-max-x);
+                                self.content-y = clamp(
+                                    vpy - cy * root.mind-zoom, sc-min-y, sc-max-y);
+                            }
+                            zoom-prev = root.mind-zoom;
+                        }
+                        changed content-width => {
+                            flick.content-x = flick.content-x
+                                - (root.mind-off-x - last-off-x) * root.mind-zoom;
+                            last-off-x = root.mind-off-x;
+                        }
+                        changed content-height => {
+                            flick.content-y = flick.content-y
+                                - (root.mind-off-y - last-off-y) * root.mind-zoom;
+                            last-off-y = root.mind-off-y;
+                        }
+
+                        changed width => {
+                            last-off-x = root.mind-off-x;
+                            last-off-y = root.mind-off-y;
+                            root.center-canvas(self.width / 1px, self.height / 1px);
+                        }
+
+                        // 缩放容器：所有画布内容（空白层 / 连线 / 节点）都在其中，
+                        // scale-factor 统一缩放（transform-origin 左上角，与滚动换算一致）。
+                        Rectangle {
+                            width: root.mind-canvas-w;
+                            height: root.mind-canvas-h;
+                            // transform-scale 围绕元素中心缩放（transform-origin 在此
+                            // 版本未生效）；用位置补偿 center*(zoom-1) 等效为围绕
+                            // 左上角 (0,0) 缩放，使渲染像素 = 本地坐标 × zoom。
+                            transform-scale: root.mind-zoom;
+                            x: root.mind-canvas-w / 2 * (root.mind-zoom - 1);
+                            y: root.mind-canvas-h / 2 * (root.mind-zoom - 1);
+
+                        // 空白点击层：覆盖整个画布、位于连线/节点之下。
+                        // 点击空白 = 取消分支激活态；滚轮缩放（光标为锚点）。
+                        TouchArea {
+                            width: root.mind-canvas-w;
+                            height: root.mind-canvas-h;
+                            clicked => { root.clear-activation(); }
+                        }
+
+                        // 画布级拖放层：空白区域命中的 DropArea（节点层更晚声明、
+                        // 更上层优先）。上报光标位置驱动边缘自动滚动；外部文件
+                        // 拖到空白处维持既有语义（导入当前选中分支）。
+                        DropArea {
+                            width: root.mind-canvas-w;
+                            height: root.mind-canvas-h;
+                            can-drop(event) => {
+                                // event.position 为本元素本地坐标（缩放前画布坐标，背景层
+                                // 原点即 content 原点）→ 视口像素 = 本地*zoom + content-x。
+                                DndApi.mind-pos-x = event.position.x * root.mind-zoom
+                                    + flick.content-x;
+                                DndApi.mind-pos-y = event.position.y * root.mind-zoom
+                                    + flick.content-y;
+                                DndApi.mind-drag = true;
+                                DndApi.hover-row = -2;
+                                DndApi.hover-panel = -2;
+                                DndApi.transfer-to-entry(event.data) == ""
+                                    && DndApi.transfer-has-files(event.data)
+                                    ? DragAction.copy
+                                    : DragAction.none;
+                            }
+                            dropped(event) => {
+                                root.external-files-dropped(DndApi.transfer-to-files(event.data));
+                                root.clear-dnd-hover();
+                                DndApi.mind-drag = false;
+                                return event.proposed-action;
+                            }
+                            changed has-drag => {
+                                // 拖拽取消 / 离开画布时复位（节点层命中时会重新置位）。
+                                if (!self.has-drag) {
+                                    DndApi.mind-drag = false;
+                                }
+                            }
+                        }
 
                         for edge in root.mind-edges: Rectangle {
-                            x: edge.x * 1px;
-                            y: edge.y * 1px;
+                            x: edge.x * 1px + root.mind-off-x;
+                            y: edge.y * 1px + root.mind-off-y;
                             width: Math.max(edge.w, 2.0) * 1px;
                             height: Math.max(edge.h, 2.0) * 1px;
                             background: c-line;
                         }
 
                         for node in root.mind-nodes: Rectangle {
-                            x: node.x * 1px;
-                            y: node.y * 1px;
+                            // 容器：与节点等大同位、不裁剪，承载节点主体 + 两个外置按钮。
+                            x: node.x * 1px + root.mind-off-x;
+                            y: node.y * 1px + root.mind-off-y;
                             width: node.w * 1px;
                             height: node.h * 1px;
-                            background: node.is-root ? c-root-bg : c-panel;
-                            border-radius: 8px;
-                            border-width: node.is-selected ? 2px : 1px;
-                            border-color: node.is-selected ? c-accent : c-line;
-                            VerticalLayout {
-                                padding-left: 10px;
-                                padding-right: 10px;
-                                padding-top: 4px;
-                                padding-bottom: 4px;
-                                Text {
-                                    text: node.title;
-                                    font-size: 12px;
-                                    font-weight: node.is-root || node.is-selected ? 700 : 500;
-                                    color: node.is-selected ? c-sel-text : c-text;
-                                    overflow: elide;
-                                    vertical-alignment: center;
-                                    vertical-stretch: 1;
+
+                            // 子树伸缩：分支右外侧、节点内垂直居中。
+                            if node.has-children: MindIconButton {
+                                x: parent.width + 4px;
+                                y: (parent.height - self.height) / 2;
+                                horizontal: true;
+                                expanded: node.children-expanded;
+                                fg: c-sub;
+                                bg-hover: c-hover;
+                                clicked => { root.toggle-visit-expand(node.visit); }
+                            }
+
+                            // 节点主体
+                            nodebody := Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                property <bool> node-hover: DndApi.hover-node == node.visit;
+                                background: node.is-root ? c-root-bg : c-panel;
+                                border-radius: 8px;
+                                // 边框由最上层覆盖层绘制（见节点末尾），避免内容
+                                // 行的激活背景盖住边框线。
+                                // 不用 clip：带圆角的裁剪会走 renderer 的离屏层
+                                // （render_layer），而该层不继承画布缩放变换——
+                                // 内容被位图化后再放大，文字发虚。节点内容本身
+                                // 不越界，仅损失圆角处的裁剪。
+                                clip: false;
+
+                                // 节点级拖放：内部条目跨节点移入 / 外部文件导入本分支。
+                                // 面板行内的行级 DropArea 声明在后（更上层）优先命中；
+                                // 这里兜住标题行与面板空白区域，并驱动节点高亮反馈。
+                                nodehover := DropArea {
+                                    can-drop(event) => {
+                                        // 上报光标视口像素坐标：节点在画布坐标系原点
+                                        // + 本地坐标（缩放前）→ ×zoom + 滚动偏移。
+                                        DndApi.mind-pos-x = (node.x * 1px + root.mind-off-x
+                                            + event.position.x) * root.mind-zoom
+                                            + flick.content-x;
+                                        DndApi.mind-pos-y = (node.y * 1px + root.mind-off-y
+                                            + event.position.y) * root.mind-zoom
+                                            + flick.content-y;
+                                        DndApi.mind-drag = true;
+                                        if (DndApi.transfer-to-entry(event.data) != ""
+                                            && DndApi.src-visit != node.visit) {
+                                            DndApi.hover-node = node.visit;
+                                            DndApi.hover-row = -2;
+                                            DndApi.hover-panel = -2;
+                                            DndApi.hover-files = false;
+                                            DragAction.move
+                                        } else if (DndApi.transfer-has-files(event.data)) {
+                                            DndApi.hover-node = node.visit;
+                                            DndApi.hover-row = -2;
+                                            DndApi.hover-panel = -2;
+                                            DndApi.hover-files = true;
+                                            DragAction.copy
+                                        } else {
+                                            DndApi.hover-node = -2;
+                                            DragAction.none
+                                        }
+                                    }
+                                    dropped(event) => {
+                                        root.select-visit(node.visit);
+                                        if (DndApi.transfer-to-entry(event.data) != "") {
+                                            EntryApi.drop-row(
+                                                DndApi.transfer-to-entry(event.data),
+                                                "",
+                                                -1,
+                                                false,
+                                                false);
+                                        } else {
+                                            root.external-files-dropped(
+                                                DndApi.transfer-to-files(event.data));
+                                        }
+                                        root.clear-dnd-hover();
+                                        DndApi.mind-drag = false;
+                                        return event.proposed-action;
+                                    }
+                                    changed has-drag => {
+                                        // 拖拽取消 / 移出节点时复位（否则残留的边缘滚动
+                                        // 定时器会持续写 content-x，干扰画布平移手感）。
+                                        if (!self.has-drag) {
+                                            DndApi.mind-drag = false;
+                                        }
+                                    }
                                 }
-                                Text {
-                                    text: node.type-str;
-                                    font-size: 10px;
-                                    color: c-sub;
-                                    overflow: elide;
-                                    visible: node.type-str != "";
+
+                                // 节点级右键菜单（TouchArea 消费右键后手动 show，避免双层菜单）。
+                                // 菜单项点击时才激活该分支——右键路径本身不做状态变更，
+                                // 否则 select-visit 的模型重建会销毁正在弹出的菜单。
+                                nodectx := ContextMenuArea {
+                                    Menu {
+                                        MenuItem {
+                                            title: "新建子分支…";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.child-dialog-open();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "在 Finder 中显示";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.reveal-branch();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "删除分支";
+                                            enabled: !node.is-root;
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.delete-branch();
+                                            }
+                                        }
+                                    }
+                                }
+                                // 整节点手势（先声明在底层）：点击选中，双击伸缩子树，右键弹菜单。
+                                TouchArea {
+                                    clicked => { root.select-visit(node.visit); }
+                                    double-clicked => { root.toggle-visit-expand(node.visit); }
+                                    pointer-event(event) => {
+                                        if (event.button == PointerEventButton.right
+                                            && event.kind == PointerEventKind.up) {
+                                            nodectx.show({x: self.mouse-x, y: self.mouse-y});
+                                            return EventResult.accept;
+                                        }
+                                        return EventResult.reject;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    spacing: 0px;
+                                    // 标题行（高度与 Rust NODE_H 一致）。
+                                    HorizontalLayout {
+                                        height: 28px;
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: node.title;
+                                            font-size: 12px;
+                                            font-weight: node.is-root || node.is-selected ? 700 : 500;
+                                            color: node.is-selected ? c-sel-text : c-text;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: node.type-str;
+                                            font-size: 10px;
+                                            color: c-sub;
+                                            overflow: elide;
+                                            visible: node.type-str != "";
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    // 节点内容 = 与列表视图完全同一套 EntryListPanel（功能一致）。
+                                    if node.expanded && node.entry-rows.length > 0: EntryListPanel {
+                                        // 高度 = 节点高 - 标题行(28) - 底部内容箭头区(22)，
+                                        // 为绝对定位的伸缩箭头留出空间（否则列表会延伸到
+                                        // 箭头下方、被箭头遮挡）。
+                                        height: node.h * 1px - 50px;
+                                        src-visit: node.visit;
+                                        entries: node.entry-rows;
+                                        selected-index: node.is-selected ? root.entry-selected : -1;
+                                        col-text: c-text;
+                                        col-sub: c-sub;
+                                        col-sel: c-sel;
+                                        col-badge: c-badge-bg;
+                                        col-hover: c-hover;
+                                        col-accent: c-accent;
+                                    }
+
+                                }
+
+                                // 边框覆盖层（最后声明 = 最上层）：节点内容不做裁剪
+                                // 后（避免圆角 clip 触发离屏层导致缩放模糊），内容行
+                                // 的激活背景会盖住边框线——这里把边框画在内容之上。
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 8px;
+                                    border-width:
+                                        nodebody.node-hover || node.is-selected ? 2px : 1px;
+                                    border-color: nodebody.node-hover
+                                        ? c-accent
+                                        : (node.is-selected ? c-accent : c-line);
+                                    background: transparent;
                                 }
                             }
-                            TouchArea {
-                                clicked => { root.select-visit(node.visit); }
+
+                            // 内容伸缩箭头（⌄ 展开 / ⌃ 收起）：绝对定位复用标题行下方
+                            // 的居中留白（未展开时贴文字底）或贴节点底部（展开时），
+                            // 不再占独立行——避免「标题行留白 + 箭头行留白」叠加造成
+                            // 标题与箭头间距过大。
+                            if node.has-entries: MindIconButton {
+                                x: (parent.width - self.width) / 2;
+                                y: node.expanded
+                                    ? parent.height - self.height - 2px
+                                    : 20px;
+                                expanded: node.expanded;
+                                horizontal: false;
+                                fg: c-sub;
+                                bg-hover: c-hover;
+                                clicked => { root.toggle-node-content(node.visit); }
+                            }
+                        }
+                        }
+                    }
+
+                    // ── 边缘自动滚动：拖拽悬停在画布边缘带内时持续平移 ──
+                    tscroll := Timer {
+                        // 速度与深入边缘带的深度成正比（最大 12px/帧 ≈ 750px/s）。
+                        // 方向：光标在左缘 → 视口左移看左侧内容（content-x 增大，
+                        // 因为 content-x 是负的滚动偏移）；右缘同理取负。
+                        // 平移范围：视口中心限制在内容包围盒外扩 150px 的矩形内，
+                        // 允许滚到内容边缘附近放置节点，又绝不滚到看不见内容。
+                        interval: 16ms;
+                        running: DndApi.mind-drag;
+                        // 视口范围约束见 flick.sc-min-x / sc-max-x（滚轮缩放共用）。
+                        // 光标相对 mind 视口的位置（can-drop 已换算成视口坐标）。
+                        property <length> cur-x: DndApi.mind-pos-x;
+                        property <length> cur-y: DndApi.mind-pos-y;
+                        property <length> dx:
+                            cur-x >= 0px && cur-x < 56px
+                                ? (56px - cur-x) / 56px * 12px
+                                : (cur-x > flick.width - 56px
+                                    ? -(cur-x - (flick.width - 56px)) / 56px * 12px
+                                    : 0px);
+                        property <length> dy:
+                            cur-y >= 0px && cur-y < 56px
+                                ? (56px - cur-y) / 56px * 12px
+                                : (cur-y > flick.height - 56px
+                                    ? -(cur-y - (flick.height - 56px)) / 56px * 12px
+                                    : 0px);
+                        triggered => {
+                            // 静止时不写回，避免干扰 Flickable 的拖拽平移手势。
+                            if (self.dx != 0px || self.dy != 0px) {
+                                // 共用 flick 的视口范围约束（max/min 组合：视口过大
+                                // 时区间可能反转，退化到靠内容一侧）。
+                                flick.content-x = max(flick.sc-min-x, min(
+                                    flick.content-x + self.dx,
+                                    flick.sc-max-x));
+                                flick.content-y = max(flick.sc-min-y, min(
+                                    flick.content-y + self.dy,
+                                    flick.sc-max-y));
+                            }
+                        }
+                    }
+
+                    // ── 缩放比例提示 ──
+                    // 仅非 1:1 时显示（左下角），与右下角小地图对角分布、互不遮挡。
+                    if root.mind-zoom != 1.0: Rectangle {
+                        x: 12px;
+                        y: parent.height - self.height - 12px;
+                        width: 48px;
+                        height: 20px;
+                        border-radius: 6px;
+                        background: root.dark-mode ? #24262cd9 : #ffffffd9;
+                        border-width: 1px;
+                        border-color: c-line;
+                        Text {
+                            text: "\{Math.round(root.mind-zoom * 100)}%";
+                            font-size: 11px;
+                            color: c-sub;
+                            width: parent.width;
+                            height: parent.height;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // ── 小地图：内容缩略 + 视口指示框，点击/拖动导航 ──
+                    minimap := Rectangle {
+                        x: parent.width - self.width - 12px;
+                        y: parent.height - self.height - 12px;
+                        // 面板尺寸随内容包围盒自适应：缩略图紧贴面板边缘，无大片留白。
+                        property <float> mm-scale: min(
+                            184.0 / max(root.mind-w, 1.0),
+                            116.0 / max(root.mind-h, 1.0));
+                        // 内容宽度扣掉「子树按钮横向占位」：缩略图不画按钮，
+                        // 不扣会让右侧凭空多出一段空白、左右留白不对称。
+                        width: clamp(
+                            (root.mind-w - root.mind-edge-offset) * mm-scale * 1px + 16px,
+                            140px, 220px);
+                        height: clamp(root.mind-h * mm-scale * 1px + 16px, 90px, 140px);
+                        background: root.dark-mode ? #24262cd9 : #ffffffd9;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: c-line;
+                        clip: true;
+
+                        // 连接线：与画布同一份 mind-edges（每段一个细矩形）。
+                        // 先画线后画节点，保证节点块压在线上；用与普通节点相同的
+                        // 颜色/透明度，靠「线细」自然弱于块状节点，不抢视觉主次。
+                        // 下限 1px：按 mm-scale 缩放后线宽常不足 1px，不给下限会消失。
+                        for edge in root.mind-mini-edges: Rectangle {
+                            x: 8px + edge.x * mm-scale * 1px;
+                            y: 8px + edge.y * mm-scale * 1px;
+                            width: Math.max(edge.w * mm-scale * 1px, 1px);
+                            height: Math.max(edge.h * mm-scale * 1px, 1px);
+                            background: c-sub;
+                            opacity: 0.2;
+                        }
+
+                        for node in root.mind-nodes: Rectangle {
+                            x: 8px + node.x * mm-scale * 1px;
+                            y: 8px + node.y * mm-scale * 1px;
+                            width: max(node.w * mm-scale * 1px, 2px);
+                            height: max(node.h * mm-scale * 1px, 1.5px);
+                            border-radius: 1px;
+                            background: node.is-selected
+                                ? c-accent
+                                : (node.is-root ? c-badge-text : c-sub);
+                            opacity: node.is-selected || node.is-root ? 0.55 : 0.2;
+                        }
+
+                        // 视口指示块：视口在内容坐标系中的位置（绝对 = -content-x），
+                        // clamp 到面板全域——视口平出内容时色块贴到面板边缘而非消失。
+                        Rectangle {
+                            // 视口的画布坐标（缩放前）= -content-x / zoom，再减 off。
+                            property <length> vl: clamp(
+                                8px + ((-flick.content-x / 1px) / root.mind-zoom
+                                    - (root.mind-off-x / 1px)) * mm-scale * 1px,
+                                8px, minimap.width - 8px);
+                            property <length> vr: clamp(
+                                8px + (((-flick.content-x / 1px) + flick.width / 1px)
+                                    / root.mind-zoom
+                                    - (root.mind-off-x / 1px)) * mm-scale * 1px,
+                                8px, minimap.width - 8px);
+                            property <length> vt: clamp(
+                                8px + ((-flick.content-y / 1px) / root.mind-zoom
+                                    - (root.mind-off-y / 1px)) * mm-scale * 1px,
+                                8px, minimap.height - 8px);
+                            property <length> vb: clamp(
+                                8px + (((-flick.content-y / 1px) + flick.height / 1px)
+                                    / root.mind-zoom
+                                    - (root.mind-off-y / 1px)) * mm-scale * 1px,
+                                8px, minimap.height - 8px);
+                            x: vl;
+                            y: vt;
+                            width: max(vr - vl, 0px);
+                            height: max(vb - vt, 0px);
+                            background: c-accent;
+                            opacity: 0.15;
+                            // 描边层不随填充层降透明度，块贴边时边界依然清晰。
+                            Rectangle {
+                                width: parent.width;
+                                height: parent.height;
+                                border-radius: 2px;
+                                border-width: 1.5px;
+                                border-color: c-accent;
+                                background: transparent;
+                            }
+                        }
+
+                        TouchArea {
+                            // 点击/拖动小地图：把视口中心对到指针处。
+                            function jump() {
+                                // 小地图坐标 → 内容包围盒坐标 → 画布坐标（+off）→
+                                // 像素坐标（×zoom）→ 视口中心对齐 → content-x = -p；
+                                // 范围用与缩放/边缘滚动一致的 sc 约束（内容中心可见）。
+                                flick.content-x = clamp(
+                                    -(((self.mouse-x - 8px) / 1px / minimap.mm-scale
+                                        + (root.mind-off-x / 1px))
+                                        * root.mind-zoom * 1px - flick.width / 2),
+                                    flick.sc-min-x,
+                                    flick.sc-max-x);
+                                flick.content-y = clamp(
+                                    -(((self.mouse-y - 8px) / 1px / minimap.mm-scale
+                                        + (root.mind-off-y / 1px))
+                                        * root.mind-zoom * 1px - flick.height / 2),
+                                    flick.sc-min-y,
+                                    flick.sc-max-y);
+                            }
+                            clicked => { jump(); }
+                            moved => { if (self.pressed) { jump(); } }
+                            // 双击小地图：重置为 1:1（以视口中心为锚点）。
+                            double-clicked => {
+                                flick.apply-zoom(
+                                    1.0,
+                                    (flick.width / 2 - flick.content-x) / root.mind-zoom,
+                                    (flick.height / 2 - flick.content-y) / root.mind-zoom);
+                            }
+                            // 滚轮缩放（仅小地图）：以视口中心为锚点，缩放时
+                            // 屏幕中心对准的内容点保持不动。
+                            scroll-event(event) => {
+                                if (event.delta-y != 0px) {
+                                    flick.zoom-at(
+                                        (flick.width / 2 - flick.content-x) / root.mind-zoom,
+                                        (flick.height / 2 - flick.content-y) / root.mind-zoom,
+                                        event.delta-y);
+                                    return EventResult.accept;
+                                }
+                                return EventResult.reject;
                             }
                         }
                     }
                 }
             }
 
-            // 右：详情（标签页）
-            Rectangle {
+            // 中：内容条目区（仅列表视图显示）
+            if !root.view-mind: Rectangle {
                 horizontal-stretch: 1;
                 background: c-panel;
                 border-radius: 10px;
@@ -541,408 +1781,22 @@ export component AppWindow inherits Window {
                     spacing: 8px;
 
                     Text {
-                        text: "内容 entries[]";
+                        text: "内容";
                         font-size: 13px;
                         font-weight: 700;
                         color: c-text;
                     }
-                    Text {
-                        text: "内容清单（本目录 payload / asset，size 与 sha256 由 sync 维护）";
-                        font-size: 12px;
-                        color: c-sub;
-                    }
-                    // 列表区域容器：空白处点击取消选中；右键弹分支级菜单（手动 show）。
-                    Rectangle {
+                    EntryListPanel {
                         vertical-stretch: 2;
-                        clip: true;
-                        // 底层：分支级菜单（仅手动 show，避免自动触发）。
-                        blankmenu := ContextMenuArea {
-                            Menu {
-                                MenuItem {
-                                    title: "新建文件夹";
-                                    activated => { root.entry-new-folder(); }
-                                }
-                                MenuItem {
-                                    title: "粘贴";
-                                    activated => { root.entry-paste(); }
-                                }
-                            }
-                        }
-                        // 空白处点击 = 取消选中（TouchArea 消费所有按键，
-                        // 因此右键也在这里处理：取消选中 + 手动弹分支菜单）。
-                        TouchArea {
-                            clicked => { root.clear-entry-selection(); }
-                            pointer-event(event) => {
-                                if (event.button == PointerEventButton.right
-                                    && event.kind == PointerEventKind.up) {
-                                    root.clear-entry-selection();
-                                    blankmenu.show({x: self.mouse-x, y: self.mouse-y});
-                                    return EventResult.accept;
-                                }
-                                return EventResult.reject;
-                            }
-                        }
-                        VerticalLayout {
-                        if root.entries.length == 0: Rectangle {
-                        vertical-stretch: 2;
-                        Text {
-                            text: "（此分支暂无内容条目——用下方「添加」或从 Finder 拖入文件）";
-                            font-size: 12px;
-                            color: c-sub;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            width: parent.width;
-                            height: parent.height;
-                        }
-                    }
-                    if root.entries.length > 0: ListView {
-                        vertical-stretch: 2;
-                        for entry[index] in root.entries: Rectangle {
-                            height: 34px;
-                            property <bool> hover-top: DndApi.hover-row == index
-                                && DndApi.hover-half == 0;
-                            property <bool> hover-bottom: DndApi.hover-row == index
-                                && DndApi.hover-half == 1;
-                            // 文件夹行：内部拖到下半区 / 外部文件落到其上 = 移入（整行高亮）。
-                            property <bool> hover-folder: entry.is-dir
-                                && DndApi.hover-into-dir && DndApi.hover-row == index;
-                            // 插入点渲染约定：插到"行后"一律画在下一行的顶边
-                            // （最后一行除外，画在该行行底）。这样光标在同一插入点
-                            // 附近上下移动时，指示线位置稳定不跳。
-                            // 指示线只用于根路径条目排序；文件夹子行拖拽不显示。
-                            property <bool> insert-before: DndApi.hover-sortable
-                                && (hover-top
-                                    || (index > 0 && DndApi.hover-row == index - 1
-                                        && DndApi.hover-half == 1
-                                        && root.entries[index - 1].depth == 0));
-                            property <bool> insert-after: DndApi.hover-sortable
-                                && hover-bottom && !entry.is-dir
-                                && index == root.entries.length - 1;
-                            property <bool> is-dragging: dragarea.dragging;
-                            background: root.entry-selected == index ? c-sel
-                                : hover-folder ? c-badge-bg
-                                : (Math.mod(index, 2) == 0 ? transparent : c-hover);
-                            // 源行在拖动中半透明。
-                            opacity: is-dragging ? 0.4 : 1.0;
-                            Rectangle {
-                                y: 0;
-                                height: 3px;
-                                width: 100%;
-                                background: c-accent;
-                                visible: insert-before;
-                            }
-                            Rectangle {
-                                y: parent.height - 3px;
-                                height: 3px;
-                                width: 100%;
-                                background: c-accent;
-                                visible: insert-after;
-                            }
-                            // 层级（先声明在底层）：ctxmenu（手动 show）→ rowdrop → dragarea{内容+TouchArea}。
-                            // 右键菜单（原生样式，对标 Finder）；TouchArea 消费右键后手动 show()。
-                            ctxmenu := ContextMenuArea {
-                                Menu {
-                                    MenuItem {
-                                        title: "打开";
-                                        activated => { root.entry-open(index); }
-                                    }
-                                    MenuItem {
-                                        title: "在 Finder 中显示";
-                                        activated => { root.entry-reveal(index); }
-                                    }
-                                    MenuSeparator { }
-                                    MenuItem {
-                                        title: "重命名…";
-                                        enabled: entry.depth == 0;
-                                        activated => { root.entry-rename-open(index); }
-                                    }
-                                    MenuItem {
-                                        title: "复制";
-                                        enabled: entry.depth == 0;
-                                        activated => { root.entry-copy(index); }
-                                    }
-                                    MenuItem {
-                                        title: "剪切";
-                                        enabled: entry.depth == 0;
-                                        activated => { root.entry-cut(index); }
-                                    }
-                                    MenuItem {
-                                        title: "制作副本";
-                                        enabled: entry.depth == 0;
-                                        activated => { root.entry-duplicate(index); }
-                                    }
-                                    MenuSeparator { }
-                                    MenuItem {
-                                        title: "移到废纸篓";
-                                        activated => {
-                                            root.select-entry(index);
-                                            root.delete-entry();
-                                        }
-                                    }
-                                }
-                            }
-                            // 上半区：内部条目拖到 = 插到该行之前。
-                            topzone := DropArea {
-                                y: 0;
-                                height: 17px;
-                                can-drop(event) => {
-                                    // 顶层源：自身行 / 下一行顶边 = 顺序不变的无效点，直接拒绝。
-                                    // 排序（插入线）只在根层级行之间；非根层级 = 移入文件夹。
-                                    if (DndApi.transfer-to-entry(event.data) != ""
-                                        && !(DndApi.hover-src-top && entry.depth == 0
-                                            && (index == DndApi.hover-src-row
-                                                || index == DndApi.hover-src-row + 1))) {
-                                        DndApi.hover-row = index;
-                                        DndApi.hover-half = 0;
-                                        DndApi.hover-files = false;
-                                        DndApi.hover-external = false;
-                                        DndApi.hover-into-dir = false;
-                                        DndApi.hover-sortable = entry.depth == 0;
-                                        DragAction.move
-                                    } else if (DndApi.transfer-has-files(event.data)) {
-                                        // 外部文件与应用内一致：根层级行 = 插入位（可排序）。
-                                        DndApi.hover-row = index;
-                                        DndApi.hover-half = 0;
-                                        DndApi.hover-files = true;
-                                        DndApi.hover-external = true;
-                                        DndApi.hover-into-dir = false;
-                                        DndApi.hover-sortable = entry.depth == 0;
-                                        DragAction.copy
-                                    } else {
-                                        DndApi.hover-row = -2;
-                                        DndApi.hover-files = false;
-                                        DndApi.hover-into-dir = false;
-                                        DragAction.none
-                                    }
-                                }
-                                dropped(event) => {
-                                    root.drop-on-row(
-                                        DndApi.transfer-to-entry(event.data),
-                                        DndApi.transfer-to-files(event.data),
-                                        index,
-                                        entry.is-dir);
-                                    return event.proposed-action;
-                                }
-                            }
-                            // 下半区：文件行 = 插到该行之后；文件夹行 = 移入文件夹。
-                            bottomzone := DropArea {
-                                y: 17px;
-                                height: 17px;
-                                can-drop(event) => {
-                                    // "上一行的下半区"是重排的无序位；但文件夹行下半区
-                                    // = 移入文件夹（与源位置无关，始终有效），不能拒绝。
-                                    // 文件夹行 = 移入；根层级文件行 = 排序插入；其余拒绝。
-                                    if (DndApi.transfer-to-entry(event.data) != ""
-                                        && !(DndApi.hover-src-top && entry.depth == 0
-                                            && (index == DndApi.hover-src-row
-                                                || (!entry.is-dir
-                                                    && index == DndApi.hover-src-row - 1)))) {
-                                        DndApi.hover-row = index;
-                                        DndApi.hover-half = 1;
-                                        DndApi.hover-files = false;
-                                        DndApi.hover-external = false;
-                                        DndApi.hover-into-dir = entry.is-dir;
-                                        DndApi.hover-sortable = entry.depth == 0
-                                            && !entry.is-dir;
-                                        DragAction.move
-                                    } else if (DndApi.transfer-has-files(event.data)) {
-                                        // 外部文件：文件夹行 = 导入其内部；根层级行 = 插入位。
-                                        DndApi.hover-row = index;
-                                        DndApi.hover-half = 1;
-                                        DndApi.hover-files = true;
-                                        DndApi.hover-external = true;
-                                        DndApi.hover-into-dir = entry.is-dir;
-                                        DndApi.hover-sortable = entry.depth == 0
-                                            && !entry.is-dir;
-                                        DragAction.copy
-                                    } else {
-                                        DndApi.hover-row = -2;
-                                        DndApi.hover-files = false;
-                                        DndApi.hover-into-dir = false;
-                                        DragAction.none
-                                    }
-                                }
-                                dropped(event) => {
-                                    root.drop-on-row(
-                                        DndApi.transfer-to-entry(event.data),
-                                        DndApi.transfer-to-files(event.data),
-                                        index,
-                                        entry.is-dir);
-                                    return event.proposed-action;
-                                }
-                            }
-                            // 整行外部文件拖入：文件夹行 = 移入文件夹；文件行 = 导入分支。
-                            filedrop := DropArea {
-                                can-drop(event) => {
-                                    // 整行区域只作为 Drop 的接收层：语义由上半区/下半区写入的
-                                    // 全局悬停状态决定，这里一律不接受，避免抢写状态。
-                                    DragAction.none
-                                }
-                                dropped(event) => {
-                                    root.drop-on-row(
-                                        DndApi.transfer-to-entry(event.data),
-                                        DndApi.transfer-to-files(event.data),
-                                        index,
-                                        entry.is-dir);
-                                    return event.proposed-action;
-                                }
-                            }
-                            // 整行可拖拽；TouchArea 在内容层之下（后声明者在上），
-                            // 三角按钮的点击才能落在自己的 TouchArea 上。
-                            dragarea := DragArea {
-                                data: DndApi.entry-to-transfer("\{root.dnd-src-visit}|\{entry.path}");
-                                allow-copy: true;
-                                allow-move: true;
-                                changed dragging => {
-                                    if (self.dragging) {
-                                        root.dnd-payload = "\{root.dnd-src-visit}|\{entry.path}";
-                                        DndApi.hover-src-row = index;
-                                        DndApi.hover-src-top = entry.depth == 0;
-                                    }
-                                }
-                                // 拖拽结束（落下或取消）清理全局悬停状态。
-                                drag-finished(action) => {
-                                    DndApi.hover-row = -2;
-                                    DndApi.hover-files = false;
-                                    DndApi.hover-src-row = -1;
-                                    DndApi.hover-src-top = false;
-                                    DndApi.hover-sortable = false;
-                                    DndApi.hover-external = false;
-                                    DndApi.hover-into-dir = false;
-                                }
-                                TouchArea {
-                                    clicked => { root.select-entry(index); }
-                                    double-clicked => {
-                                        if (entry.is-dir) {
-                                            root.toggle-dir(index);
-                                        } else {
-                                            root.entry-open(index);
-                                        }
-                                    }
-                                    // 右键即选中（Finder 语义），高亮反馈 + 手动弹菜单。
-                                    pointer-event(event) => {
-                                        if (event.button == PointerEventButton.right
-                                            && event.kind == PointerEventKind.up) {
-                                            root.select-entry(index);
-                                            ctxmenu.show({x: self.mouse-x, y: self.mouse-y});
-                                            return EventResult.accept;
-                                        }
-                                        return EventResult.reject;
-                                    }
-                                }
-                                HorizontalLayout {
-                                    padding-left: 10px + entry.depth * 18px;
-                                    padding-right: 10px;
-                                    spacing: 4px;
-                                    // 文件夹展开/收缩三角。
-                                    Rectangle {
-                                        width: 16px;
-                                        visible: entry.is-dir;
-                                        Text {
-                                            text: entry.expanded ? "▼" : "▶";
-                                            font-size: 9px;
-                                            color: c-sub;
-                                            vertical-alignment: center;
-                                            horizontal-alignment: center;
-                                            width: parent.width;
-                                            height: parent.height;
-                                        }
-                                        TouchArea {
-                                            clicked => { root.toggle-dir(index); }
-                                        }
-                                    }
-                                    Rectangle { width: 4px; visible: !entry.is-dir; }
-                                    Text {
-                                        text: entry.display;
-                                        vertical-alignment: center;
-                                        font-size: 12px;
-                                        color: c-text;
-                                        overflow: elide;
-                                        width: 40%;
-                                    }
-                                    Text {
-                                        text: entry.title;
-                                        vertical-alignment: center;
-                                        font-size: 12px;
-                                        color: c-sub;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: entry.role;
-                                        vertical-alignment: center;
-                                        font-size: 11px;
-                                        color: c-sub;
-                                        overflow: elide;
-                                        width: 56px;
-                                    }
-                                    Text {
-                                        text: entry.size;
-                                        vertical-alignment: center;
-                                        font-size: 11px;
-                                        color: c-sub;
-                                        width: 60px;
-                                        horizontal-alignment: right;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // 列表底部放置区 = 移到末尾。
-                    Rectangle {
-                        height: 16px;
-                        property <bool> end-hover: DndApi.hover-row == -1;
-                        Text {
-                            text: DndApi.hover-external
-                                ? (end-hover ? "松开导入到分支" : "拖到此处导入到分支")
-                                : (end-hover
-                                    ? (DndApi.hover-src-top ? "松开移到末尾" : "松开移回根目录")
-                                    : (DndApi.hover-src-top ? "拖到此处移到末尾" : "拖到此处移回根目录"));
-                            font-size: 10px;
-                            color: end-hover ? c-accent : c-sub;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        Rectangle {
-                            y: 0;
-                            height: 3px;
-                            width: 100%;
-                            background: c-accent;
-                            visible: end-hover;
-                        }
-                        enddrop := DropArea {
-                            can-drop(event) => {
-                                if ((DndApi.transfer-to-entry(event.data) != ""
-                                    || DndApi.transfer-has-files(event.data))
-                                    && !(DndApi.hover-src-top && DndApi.hover-src-row
-                                        == root.entries.length - 1)) {
-                                    DndApi.hover-row = -1;
-                                    DndApi.hover-files = false;
-                                    DndApi.hover-external = DndApi.transfer-has-files(event.data);
-                                    if (DndApi.hover-external) {
-                                        DragAction.copy
-                                    } else {
-                                        DragAction.move
-                                    }
-                                } else {
-                                    DndApi.hover-row = -2;
-                                    DndApi.hover-files = false;
-                                    DragAction.none
-                                }
-                            }
-                            dropped(event) => {
-                                root.entry-dropped(
-                                    DndApi.transfer-to-entry(event.data),
-                                    DndApi.transfer-to-files(event.data),
-                                    -1,
-                                    false,
-                                    true);
-                                root.clear-dnd-hover();
-                                return event.proposed-action;
-                            }
-                        }
-                        }
-                        }
+                        src-visit: DndApi.src-visit;
+                        entries: root.entries;
+                        selected-index: root.entry-selected;
+                        col-text: c-text;
+                        col-sub: c-sub;
+                        col-sel: c-sel;
+                        col-badge: c-badge-bg;
+                        col-hover: c-hover;
+                        col-accent: c-accent;
                     }
 
 
@@ -1020,10 +1874,14 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text { text: "摘要"; font-size: 12px; color: c-sub; }
-                                LineEdit {
+                                // 多行摘要：TextEdit 支持换行（写入 TOML 时由 toml_edit
+                                // 转义 \n，读回原样）。
+                                TextEdit {
                                     enabled: root.has-selection;
                                     placeholder-text: "供人与 AI 路由检索的一句话摘要";
                                     text <=> root.d-summary;
+                                    wrap: TextWrap.word-wrap;
+                                    height: 60px;
                                 }
 
                                 Text { text: "标签（逗号分隔）"; font-size: 12px; color: c-sub; }
@@ -1047,6 +1905,13 @@ export component AppWindow inherits Window {
                                         clicked => { root.delete-branch(); }
                                     }
                                 }
+                                // 空间吸收元素：本 VerticalLayout 内除输入框外没有弹性项，
+                                // 一旦它被分到比内容首选高更多的可用高度（例如 TabWidget
+                                // 用某个 Tab 的首选高统一内容区高度），Slint 会按数量把多余
+                                // 空间均摊给所有子项——表现为「标题/标签框、保存按钮一起被
+                                // 撑高、间距变大」。放一个拉伸项吸收多余空间即可锁住各控件
+                                // 的首选高度。
+                                Rectangle { vertical-stretch: 1; }
                             }
                             Rectangle { vertical-stretch: 1; }
 
@@ -1126,10 +1991,13 @@ export component AppWindow inherits Window {
                                 }
 
                                 Text { text: "备注"; font-size: 12px; color: c-sub; }
-                                LineEdit {
+                                // 多行备注（同上：换行经 TOML 转义后原样往返）。
+                                TextEdit {
                                     enabled: root.entry-editable;
                                     placeholder-text: "备注";
                                     text <=> root.e-note;
+                                    wrap: TextWrap.word-wrap;
+                                    height: 72px;
                                 }
 
                                 HorizontalLayout {
@@ -1137,14 +2005,17 @@ export component AppWindow inherits Window {
                                     Button {
                                         text: "保存";
                                         enabled: root.entry-editable;
-                                        clicked => { root.save-entry(); }
+                                        clicked => { EntryApi.save-entry(); }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                     Button {
                                         text: "移到废纸篓";
-                                        clicked => { root.delete-entry(); }
+                                        clicked => { EntryApi.delete-entry(); }
                                     }
                                 }
+                                // 空间吸收元素：理由同「分支」页——内层布局缺拉伸项时，
+                                // 多余可用高度会被均摊给所有子项（输入框、按钮一起被撑高）。
+                                Rectangle { vertical-stretch: 1; }
                             }
                             Rectangle { vertical-stretch: 1; }
                         }

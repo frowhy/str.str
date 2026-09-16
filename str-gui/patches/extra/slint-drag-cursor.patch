@@ -1,0 +1,27 @@
+diff --git a/internal/core/window.rs b/internal/core/window.rs
+index 1283353..797a9c3 100644
+--- a/internal/core/window.rs
++++ b/internal/core/window.rs
+@@ -1095,6 +1095,22 @@ impl WindowInner {
+             self.click_state.check_repeat(event, self.context());
+         }
+ 
++        // str-gui patch: while a drag is in flight (in-app DragArea or an incoming
++        // native drag), reflect the hovered DropArea's chosen action in the cursor
++        // (Copy/Move badge) instead of the default arrow. NoDrop only stands over
++        // non-accepting areas.
++        if is_drag_event || mouse_input_state.drag_data.is_some() {
++            mouse_input_state.cursor = match mouse_input_state.drop_target_action() {
++                Some(crate::items::DragAction::Copy) => {
++                    MouseCursorInner::BuiltIn(BuiltInMouseCursor::Copy)
++                }
++                Some(crate::items::DragAction::Move) => {
++                    MouseCursorInner::BuiltIn(BuiltInMouseCursor::Copy)
++                }
++                _ => MouseCursorInner::BuiltIn(BuiltInMouseCursor::NoDrop),
++            };
++        }
++
+         if !had_delay && mouse_input_state.has_delayed_event() {
+             // A delay was just set up, preserve the old cursor
+             mouse_input_state.cursor = old_cursor;
