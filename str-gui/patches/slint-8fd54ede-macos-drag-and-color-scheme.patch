@@ -237,7 +237,7 @@ index 73d9f69..9bdcf2e 100644
 +                let pos = self.cursor_pos.get();
 +                let mut drop_event = corelib::items::DropEvent::default();
 +                drop_event.data.set_file_paths([path.as_path()]);
-+                drop_event.position = LogicalPosition::new(pos.x, pos.y);
++                drop_event.position = corelib::api::LogicalPosition::new(pos.x, pos.y);
 +                drop_event.proposed_action = corelib::items::DragAction::Copy;
 +                WindowInner::from_pub(self.window()).process_drag_event(
 +                    corelib::input::BackendDragEvent::Drop {
