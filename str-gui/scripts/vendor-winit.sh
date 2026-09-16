@@ -93,7 +93,8 @@ main() {
     (cd "$tmp/x/winit-${WINIT_VERSION}" && git apply -p1 "$PATCH") \
         || die "补丁应用失败，请检查 $PATCH 是否与 winit ${WINIT_VERSION} 匹配"
 
-    # 追加补丁目录：目录内的 .patch 在主补丁之后按文件名顺序依次应用。
+    # 追加补丁目录：只应用 winit-*.patch（命名约定见 vendor-slint.sh——
+    # extra/ 下按目标源码加前缀），在主补丁之后按文件名顺序依次应用。
     if [ -d "$ROOT/str-gui/patches/extra" ]; then
         for extra in "$ROOT"/str-gui/patches/extra/winit-*.patch; do
             [ -f "$extra" ] || continue

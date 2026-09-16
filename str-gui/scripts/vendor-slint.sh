@@ -105,9 +105,11 @@ main() {
     (cd "$src" && git apply -p1 "$PATCH") \
         || die "补丁应用失败，请检查 $PATCH 是否与 rev ${SLINT_REV} 匹配"
 
-    # 追加补丁（patches/extra/*.patch，按文件名顺序）：每个都必须干净应用。
+    # 追加补丁（patches/extra/slint-*.patch，按文件名顺序）：每个都必须干净应用。
+    # 命名约定：extra/ 下的补丁按目标源码加前缀——slint-*.patch 归本脚本、
+    # winit-*.patch 归 vendor-winit.sh，避免把 winit 的补丁打到 Slint 源码上。
     if [ -d "$EXTRA_DIR" ]; then
-        for extra in "$EXTRA_DIR"/*.patch; do
+        for extra in "$EXTRA_DIR"/slint-*.patch; do
             [ -f "$extra" ] || continue
             echo "↓ 应用追加补丁 $(basename "$extra")"
             (cd "$src" && git apply -p1 "$extra") \
