@@ -26,6 +26,8 @@ on:
     paths:
       - "str-gui/**"
       - ".github/workflows/gui-build.yml"
+    tags:
+      - "v*"
   pull_request:
     paths:
       - "str-gui/**"
@@ -125,3 +127,74 @@ jobs:
           path: str-gui/target/${{ matrix.target }}/release/str-gui.exe
           if-no-files-found: error
           retention-days: 7
+
+  # 把两个架构的二进制 lipo 成 Universal，组装成可分发的 Str.app。
+  # 产物未公证：接收方首次打开需右键 → 打开，或 `xattr -cr Str.app` 去隔离。
+  universal:
+    name: universal .app
+    needs: build
+    runs-on: macos-latest
+    # tag 触发时把 .app 发布到 GitHub Release（与 release.yml 并行竞争：
+    # 谁先创建成功另一方退化为 upload --clobber，资产名互不冲突）。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载两个架构的二进制
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: str-gui-*
+
+      - name: 合并为 Universal 二进制
+        run: |
+          set -euo pipefail
+          lipo -create \
+            artifacts/str-gui-aarch64-apple-darwin/str-gui \
+            artifacts/str-gui-x86_64-apple-darwin/str-gui \
+            -output dist/str-gui
+          lipo -info dist/str-gui
+
+      - name: 组装 Str.app（ad-hoc 签名）
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_SHA:0:7}"
+          APP=Str.app
+          mkdir -p "$APP/Contents/MacOS"
+          sed "s/@VERSION@/$VERSION/" str-gui/assets/Info.plist \
+            > "$APP/Contents/Info.plist"
+          cp dist/str-gui "$APP/Contents/MacOS/str-gui"
+          chmod +x "$APP/Contents/MacOS/str-gui"
+          codesign --force --sign - "$APP"
+          zip -qry "dist/str-gui-universal.zip" "$APP"
+
+      - name: 上传 Universal .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-universal
+          path: dist/str-gui-universal.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      # 仅 tag 触发时发布（分支 push / dispatch 只出 artifact）。
+      # 与 release.yml 并行：若它尚未建好 release，这里兜底创建。
+      - name: 发布 .app 到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 dist/str-gui-universal.zip \
+            > dist/str-gui-universal.zip.sha256
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/str-gui-universal.zip dist/str-gui-universal.zip.sha256 --clobber
+          else
+            gh release create "$TAG" \
+              dist/str-gui-universal.zip dist/str-gui-universal.zip.sha256 \
+              --title "STR $TAG" --generate-notes \
+              || gh release upload "$TAG" \
+                dist/str-gui-universal.zip dist/str-gui-universal.zip.sha256 --clobber
+          fi
