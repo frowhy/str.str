@@ -2416,9 +2416,8 @@ fn main() -> Result<(), slint::PlatformError> {
             #[cfg(target_os = "macos")]
             let _ = std::process::Command::new("open").arg(&path).spawn();
             #[cfg(windows)]
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start"])
-                .arg(&path)
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
                 .spawn();
             #[cfg(all(unix, not(target_os = "macos")))]
             let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
