@@ -11,7 +11,7 @@ index 0000000..1111111 100644
  use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
  use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
  use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
-+use windows_sys::Win32::UI::WindowsAndMessaging::ScreenToClient;
++use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
  
  use tracing::debug;
  
