@@ -2,16 +2,17 @@
 # VERSIONS.toml —— 版本唯一真源（Single Source of Truth）
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# 本仓库有**三条独立演进的版本轴 + 一个发行锚**。其余所有位置的版本号都必须与本
+# 本仓库有**四条独立演进的版本轴 + 一个发行锚**。其余所有位置的版本号都必须与本
 # 文件一致；一致性由 `scripts/check-versions.sh` 逐点校验，并在 CI 中作为门禁
 # （release.yml / publish.yml 的 test 阶段），任何一处漂移都会让流水线失败。
 #
 #   轴 A  spec    格式规范版本    —— 定义**磁盘上的数据契约**（STR-FORMAT-PROMPT.md）
 #   轴 B  cli     参考实现版本    —— 定义**代码 / 命令契约**（crate `str-format`）
 #   轴 C  skill   Agent 技能版本  —— 定义**Agent 行为契约**（str-skill 的 MUST / NEVER）
-#   锚    release 发行 tag        —— 把 A+B+C 的某个组合**冻结命名**，锚定 = cli 版本
+#   轴 D  gui     GUI 编辑器版本  —— 定义**图形界面契约**（crate `str-gui`，Rust + Slint）
+#   锚    release 发行 tag        —— 把 A+B+C+D 的某个组合**冻结命名**，锚定 = cli 版本
 #
-# 三条轴**不要求相等**：变更频率与破坏面都不同（改一句措辞会升 patch、收紧一条校验
+# 四条轴**不要求相等**：变更频率与破坏面都不同（改一句措辞会升 patch、收紧一条校验
 # 会升 spec major、改一条 MUST 会升 skill major）。它们之间的对应关系由本文件登记，
 # 而不是靠「约定相等」——约定相等正是「同一份制品有两个版本号」这类矛盾的来源。
 #
@@ -21,6 +22,8 @@
 #                       （含「支持新的 spec major」这一种）
 #   skill semver 0.x.y  patch = 文案 / 示例；minor = 新增 references 或流程；
 #                       major = Hard rules（MUST / NEVER）变更
+#   gui   semver 0.x.y  patch = 修复 / 文案；minor = 新功能 / 新视图；
+#                       major = 交互或数据写入行为不兼容
 #
 # 维护流程：改本文件 → 按 `scripts/check-versions.sh` 的报错同步各声明点 → 门禁转绿 → 提交。
 # 注意：仓库根 `._meta` 登记了本文件（payload），所以改完本文件必须 `str sync .` 刷新摘要。
@@ -64,3 +67,13 @@ requires_cli = ">=0.3.0"
 # 定案（2026-09-14）：与本地目录名一致；备选 `str-tree` 已否决。两者均必填。
 slug = "str-skill"
 displayName = "STR 资源树"
+
+[gui]
+# GUI 编辑器自身的版本（str-gui/Cargo.toml 的 version）。
+# **与 release.tag 无绑定关系**：不单独打 tag，版本随发行矩阵冻结；
+# 只在 GUI 自身内容变化时升版，因此常与 cli.version 不相等 —— 这是设计，不是漂移。
+# 必须同时等于：str-gui/Cargo.toml、str-gui/Cargo.lock。
+version = "0.1.0"
+# GUI 随附（链接）的 str-format 库最低版本：写操作与校验走同一代码路径，
+# 新增 CLI 命令 / 修复指纹逻辑后应同步升此约束。
+uses_cli_format = ">=0.6.0"

@@ -1,6 +1,6 @@
 //! STR bundle GUI 编辑器（Rust + Slint）。
 //!
-//! 所有 `._meta` 的读取与写回均经由 `str-format` 库（与 `str` CLI 同一代码路径），
+//! 所有 `._meta` 的读取与写回均经由 `str-format` 库，
 //! 写出字节一律是规范 §4.9 的 canonical 形式，保证 Git diff 干净、校验器零告警。
 
 use std::cell::RefCell;

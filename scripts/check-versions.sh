@@ -95,10 +95,11 @@ CLI_VER="$(toml_get "${SSOT}" cli version)"
 SKILL_VER="$(toml_get "${SSOT}" skill version)"
 SKILL_SLUG="$(toml_get "${SSOT}" skill slug)"
 SKILL_DISPLAY="$(toml_get "${SSOT}" skill displayName)"
+GUI_VER="$(toml_get "${SSOT}" gui version)"
 
 for pair in "release.tag:${REL_TAG}" "release.status:${REL_STATUS}" "spec.version:${SPEC_VER}" \
   "spec.major:${SPEC_MAJOR}" "cli.version:${CLI_VER}" "skill.version:${SKILL_VER}" \
-  "skill.slug:${SKILL_SLUG}" "skill.displayName:${SKILL_DISPLAY}"; do
+  "skill.slug:${SKILL_SLUG}" "skill.displayName:${SKILL_DISPLAY}" "gui.version:${GUI_VER}"; do
   if [ -z "${pair#*:}" ]; then
     ng "无法从 ${SSOT} 读取 ${pair%%:*}（文件缺失或 TOML 结构被改动）"
   fi
@@ -135,8 +136,8 @@ check "README.md「主版本号」" "${SPEC_MAJOR}" \
 README_IGNORE_VERS="0.30.13"
 README_VER_SET="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' README.md \
   | grep -vxF -f <(printf '%s\n' ${README_IGNORE_VERS}) | sort -u | paste -sd, -)"
-check_set "README.md 中出现的全部版本号（应为 spec / cli / skill 三者）" \
-  "$(uniq_set "${SPEC_VER}" "${CLI_VER}" "${SKILL_VER}")" "${README_VER_SET}"
+check_set "README.md 中出现的全部版本号（应为 spec / cli / skill / gui 四者）" \
+  "$(uniq_set "${SPEC_VER}" "${CLI_VER}" "${SKILL_VER}" "${GUI_VER}")" "${README_VER_SET}"
 
 # 三份 Schema 的 description 写明「对应 STR 规范 vX」——真源在 ._schema/（派生的
 # str-cli/schema/ 由 tests/schema_sync.rs 守卫逐字节一致）
@@ -206,8 +207,18 @@ case "${SKILL_SLUG}" in
 esac
 echo
 
+# ── 轴 D：GUI 版本 ───────────────────────────────────────────────────────────
+echo "[D] GUI 版本 = ${GUI_VER}（crate str-gui）"
+
+check "str-gui/Cargo.toml 的 version" "${GUI_VER}" \
+  "$(toml_get str-gui/Cargo.toml package version)"
+LOCK_GUI_VER="$(awk '/^name = "str-gui"$/ { f = 1; next }
+  f && /^version = / { gsub(/[^0-9.]/, "", $0); print; exit }' str-gui/Cargo.lock)"
+check "str-gui/Cargo.lock 的 str-gui 版本" "${GUI_VER}" "${LOCK_GUI_VER}"
+echo
+
 # ── 锚：发行 tag ─────────────────────────────────────────────────────────────
-echo "[D] 发行 tag = ${REL_TAG}（status = ${REL_STATUS}，上一次发布 ${REL_LAST}）"
+echo "[E] 发行 tag = ${REL_TAG}（status = ${REL_STATUS}，上一次发布 ${REL_LAST}）"
 
 check "tag 必须等于 v + cli.version" "v${CLI_VER}" "${REL_TAG}"
 case "${REL_STATUS}" in
@@ -240,4 +251,4 @@ EOF
   exit 1
 fi
 
-echo "全部一致：spec ${SPEC_VER} · cli ${CLI_VER} · skill ${SKILL_VER} · release ${REL_TAG}"
+echo "全部一致：spec ${SPEC_VER} · cli ${CLI_VER} · skill ${SKILL_VER} · gui ${GUI_VER} · release ${REL_TAG}"

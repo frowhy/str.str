@@ -15,13 +15,13 @@
 
 ## 发行版本矩阵
 
-| tag | 日期 | 规范 | CLI | 技能包 |
-| --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.13.0 | 0.7.0 | 0.3.5 |
-| [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
-| [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
-| [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
-| [`v0.1.0`](https://github.com/frowhy/str.str/releases/tag/v0.1.0) | 2026-09-14 | 1.7.0 | 0.1.0 | 0.1.0 |
+| tag | 日期 | 规范 | CLI | 技能包 | GUI |
+| --- | --- | --- | --- | --- | --- |
+| 工作区（未发布） | — | 1.13.0 | 0.7.0 | 0.3.5 | 0.1.0 |
+| [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 | —（未纳入） |
+| [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 | —（未纳入） |
+| [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 | —（未纳入） |
+| [`v0.1.0`](https://github.com/frowhy/str.str/releases/tag/v0.1.0) | 2026-09-14 | 1.7.0 | 0.1.0 | 0.1.0 | —（未纳入） |
 
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
@@ -30,7 +30,7 @@
 
 ## 工作区（未发布）
 
-规范 1.13.0 · CLI 0.7.0 · 技能包 0.3.5
+规范 1.13.0 · CLI 0.7.0 · 技能包 0.3.5 · GUI 0.1.0
 
 ### 变更
 
