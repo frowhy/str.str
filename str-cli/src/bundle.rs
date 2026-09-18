@@ -232,6 +232,9 @@ impl Bundle {
                 set.push_layer("", &p.ignore.join("\n"));
             }
         }
+        // 系统级忽略层恒为最内层：`._meta` / `._schema/` / `._cache/` / `._` 保留
+        // 命名空间与 OS / VCS 元数据不受任何用户模式（含 `!` 取反）影响。
+        set.push_system_layer();
         set
     }
 

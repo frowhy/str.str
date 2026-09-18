@@ -23,6 +23,8 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
   由外向内叠加、内层命中覆盖外层，`policies.ignore` 恒为最内层）。
   被忽略条目在分支遍历中被剪枝、不参与清单比对（不报 `E_MANIFEST_MISSING` /
   `W_DOTFILE`）、`str sync` 不补登；**已显式登记的条目不受影响**（登记仍强制、指纹仍校验）。
+  **系统级忽略层**：`._meta` / `._schema/` / `._cache/` / `._` 保留命名空间 / `.lock` /
+  OS 与 VCS 元数据恒为最内层、常开，用户 `!` 取反不能恢复（§3.4 豁免由该层统一实现）。
   实现新增 `ignore` 模块（globset 驱动），`Scan` 携带生效的 `IgnoreSet`（GUI 复用同一套语义）。
 - `SPEC_VERSION` 1.12.0 → **1.13.0**；`str --version` 现在输出 `str 0.6.0`。
 

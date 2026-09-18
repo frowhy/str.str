@@ -143,7 +143,7 @@
 | `manifest` | `strict` | `strict` = 清单不一致为 error；`advisory` = 仅 warning |
 | `sha256` | **`required`** | 是否强制 `payload`/`asset` 带 `size` + `sha256`；`optional`/`off` 仅编辑期临时降级，**不得**出现在已提交状态 |
 | `ignore` | `[]` | **忽略名单**（v1.13.0）：gitignore 语义模式（`*` / `**` / `!` 取反 / 尾随 `/` 仅目录 / 含 `/` 锚定），匹配 bundle 内相对路径；命中条目不参与清单比对、`sync` 不补登、遍历不进入；已显式登记的条目不受影响 |
-| `gitignore` | `true` | 自动检测并应用 `.gitignore`（v1.13.0）：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；由外向内叠加，内层命中覆盖外层，`policies.ignore` 恒为最内层 |
+| `gitignore` | `true` | 自动检测并应用 `.gitignore`（v1.13.0）：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；由外向内叠加，内层命中覆盖外层。**系统级忽略层**（`._meta` / `._schema/` / `._cache/` / `._` 保留命名空间 / `.lock` / OS 与 VCS 元数据）恒为最内层、常开，用户 `!` 取反不能恢复 |
 | `large_asset_bytes` | `10485760` | 超过告警 `W_LARGE_ASSET` |
 | `deep_tree_warn` | `16` | 超过告警 `W_DEEP_TREE` |
 

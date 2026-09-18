@@ -184,6 +184,26 @@ fn outer_repo_gitignore_applies() {
     );
 }
 
+/// 系统级忽略（规范 4.7）：`._meta` / `._schema/` / `._cache/` 等系统条目恒被忽略，
+/// 用户 `.gitignore` / `policies.ignore` 的 `!` 取反不能恢复它们。
+#[test]
+fn system_entries_cannot_be_resurrected() {
+    let root = baseline("sys-ignore");
+    w(&root, "._cache/rev.json", "{}");
+    w(&root, "._schema/extra.json", "{}");
+    w(&root, ".gitignore", "!._*\n");
+    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    w(
+        &root,
+        "._meta",
+        &text.replace(
+            "[policies]\n",
+            "[policies]\nignore = [\"!._cache\", \"!._schema\"]\n",
+        ),
+    );
+    assert_clean(&root);
+}
+
 /// 忽略名单不是删除开关：已登记条目被删除仍报 `E_MANIFEST_GHOST`。
 #[test]
 fn ignore_does_not_silence_ghosts() {
