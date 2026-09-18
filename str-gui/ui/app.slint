@@ -880,6 +880,9 @@ export component AppWindow inherits Window {
     in property <string> status: "打开或新建一个 .str bundle 开始编辑。";
 
     // ── 关于对话框 ──
+    // macOS 由 Rust 侧置 true：原生应用菜单自带「关于」（信息经 Slint 补丁注入），
+    // 帮助菜单不再重复出现；其余平台保留 帮助 → 关于。
+    in property <bool> is-macos: false;
     in-out property <bool> about-visible: false;
     // 静态信息（Rust 侧启动时写入，编译期常量）
     in property <string> about-app-version: "";
@@ -1056,7 +1059,7 @@ export component AppWindow inherits Window {
                 activated => { root.appearance-mode = 2; }
             }
         }
-        Menu {
+        if !root.is-macos: Menu {
             title: "帮助";
             MenuItem { title: "关于 STR 编辑器…"; activated => { root.about-visible = true; } }
         }

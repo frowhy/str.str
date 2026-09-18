@@ -1462,7 +1462,30 @@ fn debug_on() -> bool {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // macOS：原生应用菜单自带「关于」，其面板信息由 vendored Slint 的 extra 补丁
+    // 在建菜单时从环境变量读取 —— 必须在 AppWindow::new()（建菜单）之前设置。
+    #[cfg(target_os = "macos")]
+    {
+        std::env::set_var("STR_ABOUT_NAME", "STR 编辑器");
+        std::env::set_var(
+            "STR_ABOUT_VERSION",
+            format!("v{}（规范 v{}）", env!("CARGO_PKG_VERSION"), str_format::SPEC_VERSION),
+        );
+        std::env::set_var(
+            "STR_ABOUT_COPYRIGHT",
+            format!("{} License · {}", env!("CARGO_PKG_LICENSE"), env!("CARGO_PKG_REPOSITORY")),
+        );
+    }
+
     let app = AppWindow::new()?;
+    // 先让 UI 知道系统当前是否为深色：「跟随系统」模式下生效态与 Palette 都依赖它。
+    // 此后 dark-mode 重算会触发 .slint 的 `changed dark-mode`，配色与上报随之刷新。
+    app.set_system_dark(system_prefers_dark());
+    // macOS 原生「关于」由系统应用菜单承担，帮助菜单不重复出现（见 app.slint）。
+    #[cfg(target_os = "macos")]
+    app.set_is_macos(true);
+    #[cfg(not(target_os = "macos"))]
+    app.set_is_macos(false);
     // 先让 UI 知道系统当前是否为深色：「跟随系统」模式下生效态与 Palette 都依赖它。
     // 此后 dark-mode 重算会触发 .slint 的 `changed dark-mode`，配色与上报随之刷新。
     app.set_system_dark(system_prefers_dark());
