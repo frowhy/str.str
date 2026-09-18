@@ -43,7 +43,7 @@ jobs:
       - name: 版本一致性门禁
         run: bash scripts/check-versions.sh
 
-      - name: 测试（单元 + 集成，48 项）
+      - name: 测试（单元 + 集成）
         working-directory: str-cli
         run: cargo test --locked --all-targets
 
@@ -123,9 +123,67 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # GUI 编辑器：Windows / Linux 二进制（macOS 暂不随 release 分发，见发行矩阵）。
+  # vendored Slint / winit 不入库（体积原因），由 scripts/vendor-*.sh 按
+  # 「钉死的 base rev + sha256 校验 + 仓库内补丁」现场重建，保证字节一致。
+  build-gui:
+    name: build gui ${{ matrix.target }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: rustc --version
+
+      - name: 安装目标平台标准库
+        run: rustup target add ${{ matrix.target }}
+
+      - name: 安装 Linux 构建依赖（fontconfig / freetype）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: 生成 vendored Slint 与 winit（base rev + 补丁）
+        run: |
+          bash str-gui/scripts/vendor-slint.sh
+          bash str-gui/scripts/vendor-winit.sh
+
+      - name: 编译 release
+        working-directory: str-gui
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: 上传 GUI 二进制（unix）
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-${{ matrix.target }}
+          path: str-gui/target/${{ matrix.target }}/release/str-gui
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传 GUI 二进制（windows）
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-${{ matrix.target }}
+          path: str-gui/target/${{ matrix.target }}/release/str-gui.exe
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: package & release
-    needs: build
+    needs: [build, build-gui]
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -133,12 +191,15 @@ jobs:
         本 release 的资产：
 
         - `str-<tag>-<target>.tar.gz` / `.zip` —— 各平台 `str` 单二进制（无运行时依赖）
+        - `str-gui-<tag>-<target>.tar.gz` / `.zip` —— GUI 编辑器（Windows / Linux x86_64）。
+          Windows 无额外依赖；Linux 需桌面环境（X11 / Wayland）与 OpenGL 2.1+，
+          系统库 libfontconfig / libfreetype 由包管理器提供（如 `apt install libfontconfig1 libfreetype6`）
         - `str-skill-<tag>.zip` —— AI Agent 技能包；归档内顶层为 `str-skill/`，
           可在 CodeBuddy 设置页用「导入 Skill」导入，或解压到 `<workspace>/.codebuddy/skills/`
         - `SHA256SUMS.txt` —— 上述文件的 SHA-256 校验和
 
         安装：解压后把 `str` 放进 `PATH`；Agent 侧可直接运行 `str-skill/scripts/ensure-str.sh`
-        自动定位（必要时构建）二进制。
+        自动定位（必要时构建）二进制。GUI 与 `str` CLI 读写同一套 bundle，可混用。
 
         规范正文、三份 JSON Schema 与示例 bundle 见 GitHub 自动提供的源码归档
         （Source code）中的 `STR-FORMAT-PROMPT.md`、`._schema/` 与 `examples/`。
@@ -161,6 +222,8 @@ jobs:
           shopt -s nullglob
           for d in artifacts/str-*; do
             [ -d "$d" ] || continue
+            # GUI 产物归下一循环处理（artifacts/str-* 同时匹配 str-gui-*）
+            [[ "$d" == artifacts/str-gui-* ]] && continue
             target="${d#artifacts/str-}"
             if [ -f "$d/str.exe" ]; then
               cp "$d/str.exe" str.exe
@@ -178,6 +241,26 @@ jobs:
             echo "已打包 ${target}"
           done
 
+          # 1.5) GUI 归档：命名 str-gui-<tag>-<target>，Windows .zip / 其余 .tar.gz
+          for d in artifacts/str-gui-*; do
+            [ -d "$d" ] || continue
+            target="${d#artifacts/str-gui-}"
+            if [ -f "$d/str-gui.exe" ]; then
+              cp "$d/str-gui.exe" str-gui.exe
+              zip -q "dist/str-gui-${TAG}-${target}.zip" str-gui.exe
+              rm -f str-gui.exe
+            elif [ -f "$d/str-gui" ]; then
+              cp "$d/str-gui" str-gui
+              chmod +x str-gui
+              tar -czf "dist/str-gui-${TAG}-${target}.tar.gz" str-gui
+              rm -f str-gui
+            else
+              echo "::error::$d 中既无 str-gui 也无 str-gui.exe"
+              exit 1
+            fi
+            echo "已打包 GUI ${target}"
+          done
+
           # 2) skill zip：归档内顶层必须是 str-skill/ —— 与 skill-creator 的
           #    package_skill.py 输出结构一致，才能被「导入 Skill」直接识别
           zip -r -q "dist/str-skill-${TAG}.zip" str-skill -x '*.DS_Store' -x '*/._*'
@@ -193,7 +276,7 @@ jobs:
           set -euo pipefail
           echo "--- skill zip 顶层（应为 str-skill/）---"
           unzip -l "dist/str-skill-${TAG}.zip"
-          for f in dist/str-${TAG}-*.tar.gz; do
+          for f in dist/str-${TAG}-*.tar.gz dist/str-gui-${TAG}-*.tar.gz; do
             echo "--- ${f} ---"
             tar -tzf "$f"
           done

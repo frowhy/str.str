@@ -34,6 +34,10 @@
 
 ### 变更
 
+- **发行矩阵扩充**：`release.yml` 新增 `build-gui` job —— GUI 编辑器（Windows x86_64 MSVC /
+  Linux x86_64 GNU）随 release 分发，产物 `str-gui-<tag>-<target>.tar.gz` / `.zip`；
+  vendored Slint / winit 由 `scripts/vendor-*.sh` 在 CI 现场重建（base rev + sha256 钉死 +
+  补丁）。macOS GUI 暂不随 release 分发。
 - **CLI 0.6.0 → 0.7.0**：**命令面补齐** —— `str entry add|rm`（实体登记 / 移除登记，自动补
   指纹与 role 推断）、`str ignore add|rm|list`（`policies.ignore` 维护）、
   `str policies set`（`[policies]` 标量键写入）。至此「任何字段都必须有 CLI 写入路径」

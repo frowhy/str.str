@@ -214,8 +214,8 @@ str validate .
   workflow 默认 tag），CI 在三个发布工作流中强制执行；tag 推送时还会校验
   「推送的 tag = 真源声明的 tag」，杜绝「tag 打了、真源没改」。
 - **发布载体**：推 `v*` tag 同时触发三个互相独立的工作流 —— `release.yml`（GitHub Release：五平台
-  二进制 + 技能包 zip + SHA256SUMS）、`publish.yml`（crates.io）、`publish-skillhub.yml`
-  （SkillHub 技能市场，`str-skill/` 无变化时自动跳过）；任一条失败都不阻塞另外两条。
+  CLI 二进制 + Windows/Linux GUI 编辑器 + 技能包 zip + SHA256SUMS）、`publish.yml`（crates.io）、
+  `publish-skillhub.yml`（SkillHub 技能市场，`str-skill/` 无变化时自动跳过）；任一条失败都不阻塞另外两条。
   SkillHub 侧需先在 Actions 里配置仓库级 Secret `SKILLHUB_KEY`（个人 API Token，见
   [`str-skill/README.md`](str-skill/README.md) 的「发布到 SkillHub」）。
 - **逐版变更**：[`CHANGELOG.md`](CHANGELOG.md)（仓库 / 发行）、[`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)
