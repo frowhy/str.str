@@ -269,6 +269,45 @@ impl Meta {
         self.resync();
     }
 
+    /// 设置 `[policies]` 内的单个键（仅 root；保注释，键序随后由 `canonicalize()` 收口）。
+    ///
+    /// `None` 移除该键；`[policies]` 表不存在时创建。原本不存在且落完是空表时不产生改动。
+    pub fn set_policies_value(&mut self, key: &str, v: Option<toml_edit::Item>) {
+        let existing = self
+            .doc
+            .as_table()
+            .get("policies")
+            .and_then(|i| i.as_table().cloned());
+        let created = existing.is_none();
+        let mut pt = existing.unwrap_or_default();
+        match v {
+            Some(item) => {
+                pt.insert(key, item);
+            }
+            None => {
+                pt.remove(key);
+            }
+        }
+        if created && pt.is_empty() {
+            return;
+        }
+        self.place_table("policies", toml_edit::Item::Table(pt));
+        self.resync();
+    }
+
+    /// 设置 `[policies]` 内的字符串数组键（如 `ignore`）；空数组即移除该键。
+    pub fn set_policies_str_array(&mut self, key: &str, values: &[String]) {
+        if values.is_empty() {
+            self.set_policies_value(key, None);
+            return;
+        }
+        let arr: toml_edit::Array = values
+            .iter()
+            .map(|s| toml_edit::Value::from(s.clone()))
+            .collect();
+        self.set_policies_value(key, Some(toml_edit::value(arr)));
+    }
+
     /// 按 `id` 插入或替换一条 `[[authors]]`，返回 `true` 表示新增。
     pub fn upsert_author(&mut self, a: &Author) -> bool {
         let new_table = author_to_table(a);

@@ -17,7 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 |
 | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.13.0 | 0.6.0 | 0.3.4 |
+| 工作区（未发布） | — | 1.13.0 | 0.7.0 | 0.3.5 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
@@ -30,9 +30,14 @@
 
 ## 工作区（未发布）
 
-规范 1.13.0 · CLI 0.6.0 · 技能包 0.3.4
+规范 1.13.0 · CLI 0.7.0 · 技能包 0.3.5
 
 ### 变更
+
+- **CLI 0.6.0 → 0.7.0**：**命令面补齐** —— `str entry add|rm`（实体登记 / 移除登记，自动补
+  指纹与 role 推断）、`str ignore add|rm|list`（`policies.ignore` 维护）、
+  `str policies set`（`[policies]` 标量键写入）。至此「任何字段都必须有 CLI 写入路径」
+  彻底闭合（规范 §9 / DoD 第 30 项）。详见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
 
 - **规范 1.12.0 → 1.13.0**：**新增忽略名单** —— `policies.ignore`（gitignore 语义模式）与
   `policies.gitignore`（默认 `true` = 自动检测并应用 `.gitignore`，覆盖外层 git 仓库 →

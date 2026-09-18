@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
 > 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.13.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.6.0`）。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.7.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -178,6 +178,22 @@ hello
 典型用途：补 `str sync` 补登行的 `type` / `title` / `summary`，或调整同层排序键 `--order`（改完落盘的条目顺序随之变化）。
 
 > `meta set` 与 `entry set` **只能改字段值，不能造结构**：`path` / `role` / `id` / `kind` / `refs` 结构仍归 `node add` / `branch add` / `ref add` / `sync` 所有。
+
+### 3.12a `str entry add --path <P> [--role R] [--type T] [--title X] [--summary S] [--note N] [--order N] [--media-type M] [--optional] <DIR> [UUID]` · `str entry rm --path <P> <DIR> [UUID]`
+
+- `add` 向目标分支 `entries[]` **登记一个实体条目**：磁盘文件自动补 `size` / `sha256` / `media_type`，目录补 `count`；`role` 缺省按磁盘对象推断（含 `._meta` 的目录按深度推断 node / branch，文件按扩展名猜 payload / asset）。
+- 磁盘对象不存在时必须 `--optional`（占位登记，落盘后由 `str sync` 补指纹）；重复登记、保留名、含路径分隔符的 `--path` 均 exit 2；`--role other` 必须配 `--note`。
+- `rm` **只移除登记，不删除磁盘文件**（文件由作者自行处置；`str sync` 之后会重新补登）。
+
+### 3.12b `str ignore add <PATTERN> [DIR]` · `str ignore rm <PATTERN> [DIR]` · `str ignore list [DIR]`
+
+- 维护 ROOT `[policies].ignore`（gitignore 语义模式，匹配 bundle 内相对路径，§4.7）。
+- `add` 幂等（重复追加不推进 revision）；`rm` 须与既有条目完全一致，否则 exit 2；`list` 额外列出检测到的 `.gitignore` 来源（bundle 根 / 分支目录）与 `policies.gitignore` 开关状态。
+- 系统级忽略层（`._meta` / `._schema/` / `._cache/` / `._` 保留命名空间 / `.lock` / OS 与 VCS 元数据）不可被用户模式取反恢复。
+
+### 3.12c `str policies set <KEY> <VALUE> [DIR]`
+
+写入 ROOT `[policies]` 标量键：`id_version`（4/7）、`max_depth`、`manifest`（strict/advisory）、`sha256`（required/optional/off）、`gitignore`（true/false）、`large_asset_bytes`、`deep_tree_warn`。`ignore` 是数组键 → exit 2 并指引用 `str ignore add|rm`；未知键 exit 2。写后落盘字节保持 §4.9 规范形式。
 
 ### 3.13 `str author add --id <ID> --role <R> [--name N] [--at T] <DIR> [UUID]` · `str author rm --id <ID> <DIR> [UUID]`
 

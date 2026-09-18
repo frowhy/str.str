@@ -564,3 +564,135 @@ fn revision_stale_is_skipped_without_baseline() {
     let codes = report(&root).2;
     assert!(!codes.contains(&"E_REVISION_STALE".to_string()), "{codes:?}");
 }
+
+// ─────────────────────────── entry add / entry rm ───────────────────────────
+
+#[test]
+fn entry_add_registers_with_inferred_metadata() {
+    let (root, aaa, _) = two_nodes("entry-add");
+    let node_dir = root.join(&aaa);
+
+    // 文件：登记即自动补 size / sha256 / media_type
+    write(&node_dir.join("notes.md"), "# hi\n");
+    cmd::entry_add(
+        &root,
+        Some(aaa.clone()),
+        "notes.md",
+        &cmd::EntryNew {
+            title: Some("说明".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let text = read(&node_dir.join("._meta"));
+    assert!(text.contains("sha256 = \""));
+    assert!(text.contains("media_type = \"text/markdown\""));
+    assert!(text.contains("title = \"说明\""));
+
+    // 重复登记拒绝
+    assert!(
+        cmd::entry_add(&root, Some(aaa.clone()), "notes.md", &cmd::EntryNew::default()).is_err()
+    );
+    // 磁盘不存在且非 optional 拒绝
+    assert!(
+        cmd::entry_add(&root, Some(aaa.clone()), "ghost.bin", &cmd::EntryNew::default()).is_err()
+    );
+    // optional 占位允许
+    cmd::entry_add(
+        &root,
+        Some(aaa.clone()),
+        "ghost.bin",
+        &cmd::EntryNew {
+            optional: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let (e, w, codes) = report(&root);
+    assert!(
+        e == 0 && w == 1 && codes.contains(&"W_OPTIONAL_MISSING".to_string()),
+        "optional 占位应报 W_OPTIONAL_MISSING 告警（允许缺失）：{e} errors / {w} warnings {codes:?}"
+    );
+
+    // rm：只移除登记，不动磁盘
+    cmd::entry_rm(&root, Some(aaa.clone()), "notes.md").unwrap();
+    assert!(node_dir.join("notes.md").exists());
+    let codes = report(&root).2;
+    assert!(
+        codes.contains(&"E_MANIFEST_MISSING".to_string()),
+        "移除登记后磁盘文件应报缺失：{codes:?}"
+    );
+
+    // 写入的 `._meta` 仍是规范形式（canonicalize 生效）
+    assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
+}
+
+#[test]
+fn entry_add_rejects_reserved_and_bad_roles() {
+    let (root, aaa, _) = two_nodes("entry-bad");
+    assert!(cmd::entry_add(&root, Some(aaa.clone()), "._x.bin", &cmd::EntryNew::default()).is_err());
+    assert!(cmd::entry_add(&root, Some(aaa.clone()), "a/b", &cmd::EntryNew::default()).is_err());
+    assert!(
+        cmd::entry_add(
+            &root,
+            Some(aaa.clone()),
+            "x.bin",
+            &cmd::EntryNew {
+                role: Some("node".into()),
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+}
+
+// ─────────────────────────── ignore / policies ───────────────────────────
+
+#[test]
+fn ignore_commands_manage_root_policies() {
+    let (root, _aaa, _bbb) = two_nodes("ignore-cmd");
+
+    // 幂等追加
+    cmd::ignore_add(&root, "build/").unwrap();
+    cmd::ignore_add(&root, "build/").unwrap();
+    let text = read(&root.join("._meta"));
+    assert!(text.contains("ignore = [\"build/\"]"), "{text}");
+
+    // 生效：未登记的 build/ 不再报缺失
+    std::fs::create_dir_all(root.join("build")).unwrap();
+    write(&root.join("build/out.o"), "x");
+    let (e, w, _) = report(&root);
+    assert_eq!((e, w), (0, 0));
+
+    // fmt --check：写入即规范（canonicalize 收口键序）
+    assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
+
+    // rm 后恢复报缺失；重复 rm 拒绝
+    cmd::ignore_rm(&root, "build/").unwrap();
+    assert!(cmd::ignore_rm(&root, "build/").is_err());
+    let codes = report(&root).2;
+    assert!(codes.contains(&"E_MANIFEST_MISSING".to_string()), "{codes:?}");
+}
+
+#[test]
+fn policies_set_validates_values_and_persists() {
+    let (root, _aaa, _bbb) = two_nodes("policies-set");
+
+    cmd::policies_set(&root, "gitignore", "false").unwrap();
+    assert!(read(&root.join("._meta")).contains("gitignore = false"));
+
+    // 非法值拒绝
+    assert!(cmd::policies_set(&root, "gitignore", "yes").is_err());
+    assert!(cmd::policies_set(&root, "manifest", "bogus").is_err());
+    assert!(cmd::policies_set(&root, "id_version", "5").is_err());
+    // ignore 是数组键：指引改用 ignore add/rm
+    assert!(cmd::policies_set(&root, "ignore", "[]").is_err());
+    // 未知键拒绝
+    assert!(cmd::policies_set(&root, "nope", "1").is_err());
+
+    cmd::policies_set(&root, "max_depth", "8").unwrap();
+    let (e, w, codes) = report(&root);
+    assert!(e == 0 && w == 0, "{e} errors / {w} warnings {codes:?}");
+    assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
+}

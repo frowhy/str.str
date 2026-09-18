@@ -203,9 +203,9 @@ str validate .
 | 轴 | 当前 | 定义什么契约 | 怎么升 |
 | --- | --- | --- | --- |
 | 规范 `spec` | `1.13.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
-| 实现 `cli` | `0.6.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
-| 技能包 `skill` | `0.3.4` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
-| **发行 tag** | `v0.6.0` | 把上面三者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
+| 实现 `cli` | `0.7.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
+| 技能包 `skill` | `0.3.5` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
+| **发行 tag** | `v0.7.0` | 把上面三者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
 
 - **唯一需要工具显式支持的只有 `str` 主版本号**（当前 `1`）；`spec` 供人类追溯 —— 见规范 §13。
 - **门禁**：`bash scripts/check-versions.sh` 逐点比对「真源 ↔ 各声明点」（正文头部、`._meta`、

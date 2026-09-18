@@ -28,7 +28,7 @@
 | **v1.10.0** | 2026-09-14 | **统一 `<dir>` 缺省语义**。§9 命令表全部命令的 `<dir>` 位置参数统一放宽为 **`[dir]`** —— **省略即当前工作目录**（`str <cmd>` 等价于 `str <cmd> .`），与 v1.9.0 的 `[uuid]` 缺省 ROOT 同构，并写成 §9 的**规范条文**。`init` 是唯一例外：省略时以当前路径为基准目标，仍按「未以 `.str` 结尾则追加 `.str`」定名（在 `foo/` 里执行 `str init` 创建兄弟目录 `foo.str`）。连带：可选 `[dir]` 不得排在必填位置参数之前（clap 等解析器的硬约束），`spec set` 的签名随之调整为 `str spec set <VERSION> [dir]`。规则是**放宽**，旧调用（显式给出路径）全部仍然合法，DoD 增补第 26 项。 |
 | **v1.11.0** | 2026-09-14 | **`[uuid]` 缺省目标从 ROOT 细化为「当前节点」**。v1.9.0 的「省略即 ROOT」在 `[dir]` 指向 bundle 内部分支目录时语义缺失（用户在分支目录内操作时仍被迫显式给出 id，或被「ROOT 的直接子分支」误拒）。v1.11.0 规定：`[uuid]` 省略时目标为**当前节点** —— `[dir]` 为 bundle 根即 ROOT，指向分支目录（或其内部子目录）即该分支；工具 MUST 以**整份 bundle** 为扫描视角（`[dir]` 向上解析 bundle 根，不穿越 `.str` 硬边界），保证写操作能同步修复父级 `entries[]`。连带：`node add` 在分支目录下执行时 MUST 带原因拒绝（独立节点只能挂 ROOT）。规则是**放宽 + 寻址细化**，显式给出 `[uuid]` 的旧调用不受影响，DoD 增补第 27 项。 |
 | **v1.12.0** | 2026-09-16 | **保留目录豁免登记（规范 ↔ 实现收口）**：明确 `._meta` / `._schema/` / `._cache/` 属**格式内部保留目录**，**不参与 `entries[]` 清单比对**（§1.3 约束 5、§4.8），消解「§1.3 要求除 `._meta` 外全部登记」与「实现放行保留目录」的落差。连带：`str init`、`scripts/build-example.sh`、§10 示例与官方示例 bundle **不再登记 `._schema`**。`role: schema` / `cache` 保留为**可选的显式登记**（既有已登记的 bundle 仍然合法，无需迁移）。规则是**放宽**，DoD 增补第 28 项。 |
-| **v1.13.0** | 2026-09-18 | **新增忽略名单**：`[policies]` 增加 **`ignore`**（字符串数组，gitignore 语义模式，bundle 内相对路径）与 **`gitignore`**（布尔，默认 `true` = 自动检测并应用 `.gitignore`）。工具在**分支遍历**与**清单比对**（§4.8）中跳过被忽略条目：不报 `E_MANIFEST_MISSING`、不告警、不参与 `str sync` 补登。叠加顺序（由外向内，内层命中覆盖外层）：外层 git 仓库的 `.gitignore` → bundle 根的 `.gitignore` → 分支目录内的 `.gitignore` → `policies.ignore`（显式配置优先级最高）。**`._meta` / `._schema/` / `._cache/` / `.lock` 与 §3.4 豁免清单并入系统级忽略层**（恒为最内层、常开、不可被用户模式取反恢复）。规则是**放宽**（缺省行为变更仅影响「散落文件是否报错」，不改任何既有字段语义），DoD 增补第 29 项。 |
+| **v1.13.0** | 2026-09-18 | **新增忽略名单**：`[policies]` 增加 **`ignore`**（字符串数组，gitignore 语义模式，bundle 内相对路径）与 **`gitignore`**（布尔，默认 `true` = 自动检测并应用 `.gitignore`）。工具在**分支遍历**与**清单比对**（§4.8）中跳过被忽略条目：不报 `E_MANIFEST_MISSING`、不告警、不参与 `str sync` 补登。叠加顺序（由外向内，内层命中覆盖外层）：外层 git 仓库的 `.gitignore` → bundle 根的 `.gitignore` → 分支目录内的 `.gitignore` → `policies.ignore`（显式配置优先级最高）。**`._meta` / `._schema/` / `._cache/` / `.lock` 与 §3.4 豁免清单并入系统级忽略层**（恒为最内层、常开、不可被用户模式取反恢复）。② **CLI 命令面补齐**：新增 `str entry add\|rm`（实体登记 / 移除登记，自动补指纹）、`str ignore add\|rm\|list` 与 `str policies set`（`[policies]` 从此有 CLI 写入路径，「任何字段都必须有 CLI 写入路径」彻底闭合）。规则是**放宽**（缺省行为变更仅影响「散落文件是否报错」，不改任何既有字段语义），DoD 增补第 29、30 项。 |
 
 ---
 
@@ -638,12 +638,18 @@ A.str/
 | `str ref add [dir] [uuid] --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
 | `str ref rm [dir] <ref-uuid>` | 删除关联线（源分支由工具定位，也可用 `--uuid` 指定） | — |
 | `str meta set [dir] [uuid]` | 写入**分支自身**的元信息字段 | `--type` `--title` `--summary` `--name` `--tags` |
+| `str entry add [dir] [uuid]` | 向 `entries[]` **登记一个实体条目**（自动补 `size`/`sha256`/`count`，`role` 缺省按磁盘对象推断） | `--path` `--role` `--type` `--title` `--summary` `--note` `--order` `--media-type` `--optional` |
+| `str entry rm [dir] [uuid]` | 移除一条登记（**不删除磁盘文件**） | `--path` |
 | `str entry set [dir] [uuid]` | 写入某分支 `entries[]` 中**指定条目**的字段 | `--path` `--type` `--title` `--summary` `--note` `--order` |
 | `str author add [dir] [uuid]` | 新增 / 覆盖一条 `[[authors]]`（按 `id` 去重） | `--id` `--name` `--role` `--at` |
 | `str author rm [dir] [uuid]` | 按 `id` 删除一条 `[[authors]]` | `--id` |
 | `str sync [dir]` | 用磁盘实际状态修正 `entries`（补登/移除/`size`/`sha256` 更新）；**始终递归**全部分支 | `--dry-run` |
 | `str fmt [dir]` | 按 4.9 键序/表序重写 `._meta`（**保注释**） | `--check` `--strip-comments` |
 | `str spec set <VERSION> [dir]` | 把整份 bundle 的 `spec`（规范版本声明）统一改写为 `<VERSION>`；只改有差异的分支，**幂等** | `--dry-run` |
+| `str ignore add <PATTERN> [dir]` | 向 ROOT `policies.ignore` 追加一条模式（幂等） | — |
+| `str ignore rm <PATTERN> [dir]` | 移除一条模式 | — |
+| `str ignore list [dir]` | 查看 `policies.ignore` 与检测到的 `.gitignore` 来源 | — |
+| `str policies set <KEY> <VALUE> [dir]` | 写入 ROOT `[policies]` 标量键（`ignore` 数组键须用 `str ignore add\|rm`） | — |
 | `str norm [dir] [uuid]` | 输出**归一化 JSON**（供外部 Schema 工具 / AI 使用） | `--out -` |
 | `str context [dir] [uuid]` | 生成 AI 上下文片段 | `--depth` `--budget` |
 | `str export [dir]` | 导出为单一文件（只读、派生） | `--format json\|toml` `--out -` `--depth` |
@@ -668,6 +674,8 @@ A.str/
 - 字符串字段传**空串表示移除**该字段（用于清掉 `type` / `title` / `summary` / `note` / `tags` 项）；
 - 每次写入同样遵守 7.2：`revision + 1` 并刷新 `updated_at`；
 - `entry set` 的 `[uuid]` 指的是**条目所在的分支**（缺省为 ROOT），`--path` 是该分支 `entries[]` 里的单段名；
+- `entry add` **只能登记，不创造结构**：登记含 `._meta` 的目录为分支条目时仅「收编」既有目录（新建分支结构仍归 `node add` / `branch add`），磁盘对象不存在时必须 `--optional`；`entry rm` 只移除登记、**不得删除磁盘文件**；
+- `ignore add|rm|list` 与 `policies set` 写入 ROOT 的 `[policies]`（bundle 级，仅 root 合法）；
 - `spec set` 是**唯一 bundle 级**的字段写入命令：`spec` 在三种档位里都是必填字段（4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致，故它 MUST 递归改写全部 `._meta`（子 bundle 除外，见 3.5），且**只改写与目标值不同的分支** —— 因此幂等（第二次输出「已更新 0 份」）；任一份 `._meta` 解析失败时 MUST 整体拒绝执行，不得写出一半；
 - `spec set` 的目标版本 MUST 形如 `1.<minor>.<patch>`（与 `._schema` 的正则同源）；`spec` 只供**人类追溯**，工具只强校验 `str` 主版本（见 13 章），因此写入比本实现更新的版本（前向声明）或更旧的版本（降级声明）都被允许。
 
@@ -683,7 +691,7 @@ A.str/
 - **写出的 `._meta` 一律是 4.9 规范形式**：任一写命令（含 `sync` / `node add` / `meta set` …）落盘的字节都已按键序 / 表序 / 集合排序规范化，因此「改完再 `fmt`」应当无事可做 —— `str fmt --check` 返回 0 可作为 CI 门禁。
 - **`str tree` 的呈现顺序与落盘顺序同源**：子分支按父级 `entries[]` 的 `(order, path)` 排列，`entries` 中没有登记的子目录附加在末尾。
 - `E_REVISION_STALE` 的历史判定手段见 6.1.1；写入端有义务登记基线，否则该错误码退化为「只能判定自描述部分」。
-- **任何字段都必须有 CLI 写入路径**：不得存在「只能手改 `._meta`」的字段。`spec` 曾是该缺口的唯一残留，自 v1.9.0 起由 `str spec set` 承担（`str` 主版本固定为 `1`，不提供写入命令）。
+- **任何字段都必须有 CLI 写入路径**：不得存在「只能手改 `._meta`」的字段。`spec` 曾是该缺口的残留，自 v1.9.0 起由 `str spec set` 承担；`[policies]` 标量键自 v1.13.0 起由 `str policies set` 承担、`ignore` 数组由 `str ignore add|rm` 承担（`str` 主版本固定为 `1`，不提供写入命令）。
 
 ---
 
@@ -1087,6 +1095,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 26 | **`[dir]` 缺省当前目录** | 在 bundle 内省略 `<dir>` 执行 `str tree` / `str show` / `str validate` / `str sync` / `str fmt --check` / `str spec set <VERSION>` 等全部命令 → 与显式 `.` 等价；`init` 缺省在当前路径旁创建 `<目录名>.str`；显式给出路径的旧调用不受影响 |
 | 28 | **保留目录免登记** | bundle 根含 `._schema/` / `._cache/` 而 `entries[]` 未登记 → `str validate --strict` **0 errors 0 warnings**；显式登记为 `role` = `schema` / `cache` 亦不报错（可选声明）；`str init` 与 §10 示例产物**不含** `._schema` 条目 |
 | 29 | **忽略名单** | bundle 根 `.gitignore` 含 `build/` 且磁盘存在未登记的 `build/` → `str validate --strict` **0 errors 0 warnings**；`policies.ignore = ["dist"]` 同样豁免；`!` 取反可恢复登记要求；`policies.gitignore = false` 关闭自动检测；已登记条目被删除 → 仍报 `E_MANIFEST_GHOST`（忽略名单不是删除开关）；`._meta` / `._schema/` / `._cache/` 等系统条目**不可**被 `!` 取反恢复（系统级忽略层） |
+| 30 | **实体与策略写入闭环** | `str entry add` 登记磁盘文件后 `str validate --strict` 0 errors，且 `size`/`sha256` 自动补齐；`entry rm` 只移除登记、磁盘文件保留；`str ignore add` 幂等、写后 `str fmt --check` 返回 0；`str policies set gitignore false` 落盘并生效；非法值（`manifest=bogus` / `gitignore=yes` / `id_version=5`）→ `BadArg` |
 
 ---
 

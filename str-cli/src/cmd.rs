@@ -974,6 +974,350 @@ pub fn author_rm(dir: &Path, uuid: Option<String>, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ─────────────────────────── entry add / entry rm ───────────────────────────
+
+/// `entries[]` 的全部合法 role。
+const ENTRY_ROLES: &[&str] = &[
+    "node", "branch", "payload", "asset", "dir", "schema", "cache", "other",
+];
+/// 要求磁盘对象是目录的 role。
+const DIR_ROLES: &[&str] = &["node", "branch", "dir", "schema", "cache"];
+
+/// `str entry add` 的可选字段。
+#[derive(Debug, Clone, Default)]
+pub struct EntryNew {
+    /// role（缺省按磁盘对象自动推断）。
+    pub role: Option<String>,
+    /// 子分支类型。
+    pub type_: Option<String>,
+    /// 展示名。
+    pub title: Option<String>,
+    /// 摘要。
+    pub summary: Option<String>,
+    /// 备注。
+    pub note: Option<String>,
+    /// 同层排序键。
+    pub order: Option<i64>,
+    /// 媒体类型（仅文件类条目；缺省按扩展名推断）。
+    pub media_type: Option<String>,
+    /// 登记为 `optional = true`（缺失被允许）。
+    pub optional: bool,
+}
+
+/// `str entry add`：向目标分支 `entries[]` 登记一个实体条目。
+///
+/// - `--path` 必须是单段名，且不得与既有登记重复；
+/// - 磁盘对象存在时自动补 `size` / `sha256`（文件）或 `count`（目录），
+///   `role` 缺省按对象类型推断（含 `._meta` 的目录按深度推断 node/branch）；
+/// - 磁盘对象不存在时必须给 `--optional`（先登记占位）；
+/// - 显式 `--role node|branch` 仅用于「收编」已含 `._meta` 的目录 —— 新建分支结构
+///   仍应使用 `node add` / `branch add`。
+pub fn entry_add(dir: &Path, uuid: Option<String>, path: &str, e: &EntryNew) -> Result<()> {
+    if path.is_empty() || path.contains('/') || path.contains('\\') {
+        return Err(Error::BadArg(format!(
+            "`--path` = {path:?} 非法：须是单段名（不含路径分隔符）"
+        )));
+    }
+    if util::is_reserved_name(path) || path == util::META_FILE || path == util::LOCK_FILE {
+        return Err(Error::BadArg(format!(
+            "`--path` = {path:?} 属格式保留名，禁止登记为业务条目"
+        )));
+    }
+    if let Some(r) = &e.role {
+        if !ENTRY_ROLES.contains(&r.as_str()) {
+            return Err(Error::BadArg(format!(
+                "`--role` = {r:?} 非法（{}）",
+                ENTRY_ROLES.join(" / ")
+            )));
+        }
+        if r == "other" && e.note.is_none() {
+            return Err(Error::BadArg(
+                "`role = \"other\"` 必须提供 `--note` 说明（规范 §4.6）".into(),
+            ));
+        }
+    }
+
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    if meta.entries.iter().any(|x| x.path == path) {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 已登记 {path:?}（改字段用 `str entry set`）"
+        )));
+    }
+
+    let fs_path = target_dir.join(path);
+    let exists = fs_path.symlink_metadata().is_ok();
+    let is_dir = fs_path.is_dir();
+    if !exists && !e.optional {
+        return Err(Error::BadArg(format!(
+            "磁盘不存在 {rel}/{path}；若要先登记占位请加 `--optional`"
+        )));
+    }
+
+    // role 推断 / 磁盘一致性校验
+    let role = match &e.role {
+        Some(r) => {
+            let dir_role = DIR_ROLES.contains(&r.as_str());
+            if exists {
+                if dir_role && !is_dir {
+                    return Err(Error::BadArg(format!(
+                        "`--role {r}` 要求目录，但磁盘上是文件"
+                    )));
+                }
+                if !dir_role && is_dir {
+                    return Err(Error::BadArg(format!(
+                        "`--role {r}` 要求文件，但磁盘上是目录"
+                    )));
+                }
+            }
+            if matches!(r.as_str(), "node" | "branch") {
+                if exists && !bundle.has_meta(&fs_path) {
+                    return Err(Error::BadArg(format!(
+                        "{rel}/{path} 不含 `._meta`，不能登记为分支（新建分支用 `node add` / `branch add`）"
+                    )));
+                }
+                let want = if scan.visits[idx].depth == 0 { "node" } else { "branch" };
+                if r != want {
+                    return Err(Error::BadArg(format!(
+                        "深度 {} 的子分支必须是 `role = \"{want}\"`（`node` 仅限 ROOT 直下）",
+                        scan.visits[idx].depth
+                    )));
+                }
+            }
+            r.clone()
+        }
+        None => {
+            if !exists {
+                "payload".to_string()
+            } else if is_dir {
+                if bundle.has_meta(&fs_path) {
+                    if scan.visits[idx].depth == 0 { "node" } else { "branch" }.to_string()
+                } else {
+                    "dir".to_string()
+                }
+            } else {
+                guess_file_role(path).to_string()
+            }
+        }
+    };
+
+    let is_branch_role = matches!(role.as_str(), "node" | "branch");
+    let mut entry = if exists && is_dir {
+        if is_branch_role {
+            Entry {
+                path: path.to_string(),
+                role: role.clone(),
+                id: Some(path.to_string()),
+                ..Default::default()
+            }
+        } else {
+            Entry {
+                path: path.to_string(),
+                role: role.clone(),
+                count: child_count(&fs_path),
+                ..Default::default()
+            }
+        }
+    } else if exists {
+        Entry {
+            path: path.to_string(),
+            role: role.clone(),
+            media_type: e.media_type.clone().or_else(|| media_type_for(path)),
+            size: std::fs::metadata(&fs_path).ok().map(|m| m.len() as i64),
+            sha256: util::sha256_file(&fs_path).ok(),
+            ..Default::default()
+        }
+    } else {
+        // 占位登记（--optional）：不带指纹，由 sync 在实体落盘后补齐
+        Entry {
+            path: path.to_string(),
+            role: role.clone(),
+            ..Default::default()
+        }
+    };
+    entry.r#type = e.type_.clone();
+    entry.title = e.title.clone();
+    entry.summary = e.summary.clone();
+    entry.note = e.note.clone();
+    entry.order = e.order;
+    entry.optional = e.optional;
+
+    meta.upsert_entry(&entry);
+    meta.sort_collections();
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已登记 {rel}/{path}  role={role}");
+    Ok(())
+}
+
+/// `str entry rm`：把一个条目从目标分支 `entries[]` 的登记中移除。
+///
+/// **只移除登记，不删除磁盘文件**；磁盘文件由作者自行处置
+/// （`str sync` 之后会因「磁盘有、清单无」而重新补登）。
+pub fn entry_rm(dir: &Path, uuid: Option<String>, path: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+    if !meta.entries.iter().any(|x| x.path == path) {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 内没有 {path:?}"
+        )));
+    }
+    meta.remove_entry_path(path);
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已移除登记 {rel}/{path}（磁盘文件未删除）");
+    Ok(())
+}
+
+// ─────────────────────────── ignore / policies ───────────────────────────
+
+/// `str ignore add`：向 ROOT `[policies].ignore` 追加一条模式（幂等）。
+pub fn ignore_add(dir: &Path, pattern: &str) -> Result<()> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err(Error::BadArg("忽略模式不能为空".into()));
+    }
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    let mut cur = meta.policies.ignore.clone();
+    if cur.iter().any(|p| p == pattern) {
+        println!("已存在（忽略名单未变化）：{pattern}");
+        return Ok(());
+    }
+    cur.push(pattern.to_string());
+    meta.set_policies_str_array("ignore", &cur);
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("已加入忽略名单（共 {} 条）：{pattern}", cur.len());
+    Ok(())
+}
+
+/// `str ignore rm`：从 ROOT `[policies].ignore` 移除一条模式。
+pub fn ignore_rm(dir: &Path, pattern: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    let mut cur = meta.policies.ignore.clone();
+    let Some(pos) = cur.iter().position(|p| p == pattern) else {
+        return Err(Error::BadArg(format!(
+            "忽略名单中没有 {pattern:?}（`str ignore list` 查看）"
+        )));
+    };
+    cur.remove(pos);
+    meta.set_policies_str_array("ignore", &cur);
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("已移出忽略名单（剩 {} 条）：{pattern}", cur.len());
+    Ok(())
+}
+
+/// `str ignore list`：查看 `policies.ignore` 与检测到的 `.gitignore` 来源。
+pub fn ignore_list(dir: &Path) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let policies = scan.visits[0]
+        .meta
+        .as_ref()
+        .map(|m| m.policies.clone())
+        .unwrap_or_default();
+    println!("policies.gitignore = {}", policies.gitignore);
+    if policies.ignore.is_empty() {
+        println!("policies.ignore：（空）");
+    } else {
+        println!("policies.ignore：");
+        for p in &policies.ignore {
+            println!("  - {p}");
+        }
+    }
+    println!(".gitignore 来源：");
+    let mut found = 0usize;
+    for v in &scan.visits {
+        if v.dir.join(".gitignore").is_file() {
+            let scope = if v.rel == "." { "bundle 根" } else { &v.rel };
+            println!("  - {scope}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        println!("  （无）");
+    }
+    Ok(())
+}
+
+/// `str policies set`：写入 ROOT `[policies]` 的标量键。
+///
+/// `ignore` 是数组键，须用 `str ignore add` / `str ignore rm` 维护。
+pub fn policies_set(dir: &Path, key: &str, val: &str) -> Result<()> {
+    use toml_edit::value;
+    let item = match key {
+        "id_version" => {
+            let v: usize = val.parse().map_err(|_| bad_policy(key, val))?;
+            if v != 4 && v != 7 {
+                return Err(bad_policy(key, val));
+            }
+            value(v as i64)
+        }
+        "max_depth" | "deep_tree_warn" => {
+            let v: i64 = val.parse().map_err(|_| bad_policy(key, val))?;
+            if v < 1 {
+                return Err(bad_policy(key, val));
+            }
+            value(v)
+        }
+        "large_asset_bytes" => {
+            let v: u64 = val.parse().map_err(|_| bad_policy(key, val))?;
+            value(v as i64)
+        }
+        "manifest" => match val {
+            "strict" | "advisory" => value(val.to_string()),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "sha256" => match val {
+            "required" | "optional" | "off" => value(val.to_string()),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "gitignore" => match val {
+            "true" | "false" => value(val == "true"),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "ignore" => {
+            return Err(Error::BadArg(
+                "`ignore` 是数组键：追加 / 移除请用 `str ignore add` / `str ignore rm`，\
+                 `str ignore list` 查看"
+                    .into(),
+            ))
+        }
+        other => {
+            return Err(Error::BadArg(format!(
+                "未知策略键 {other:?}（id_version / max_depth / manifest / sha256 / \
+                 gitignore / large_asset_bytes / deep_tree_warn）"
+            )))
+        }
+    };
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    meta.set_policies_value(key, Some(item));
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("policies.{key} = {val}");
+    Ok(())
+}
+
+fn bad_policy(key: &str, value: &str) -> Error {
+    Error::BadArg(format!("`policies.{key}` = {value:?} 非法"))
+}
+
 // ─────────────────────────── spec ───────────────────────────
 
 /// 校验并规整 `spec` 版本串。

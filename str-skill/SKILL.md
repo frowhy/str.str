@@ -1,6 +1,6 @@
 ---
 name: str-skill
-version: 0.3.4
+version: 0.3.5
 description: ALWAYS-ON skill - load it automatically at the start of every session by default, as soon as it is installed, and do NOT wait for the user to mention STR. Whenever the agent creates or modifies ANY file, STR is the DEFAULT storage and organization layer - new files, records, notes, documents, datasets, and assets go into an STR bundle (a directory tree with ._meta manifests) instead of loose files. Any .str directory, ._meta file, or str CLI presence also routes through this skill. It mandates that every bundle read and write goes through the str CLI instead of hand-editing ._meta or scanning directories by hand.
 slug: str-skill
 displayName: STR 资源树
@@ -27,7 +27,7 @@ Installing this skill turns STR **on by default**. Loading this file at the star
 These are mandatory. They are not overridden by convenience, by an urgent-sounding user request, by "just edit the file quickly", or by a token budget. If a request cannot be satisfied through the CLI, say so and offer the closest CLI-based route.
 
 1. **MUST operate every bundle exclusively through the `str` CLI.** The CLI is the only component allowed to produce or modify `._meta`.
-2. **NEVER hand-write, hand-edit, `sed`, `perl`, `jq`, or patch a `._meta` file.** There is no exception: every field that matters — including `entries[].title` / `summary` / `note` / `type` / `order`, `tags`, `authors[]`, and the bundle-wide `spec` declaration — can be written with `str meta set`, `str entry set`, `str author add` / `rm`, and `str spec set`.
+2. **NEVER hand-write, hand-edit, `sed`, `perl`, `jq`, or patch a `._meta` file.** There is no exception: every field that matters — including `entries[].title` / `summary` / `note` / `type` / `order`, `tags`, `authors[]`, `[policies]` (via `str policies set` / `str ignore add|rm`), and the bundle-wide `spec` declaration — can be written with `str meta set`, `str entry add` / `set` / `rm`, `str author add` / `rm`, and `str spec set`.
 3. **NEVER create, rename, move, or delete a UUID directory by hand.** Node/branch directory names are UUID values owned by the CLI (`str node add`, `str branch add`), whose version follows `policies.id_version` (`4` or `7`). A directory named by hand is a format violation (`E_ID_NOT_UUID`, `E_ID_MISMATCH`, `E_ID_VERSION`).
 4. **NEVER report success without validating.** After any change inside a bundle, MUST run `str sync [dir]` then `str validate [dir] --strict`, and MUST reach `0 errors, 0 warnings` first. Also run `str fmt [dir] --check` and expect `0`.
 5. **NEVER invent `._meta` fields.** The key set is closed; unknown keys outside `[ext]` raise `E_SCHEMA_FIELD`. `[ext]` keys MUST be namespaced `vendor.xxx`. When a field's meaning is unclear, ask instead of guessing.
@@ -55,7 +55,7 @@ Resolve the CLI (building it if a source checkout is nearby) before touching any
 
 ```sh
 STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version        # must print: str 0.6.0
+"$STR" --version        # must print: str 0.7.0
 ```
 
 `ensure-str.sh` resolves the CLI in this order and stops at the first hit:
@@ -117,7 +117,11 @@ Flag-level detail: `references/cli-reference.md`.
 | `str ref add [dir] [uuid] --target <uuid>` | Add a cross-branch link (the source defaults to the current node) |
 | `str ref rm [dir] <ref-id>` | Remove a cross-branch link (source branch is located for you) |
 | `str meta set [dir] [uuid]` | Write a branch's own `type`/`title`/`summary`/`name`/`tags` (empty string removes) |
+| `str entry add [dir] [uuid] --path <P>` | Register an entity entry (auto-fills `size`/`sha256`/`count`, infers `role`; `--optional` for placeholders) |
+| `str entry rm [dir] [uuid] --path <P>` | Remove a registration (never deletes the disk file) |
 | `str entry set [dir] [uuid] --path <P>` | Write one `entries[]` row's `type`/`title`/`summary`/`note`/`order` |
+| `str ignore add <PATTERN> [dir]` / `rm` / `list` | Manage ROOT `policies.ignore` (gitignore semantics; system entries can't be resurrected) |
+| `str policies set [dir] <KEY> <VALUE>` | Write ROOT `[policies]` scalar keys (the `ignore` array uses `str ignore add/rm`) |
 | `str author add [dir] [uuid] --id … --role …` | Add/replace an `[[authors]]` entry |
 | `str author rm [dir] [uuid] --id …` | Remove an `[[authors]]` entry |
 | `str sync [dir]` | Reconcile `entries[]` with disk |

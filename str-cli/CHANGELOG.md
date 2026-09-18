@@ -10,6 +10,24 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
 
 ---
 
+## [0.7.0] — 2026-09-19
+
+对应规范 **v1.13.0**（命令面补齐）。
+
+### 变更
+
+- **`str entry add|rm`（实体登记闭环）**：`entry add` 向目标分支 `entries[]` 登记实体条目，
+  自动补 `size` / `sha256` / `count` / `media_type`，`role` 缺省按磁盘对象推断；
+  磁盘缺失须 `--optional` 占位；`entry rm` 只移除登记、**不删除磁盘文件**。
+- **`str ignore add|rm|list`**：维护 ROOT `policies.ignore`（`add` 幂等；`list` 附带
+  `policies.gitignore` 状态与检测到的 `.gitignore` 来源）。
+- **`str policies set <KEY> <VALUE>`**：`[policies]` 标量键的 CLI 写入路径
+  （含取值校验；`ignore` 数组键指引用 `str ignore add|rm`）—— 「任何字段都必须有
+  CLI 写入路径」彻底闭合。
+- `str --version` 现在输出 `str 0.7.0`。
+
+---
+
 ## [0.6.0] — 2026-09-18
 
 对应规范 **v1.13.0**。

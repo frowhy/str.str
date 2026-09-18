@@ -130,6 +130,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SpecCmd,
     },
+    /// 忽略名单（ROOT `policies.ignore`，gitignore 语义）
+    Ignore {
+        #[command(subcommand)]
+        cmd: IgnoreCmd,
+    },
+    /// 校验策略标量键（ROOT `[policies]`）
+    Policies {
+        #[command(subcommand)]
+        cmd: PoliciesCmd,
+    },
     /// 用磁盘实际状态修正 `entries` 与指纹
     Sync {
         /// bundle 目录（缺省为当前目录）
@@ -325,6 +335,52 @@ enum MetaCmd {
 
 #[derive(Subcommand)]
 enum EntryCmd {
+    /// 登记一个实体条目到目标分支 `entries[]`（自动补 size/sha256/count/role 推断）
+    Add {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 条目所在分支 id（缺省为当前节点）
+        uuid: Option<String>,
+        /// 条目路径（单段名，与子项目录名/文件名一致）
+        #[arg(long = "path")]
+        path: String,
+        /// role（缺省按磁盘对象推断；`other` 须配 `--note`）
+        #[arg(long)]
+        role: Option<String>,
+        /// 子分支类型
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// 展示名
+        #[arg(long)]
+        title: Option<String>,
+        /// 摘要
+        #[arg(long)]
+        summary: Option<String>,
+        /// 备注
+        #[arg(long)]
+        note: Option<String>,
+        /// 同层排序键
+        #[arg(long)]
+        order: Option<i64>,
+        /// 媒体类型（仅文件；缺省按扩展名推断）
+        #[arg(long = "media-type")]
+        media_type: Option<String>,
+        /// 磁盘不存在时先登记占位（`optional = true`）
+        #[arg(long)]
+        optional: bool,
+    },
+    /// 移除一条登记（只移除登记，不删除磁盘文件）
+    Rm {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 条目所在分支 id（缺省为当前节点）
+        uuid: Option<String>,
+        /// 条目路径（单段名）
+        #[arg(long = "path")]
+        path: String,
+    },
     /// 设置某分支 `entries[]` 中一条目的字段（空串表示移除该字段）
     Set {
         /// bundle 目录（缺省为当前目录）
@@ -400,6 +456,46 @@ enum SpecCmd {
         /// 只显示将要发生的变更
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IgnoreCmd {
+    /// 追加一条忽略模式（幂等；写入 ROOT `policies.ignore`）
+    Add {
+        /// 忽略模式（gitignore 语义，匹配 bundle 内相对路径）
+        pattern: String,
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
+    /// 移除一条忽略模式
+    Rm {
+        /// 忽略模式（须与既有条目完全一致）
+        pattern: String,
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
+    /// 查看 `policies.ignore` 与检测到的 `.gitignore` 来源
+    List {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PoliciesCmd {
+    /// 写入 ROOT `[policies]` 的标量键（`ignore` 数组键请用 `str ignore add|rm`）
+    Set {
+        /// 策略键：id_version / max_depth / manifest / sha256 / gitignore / large_asset_bytes / deep_tree_warn
+        key: String,
+        /// 目标值
+        value: String,
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -522,6 +618,40 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
             }
         },
         Cmd::Entry { cmd } => match cmd {
+            EntryCmd::Add {
+                dir,
+                uuid,
+                path,
+                role,
+                type_,
+                title,
+                summary,
+                note,
+                order,
+                media_type,
+                optional,
+            } => {
+                cmd::entry_add(
+                    &dir,
+                    uuid,
+                    &path,
+                    &cmd::EntryNew {
+                        role,
+                        type_,
+                        title,
+                        summary,
+                        note,
+                        order,
+                        media_type,
+                        optional,
+                    },
+                )?;
+                Ok(0)
+            }
+            EntryCmd::Rm { dir, uuid, path } => {
+                cmd::entry_rm(&dir, uuid, &path)?;
+                Ok(0)
+            }
             EntryCmd::Set {
                 dir,
                 uuid,
@@ -571,6 +701,26 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 dry_run,
             } => {
                 cmd::spec_set(&dir, &version, dry_run)?;
+                Ok(0)
+            }
+        },
+        Cmd::Ignore { cmd } => match cmd {
+            IgnoreCmd::Add { dir, pattern } => {
+                cmd::ignore_add(&dir, &pattern)?;
+                Ok(0)
+            }
+            IgnoreCmd::Rm { dir, pattern } => {
+                cmd::ignore_rm(&dir, &pattern)?;
+                Ok(0)
+            }
+            IgnoreCmd::List { dir } => {
+                cmd::ignore_list(&dir)?;
+                Ok(0)
+            }
+        },
+        Cmd::Policies { cmd } => match cmd {
+            PoliciesCmd::Set { dir, key, value } => {
+                cmd::policies_set(&dir, &key, &value)?;
                 Ok(0)
             }
         },

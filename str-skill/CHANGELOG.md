@@ -14,6 +14,16 @@
 
 ---
 
+## [0.3.5] — 2026-09-19
+
+### 变更
+
+- `SKILL.md` 命令索引与硬规则 2 补齐新命令：`str entry add|rm`、`str ignore add|rm|list`、
+  `str policies set`；`cli-reference.md` 新增 3.12a / 3.12b / 3.12c 三节。
+- `str --version` 示例与 `ensure-str.sh` 的 `DEFAULT_VERSION` 同步为 `str 0.7.0` / `v0.7.0`。
+
+---
+
 ## [0.3.4] — 2026-09-18
 
 ### 变更

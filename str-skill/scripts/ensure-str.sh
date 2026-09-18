@@ -42,7 +42,7 @@
 set -eu
 
 RELEASE_REPO=${STR_RELEASE_REPO:-frowhy/str.str}
-DEFAULT_VERSION=v0.6.0
+DEFAULT_VERSION=v0.7.0
 STR_VERSION=${STR_VERSION:-latest}
 DOWNLOAD_BASE=${STR_DOWNLOAD_BASE:-https://github.com/$RELEASE_REPO/releases/download}
 CACHE_BASE=${STR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/str-skill}
