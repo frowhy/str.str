@@ -1,15 +1,15 @@
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.12.0"
+spec = "1.13.0"
 kind = "branch"
 id = "01928f3a-7c4b-7101-8b01-000000000101"
 type = "crm.followup_log"
 title = "跟进记录"
 summary = "该客户的历次跟进摘要，含 2026-09 的会议纪要子分支。"
 tags = ["followup"]
-revision = 3
+revision = 4
 created_at = 2026-09-10T14:00:00+08:00
-updated_at = 2026-09-14T10:03:11+08:00
+updated_at = 2026-09-18T15:59:33+00:00
 
 [[entries]]
 path = "01928f3a-7c4b-7102-8b02-000000000102"

@@ -10,6 +10,24 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
 
 ---
 
+## [0.6.0] — 2026-09-18
+
+对应规范 **v1.13.0**。
+
+### 变更
+
+- **忽略名单（`policies.ignore` + `.gitignore` 自动检测）**：`[policies]` 新增 `ignore`
+  （字符串数组，gitignore 语义：`*` / `**` / `!` 取反 / 尾随 `/` 仅目录 / 含 `/` 锚定，
+  匹配 bundle 内相对路径）与 `gitignore`（布尔，默认 `true` = 自动检测并应用
+  `.gitignore`，检测范围：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内，
+  由外向内叠加、内层命中覆盖外层，`policies.ignore` 恒为最内层）。
+  被忽略条目在分支遍历中被剪枝、不参与清单比对（不报 `E_MANIFEST_MISSING` /
+  `W_DOTFILE`）、`str sync` 不补登；**已显式登记的条目不受影响**（登记仍强制、指纹仍校验）。
+  实现新增 `ignore` 模块（globset 驱动），`Scan` 携带生效的 `IgnoreSet`（GUI 复用同一套语义）。
+- `SPEC_VERSION` 1.12.0 → **1.13.0**；`str --version` 现在输出 `str 0.6.0`。
+
+---
+
 ## [0.5.1] — 2026-09-16
 
 对应规范 **v1.12.0**。

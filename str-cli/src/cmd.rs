@@ -1103,7 +1103,7 @@ pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
             MetaLoad::Ok(m, _) => m,
             MetaLoad::Failed(_) => continue,
         };
-        let real = crate::validate::real_entries(&dir_path);
+        let real = crate::validate::real_entries(&dir_path, &rel, &scan.ignore);
         let declared: Vec<Entry> = work.entries.clone();
         let mut touched = false;
 

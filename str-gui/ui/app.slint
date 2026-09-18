@@ -1244,20 +1244,29 @@ export component AppWindow inherits Window {
                                     : 0.5);
                             apply-zoom(target, px, py);
                         }
-                        // 视口范围（像素坐标）：保证内容中心始终在视口内——
-                        // 视口中心 c = -content-x + vp/2 ∈ [中心z - vp/2, 中心z + vp/2]
-                        // → cx ∈ [-中心z, -中心z + vp]（中心z = (off + w/2) * zoom）。
-                        // 滚轮缩放与边缘滚动共用，任何操作后内容都不会滚出视野。
+                        // 视口范围（像素坐标）：保证视口中心可停在内容包围盒内任意点——
+                        // 视口中心 c = -content-x + vp/2 ∈ [中心z - H, 中心z + H]，
+                        // H = max(内容跨度×zoom, vp) / 2（中心z = (off + w/2) * zoom）。
+                        // 旧实现固定 H = vp/2：内容远大于视口时视口中心被锁在内容中心
+                        // 附近（平移范围恒等于视口宽），导图内容过多时无法拖到边缘；
+                        // 内容小于视口时 H = vp/2，退化为旧行为（中心 ± 半视口）。
+                        // 滚轮缩放与边缘滚动共用，任何操作后视口始终与内容相交。
                         property <length> sc-min-x:
-                            -((root.mind-off-x + root.mind-w * 1px / 2) * root.mind-zoom);
+                            -((root.mind-off-x + root.mind-w * 1px / 2) * root.mind-zoom)
+                                + (self.width
+                                    - max(root.mind-w * 1px * root.mind-zoom, self.width)) / 2;
                         property <length> sc-max-x:
                             -((root.mind-off-x + root.mind-w * 1px / 2) * root.mind-zoom)
-                                + self.width;
+                                + (self.width
+                                    + max(root.mind-w * 1px * root.mind-zoom, self.width)) / 2;
                         property <length> sc-min-y:
-                            -((root.mind-off-y + root.mind-h * 1px / 2) * root.mind-zoom);
+                            -((root.mind-off-y + root.mind-h * 1px / 2) * root.mind-zoom)
+                                + (self.height
+                                    - max(root.mind-h * 1px * root.mind-zoom, self.height)) / 2;
                         property <length> sc-max-y:
                             -((root.mind-off-y + root.mind-h * 1px / 2) * root.mind-zoom)
-                                + self.height;
+                                + (self.height
+                                    + max(root.mind-h * 1px * root.mind-zoom, self.height)) / 2;
                         // 菜单/快捷键缩放：以视口中心为锚点重算视口并夹取。
                         // 滚轮路径已在 apply-zoom 内按光标锚点算好，这里靠
                         // zoom-anchor 标记区分，避免两种锚点互相覆盖。
@@ -1583,8 +1592,8 @@ export component AppWindow inherits Window {
                         // 速度与深入边缘带的深度成正比（最大 12px/帧 ≈ 750px/s）。
                         // 方向：光标在左缘 → 视口左移看左侧内容（content-x 增大，
                         // 因为 content-x 是负的滚动偏移）；右缘同理取负。
-                        // 平移范围：视口中心限制在内容包围盒外扩 150px 的矩形内，
-                        // 允许滚到内容边缘附近放置节点，又绝不滚到看不见内容。
+                        // 平移范围：视口中心可停在内容包围盒内任意点（见 flick.sc-*），
+                        // 允许滚到内容任意边缘附近，又绝不滚到完全看不见内容。
                         interval: 16ms;
                         running: DndApi.mind-drag;
                         // 视口范围约束见 flick.sc-min-x / sc-max-x（滚轮缩放共用）。

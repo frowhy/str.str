@@ -344,6 +344,16 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
+            // 忽略名单命中（规范 4.7 `policies.ignore` + `.gitignore`）：
+            // 不报 `E_MANIFEST_MISSING` / `W_DOTFILE` 等问题，视同不存在。
+            let rel_name = if rel == "." {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if !scan.ignore.is_empty() && scan.ignore.is_ignored(&rel_name, *is_dir) {
+                continue;
+            }
             if util::is_os_noise(name) {
                 continue; // `.DS_Store` / `Thumbs.db` / `desktop.ini`
             }
@@ -817,8 +827,10 @@ pub fn dir_child_count(dir: &Path) -> Option<i64> {
     })
 }
 
-/// 收集目录内除了 `._meta` 与 OS 噪声之外的名字（`str sync` 用）。
-pub fn real_entries(dir: &Path) -> Vec<(String, bool)> {
+/// 收集目录内除了 `._meta`、OS 噪声与忽略名单命中之外的名字（`str sync` 用）。
+///
+/// `rel` 为该目录的 bundle 相对路径（ROOT 为 `.`），用于忽略模式匹配。
+pub fn real_entries(dir: &Path, rel: &str, ignore: &crate::ignore::IgnoreSet) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
@@ -829,6 +841,16 @@ pub fn real_entries(dir: &Path) -> Vec<(String, bool)> {
             continue;
         }
         let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !ignore.is_empty() {
+            let rel_name = if rel == "." || rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ignore.is_ignored(&rel_name, is_dir) {
+                continue;
+            }
+        }
         out.push((name, is_dir));
     }
     out.sort();

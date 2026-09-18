@@ -38,6 +38,8 @@ pub const POLICIES_KEYS: &[&str] = &[
     "max_depth",
     "manifest",
     "sha256",
+    "ignore",
+    "gitignore",
     "large_asset_bytes",
     "deep_tree_warn",
 ];
@@ -151,6 +153,10 @@ pub struct Policies {
     pub manifest: ManifestPolicy,
     /// 指纹策略。
     pub sha256: ShaPolicy,
+    /// 忽略名单（gitignore 语义模式，bundle 内相对路径）。
+    pub ignore: Vec<String>,
+    /// 是否自动检测并应用 `.gitignore`（规范 4.7，默认开）。
+    pub gitignore: bool,
     /// 大文件告警阈值。
     pub large_asset_bytes: u64,
     /// 深树告警阈值。
@@ -164,6 +170,8 @@ impl Default for Policies {
             max_depth: 32,
             manifest: ManifestPolicy::Strict,
             sha256: ShaPolicy::Required,
+            ignore: Vec::new(),
+            gitignore: true,
             large_asset_bytes: 10 * 1024 * 1024,
             deep_tree_warn: 16,
         }
@@ -429,6 +437,18 @@ pub fn extract(doc: DocumentMut, rel: &str) -> (Meta, Vec<Issue>) {
                             policies.sha256
                         }
                     };
+                }
+                if let Some(v) = cx.opt_str_array(pt, "ignore") {
+                    policies.ignore = v.into_iter().filter(|s| !s.trim().is_empty()).collect();
+                }
+                if let Some(item) = pt.get("gitignore") {
+                    match item.as_bool() {
+                        Some(b) => policies.gitignore = b,
+                        None => cx.err(
+                            code::SCHEMA_FIELD,
+                            "`policies.gitignore` 必须是布尔值",
+                        ),
+                    }
                 }
                 if let Some(v) = cx.opt_int(pt, "large_asset_bytes") {
                     policies.large_asset_bytes = v.max(0) as u64;

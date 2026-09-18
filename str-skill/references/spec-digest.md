@@ -1,6 +1,6 @@
 # STR 格式规范精要
 
-> 本文是 `STR-FORMAT-PROMPT.md`（**唯一真源**，v1.12.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
+> 本文是 `STR-FORMAT-PROMPT.md`（**唯一真源**，v1.13.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
 > 本文件描述**规范要求**；命令面与实现细节见 `cli-reference.md`，两者已逐步对齐（残留的规范内部不一致在该文「规范内部不一致」一节列出）。
 
 ## 1. 一句话模型
@@ -142,10 +142,12 @@
 | `max_depth` | `32` | 分支树最大深度（超出 `E_DEPTH_EXCEEDED`） |
 | `manifest` | `strict` | `strict` = 清单不一致为 error；`advisory` = 仅 warning |
 | `sha256` | **`required`** | 是否强制 `payload`/`asset` 带 `size` + `sha256`；`optional`/`off` 仅编辑期临时降级，**不得**出现在已提交状态 |
+| `ignore` | `[]` | **忽略名单**（v1.13.0）：gitignore 语义模式（`*` / `**` / `!` 取反 / 尾随 `/` 仅目录 / 含 `/` 锚定），匹配 bundle 内相对路径；命中条目不参与清单比对、`sync` 不补登、遍历不进入；已显式登记的条目不受影响 |
+| `gitignore` | `true` | 自动检测并应用 `.gitignore`（v1.13.0）：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；由外向内叠加，内层命中覆盖外层，`policies.ignore` 恒为最内层 |
 | `large_asset_bytes` | `10485760` | 超过告警 `W_LARGE_ASSET` |
 | `deep_tree_warn` | `16` | 超过告警 `W_DEEP_TREE` |
 
-清单一致性（`strict` / `advisory`）：磁盘有而 `entries` 无 → `E_/W_MANIFEST_MISSING`；`entries` 有而磁盘无（非 `optional`）→ `E_/W_MANIFEST_GHOST`；`size`/`sha256` 不符 → `E_/W_MANIFEST_HASH`。
+清单一致性（`strict` / `advisory`）：磁盘有而 `entries` 无 → `E_/W_MANIFEST_MISSING`；`entries` 有而磁盘无（非 `optional`）→ `E_/W_MANIFEST_GHOST`；`size`/`sha256` 不符 → `E_/W_MANIFEST_HASH`。保留目录（§5）与忽略名单命中（`policies.ignore` / `.gitignore`）不参与比对。
 
 > **v1.8.0 已删除** `policies.unknown_entry`（与 `manifest` 重叠、从未被 Schema 与实现采纳，写入即 `E_SCHEMA_FAIL`）。未登记条目的处理一律由 `manifest` 表达。
 
@@ -162,7 +164,7 @@ TOML 要求裸键写在任何表头之前，因此书写顺序固定：
 
 | 表 | 键序 |
 | --- | --- |
-| `[policies]` | `id_version, max_depth, manifest, sha256, large_asset_bytes, deep_tree_warn` |
+| `[policies]` | `id_version, max_depth, manifest, sha256, ignore, gitignore, large_asset_bytes, deep_tree_warn` |
 | `[[authors]]` | `id, name, role, at` |
 | `[[refs]]` | `id, target, rel, title, order, note` |
 | `[[entries]]` | `path, role, id, type, title, summary, order, media_type, size, sha256, count, schema, optional, note` |

@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.12.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.5.1`）。
+> 本文以**实现的实际行为**为准，与 `STR-FORMAT-PROMPT.md`（规范正文，v1.13.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.6.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -63,7 +63,7 @@
 - 目标已存在则 `Error::BadArg`（exit 2）。
 - `--id-version`：`4` 或 `7`（缺省 `7`），写入 `policies.id_version`，并决定工具**后续生成**的 UUID 版本（`node add` / `branch add` 都读该策略）；其它取值直接拒绝（exit 2）。
 - 生成：ROOT `._meta` + `._schema/`（写入 **3** 份 Schema：`root-meta` / `node-meta` / `branch-meta`）。
-- 生成的 ROOT `._meta` 特点：`kind = "root"`、`revision = 1`、`tags = []`、**没有 `[[authors]]`**、`[policies]` 全为默认值（`id_version` = 你传入的值、`max_depth = 32`、`manifest = "strict"`、`sha256 = "required"`、`large_asset_bytes = 10485760`、`deep_tree_warn = 16`）；`._schema/` 属**保留目录**、**不登记**进 `entries[]`（规范 v1.12.0 §1.3 约束 5 / §4.8）。
+- 生成的 ROOT `._meta` 特点：`kind = "root"`、`revision = 1`、`tags = []`、**没有 `[[authors]]`**、`[policies]` 全为默认值（`id_version` = 你传入的值、`max_depth = 32`、`manifest = "strict"`、`sha256 = "required"`、`ignore = []`、`gitignore = true`、`large_asset_bytes = 10485760`、`deep_tree_warn = 16`）；`._schema/` 属**保留目录**、**不登记**进 `entries[]`（规范 v1.13.0 §1.3 约束 5 / §4.8）。
 - 输出：
 
 ```

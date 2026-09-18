@@ -17,6 +17,7 @@ pub mod baseline;
 pub mod bundle;
 pub mod cmd;
 pub mod error;
+pub mod ignore;
 pub mod meta;
 pub mod meta_edit;
 pub mod util;
@@ -25,7 +26,7 @@ pub mod validate;
 /// 本实现对应的 `str` 格式主版本。
 pub const STR_MAJOR: i64 = 1;
 /// 本实现对应的规范版本。
-pub const SPEC_VERSION: &str = "1.12.0";
+pub const SPEC_VERSION: &str = "1.13.0";
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。
 ///
 /// Schema 属**格式规范资产**，唯一真源位于**仓库根** `._schema/`（与 `examples/` 同级）。

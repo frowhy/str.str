@@ -1,16 +1,16 @@
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.12.0"
+spec = "1.13.0"
 kind = "root"
 id = "01928f3a-7c4b-7000-8000-000000000000"
 name = "客户运营"
 title = "客户运营结构化数据束"
 summary = "以客户为主体的分支树，含跟进记录、订单与标签分支，供 CRM 与 AI 检索使用。"
 tags = ["crm", "demo"]
-revision = 12
+revision = 13
 created_at = 2026-09-01T09:12:00+08:00
-updated_at = 2026-09-14T10:03:11+08:00
+updated_at = 2026-09-18T15:59:33+00:00
 
 [policies]
 id_version = 7

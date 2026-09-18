@@ -14,6 +14,17 @@
 
 ---
 
+## [0.3.4] — 2026-09-18
+
+### 变更
+
+- `spec-digest.md` / `cli-reference.md` 头部规范版本对齐 **v1.13.0**；`str --version` 示例与
+  `ensure-str.sh` 的 `DEFAULT_VERSION` 同步为 `str 0.6.0` / `v0.6.0`。
+- 忽略名单说明随规范同步：`policies.ignore` / `policies.gitignore` 字段表、清单比对豁免
+  （被忽略条目不参与比对、`sync` 不补登）、§4.9 `[policies]` 键序更新。
+
+---
+
 ## [0.3.3] — 2026-09-16
 
 ### 变更

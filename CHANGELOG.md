@@ -17,7 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 |
 | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.12.0 | 0.5.1 | 0.3.3 |
+| 工作区（未发布） | — | 1.13.0 | 0.6.0 | 0.3.4 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 |
@@ -30,10 +30,22 @@
 
 ## 工作区（未发布）
 
-规范 1.12.0 · CLI 0.5.1 · 技能包 0.3.3
+规范 1.13.0 · CLI 0.6.0 · 技能包 0.3.4
 
 ### 变更
 
+- **规范 1.12.0 → 1.13.0**：**新增忽略名单** —— `policies.ignore`（gitignore 语义模式）与
+  `policies.gitignore`（默认 `true` = 自动检测并应用 `.gitignore`，覆盖外层 git 仓库 →
+  bundle 根 → 分支目录内，由外向内叠加、内层命中覆盖外层）。被忽略条目不参与清单比对、
+  `str sync` 不补登、分支遍历剪枝；已显式登记的条目不受影响。纯放宽，无需迁移。详见
+  [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
+- **GUI 修复**：导图内容过多时小地图拖动范围受限 —— 视口中心可移动范围从
+  「内容中心 ± 半视口」放宽为「± max(内容跨度×缩放, 视口) / 2」，任意规模内容都能拖到边缘。
+- **CLI 0.5.1 → 0.6.0**：实现忽略名单（`ignore` 模块 + `Scan` 携带 `IgnoreSet`，
+  GUI 复用同一套语义）；`SPEC_VERSION` 同步 1.13.0。详见
+  [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.3.3 → 0.3.4**：`spec-digest.md` / `cli-reference.md` 随规范同步（字段表、
+  清单豁免、键序）。
 - **规范 1.11.0 → 1.12.0**：保留目录（`._meta` / `._schema/` / `._cache/`）**免登记**、不参与
   `entries[]` 清单比对（消解「§1.3 约束 5 要求除 `._meta` 外全部登记」与实现放行的落差）；
   `str init` 与官方示例不再登记 `._schema`。纯放宽，既有已登记的 bundle 仍合法。详见

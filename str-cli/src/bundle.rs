@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Issue, Result, code};
+use crate::ignore::IgnoreSet;
 use crate::meta::{Meta, MetaLoad, load};
 use crate::util::{self, META_FILE};
 
@@ -43,6 +44,8 @@ pub struct Scan {
     pub root_index: Option<usize>,
     /// 实测最大深度。
     pub max_depth: usize,
+    /// 本次扫描生效的忽略名单（`policies.ignore` + `.gitignore`，规范 4.7）。
+    pub ignore: IgnoreSet,
 }
 
 impl Scan {
@@ -147,7 +150,10 @@ impl Bundle {
     }
 
     /// 在**非分支**目录中查找是否藏有 `._meta`（层级异常，规范 4.6）。
-    fn contains_meta_deeper(&self, dir: &Path) -> bool {
+    ///
+    /// `rel_prefix` 为该目录的 bundle 相对路径（ROOT 传 `""`）；`ignore` 非空时，
+    /// 被忽略的子项同样剪枝（与分支遍历语义一致）。
+    fn contains_meta_deeper(&self, dir: &Path, rel_prefix: &str, ignore: &IgnoreSet) -> bool {
         for entry in walkdir::WalkDir::new(dir)
             .max_depth(8)
             .into_iter()
@@ -157,7 +163,19 @@ impl Bundle {
                 }
                 let name = e.file_name().to_string_lossy().to_string();
                 // 不进入独立子 bundle（`.str` 目录是硬边界，规范 3.5）
-                !util::is_os_noise(&name) && !util::is_sub_bundle(&name)
+                if util::is_os_noise(&name) || util::is_sub_bundle(&name) {
+                    return false;
+                }
+                if ignore.is_empty() {
+                    return true;
+                }
+                let rel = match util::rel_display(dir, e.path()) {
+                    s if s == "." => rel_prefix.to_string(),
+                    s if rel_prefix.is_empty() => s,
+                    s => format!("{rel_prefix}/{s}"),
+                };
+                let is_dir = e.file_type().is_dir();
+                !ignore.is_ignored(&rel, is_dir)
             })
             .flatten()
         {
@@ -169,6 +187,52 @@ impl Bundle {
             }
         }
         false
+    }
+
+    /// 构建 bundle 全局的忽略名单（规范 4.7）。
+    ///
+    /// 叠加顺序（由外向内，内层命中覆盖外层）：
+    /// ① 外层 git 仓库的 `.gitignore`（自最外层向 bundle 根收集，至 worktree 根为止）；
+    /// ② bundle 根的 `.gitignore`；
+    /// ③ ROOT `[policies].ignore`（显式配置，优先级最高）。
+    /// `policies.gitignore = false` 时跳过 ①②（分支目录内的 `.gitignore` 亦不检测）。
+    fn build_ignore(&self, root_meta: Option<&Meta>) -> IgnoreSet {
+        let mut set = IgnoreSet::default();
+        let policies = root_meta.map(|m| &m.policies);
+        let auto = policies.map(|p| p.gitignore).unwrap_or(true);
+        if auto {
+            // 外层 `.gitignore`：自 bundle 父目录向上收集到 worktree 根（含 `.git` 的
+            // 目录仍收集自身），越外层越先入栈 → 越靠近 bundle 的命中越优先。
+            let mut chain: Vec<PathBuf> = Vec::new();
+            let mut cur = self.root.parent();
+            while let Some(d) = cur {
+                chain.push(d.to_path_buf());
+                if d.join(".git").exists() || chain.len() >= 32 {
+                    break;
+                }
+                cur = d.parent();
+            }
+            for d in chain.into_iter().rev() {
+                if let Ok(text) = std::fs::read_to_string(d.join(".gitignore")) {
+                    // prefix = bundle 根相对该 ignore 目录的中间路径。
+                    let prefix = self
+                        .root
+                        .strip_prefix(d)
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    set.push_outer(&prefix, &text);
+                }
+            }
+            if let Ok(text) = std::fs::read_to_string(self.root.join(".gitignore")) {
+                set.push_layer("", &text);
+            }
+        }
+        if let Some(p) = policies {
+            if !p.ignore.is_empty() {
+                set.push_layer("", &p.ignore.join("\n"));
+            }
+        }
+        set
     }
 
     /// 扫描整棵分支树。
@@ -191,6 +255,7 @@ impl Bundle {
                 by_id,
                 root_index: None,
                 max_depth: 0,
+                ignore: IgnoreSet::default(),
             });
         }
 
@@ -198,6 +263,7 @@ impl Bundle {
             MetaLoad::Ok(m, i) => (Some(m), i),
             MetaLoad::Failed(i) => (None, i),
         };
+        let mut ignore = self.build_ignore(root_parsed.as_deref());
         issues.append(&mut root_issues);
         if let Some(m) = &root_parsed {
             if let Some(id) = &m.id {
@@ -222,6 +288,12 @@ impl Bundle {
             if depth >= HARD_MAX_DEPTH {
                 continue;
             }
+            // 分支目录内的 `.gitignore` 动态入栈（BFS 深度序天然满足「内层覆盖外层」）。
+            if depth >= 1 && !visits[cur].rel.is_empty() {
+                if let Ok(text) = std::fs::read_to_string(dir.join(".gitignore")) {
+                    ignore.push_layer(&visits[cur].rel, &text);
+                }
+            }
             for child in self.child_dirs(&dir)? {
                 let name = child
                     .file_name()
@@ -235,9 +307,13 @@ impl Bundle {
                     continue;
                 }
                 let rel = self.rel(&child);
+                // 忽略名单命中（含目录专用模式）：不遍历、不参与清单比对（规范 4.7）。
+                if !ignore.is_empty() && ignore.is_ignored(&rel, true) {
+                    continue;
+                }
                 if !self.has_meta(&child) {
                     // 普通内容容器；若其中藏有分支则层级无法建立
-                    if !util::is_reserved_name(&name) && self.contains_meta_deeper(&child) {
+                    if !util::is_reserved_name(&name) && self.contains_meta_deeper(&child, &rel, &ignore) {
                         issues.push(Issue::error(
                             code::META_MISSING,
                             rel,
@@ -278,6 +354,7 @@ impl Bundle {
             by_id,
             root_index: Some(0),
             max_depth,
+            ignore,
         })
     }
 }
