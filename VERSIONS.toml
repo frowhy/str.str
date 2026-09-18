@@ -32,9 +32,9 @@
 # 发行 tag = "v" + cli.version（锚定规则，由门禁强制）。
 # status = "released" 表示该 tag 已推送；"unreleased" 表示工作区领先于已发布版本。
 tag = "v0.7.0"
-status = "unreleased"
+status = "released"
 # 最近一次真正发布出去的 tag，用于对照「工作区领先了哪些内容」。
-last_published = "v0.5.0"
+last_published = "v0.7.0"
 
 [spec]
 # 规范正文当前版本。必须同时等于：
