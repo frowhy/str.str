@@ -281,6 +281,10 @@ struct MindOut {
     mini_edges: Vec<MindEdge>,
     w: f32,
     h: f32,
+    /// 画布右缘为「外置子树按钮」预留的横向占位（有子分支的节点才留，否则 0）。
+    /// 小地图不画按钮，故面板宽度与缩略比例都按 `w - edge_offset` 计算——
+    /// 二者同源才能保证缩略内容正好落在面板留白之内（否则右侧会溢出面板）。
+    edge_offset: f32,
 }
 
 /// 生成一条肘形连线的三段（水平 → 竖直 → 水平）。
@@ -325,6 +329,7 @@ fn mind_layout(e: &Editor) -> MindOut {
         mini_edges: Vec::new(),
         w: 0.0,
         h: 0.0,
+        edge_offset: 0.0,
     };
     let Some(scan) = e.scan.as_ref() else {
         return out;
@@ -369,6 +374,8 @@ fn mind_layout(e: &Editor) -> MindOut {
     }
     mind_dfs(e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], &mut out);
     out.h = NODE_VGAP + sub_hs[0] + NODE_VGAP;
+    // 缩略图的内容实际右缘（不含按钮占位）：用它换算面板宽度与缩放比例。
+    let content_right = out.nodes.iter().map(|n| n.x + n.w).fold(0.0f32, f32::max);
     // 画布右缘需覆盖外置子树按钮的横向占位。
     out.w = out
         .nodes
@@ -376,6 +383,7 @@ fn mind_layout(e: &Editor) -> MindOut {
         .map(|n| n.x + n.w + if n.has_children { SUBTREE_BTN_EXTENT } else { 0.0 })
         .fold(0.0f32, f32::max)
         + MIND_PAD;
+    out.edge_offset = out.w - (content_right + MIND_PAD);
     out
 }
 
@@ -1377,6 +1385,9 @@ fn apply_appearance(app: &AppWindow, mode: i32) {
             }
         }
     };
+    if debug_on() {
+        eprintln!("[str-gui] apply_appearance mode={mode} scheme={scheme:?}");
+    }
     app.window().set_color_scheme(scheme);
     report_app_appearance_native(mode);
 }
@@ -1441,6 +1452,13 @@ fn system_prefers_dark() -> bool {
 #[cfg(not(target_os = "macos"))]
 fn system_prefers_dark() -> bool {
     false
+}
+
+/// `STR_DEBUG=1` 打开诊断输出（与 vendored winit 的拖放/主题诊断同一开关）。
+/// 用于在无法本地复现的平台上定位「事件有没有到、落点算在哪、外观有没有推下去」。
+fn debug_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STR_DEBUG").is_some())
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -1533,8 +1551,9 @@ fn main() -> Result<(), slint::PlatformError> {
         app.set_mind_nodes(ModelRc::from(Rc::new(VecModel::from(mind.nodes))));
         app.set_mind_edges(ModelRc::from(Rc::new(VecModel::from(mind.edges))));
         app.set_mind_mini_edges(ModelRc::from(Rc::new(VecModel::from(mind.mini_edges))));
-        // 缩略图内容宽度需扣掉子树按钮占位（面板宽度公式用），否则右侧多一段空白。
-        app.set_mind_edge_offset(SUBTREE_BTN_EXTENT);
+        // 缩略图内容宽度需扣掉子树按钮占位（面板宽度与缩略比例都用它），否则右侧
+        // 会多出一段空白——或反过来，比例基准不扣时内容会溢出面板。
+        app.set_mind_edge_offset(mind.edge_offset);
         app.set_mind_w(mind.w);
         app.set_mind_h(mind.h);
 
@@ -2702,6 +2721,20 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_drop_row(move |transfer, files, row_index, into_dir, after| {
             let app = app_weak.upgrade().unwrap();
+            // 行级落点：打印入参与悬停状态，判断落点行号是否与指针一致。
+            if debug_on() {
+                let d = app.global::<DndApi>();
+                eprintln!(
+                    "[str-gui] drop-row row={row_index} into_dir={into_dir} after={after} \
+                     files={files:?} transfer={transfer:?} hover-row={} half={} panel={} \
+                     hover-files={} hover-into-dir={}",
+                    d.get_hover_row(),
+                    d.get_hover_half(),
+                    d.get_hover_panel(),
+                    d.get_hover_files(),
+                    d.get_hover_into_dir()
+                );
+            }
             // data-transfer 文本不可靠时回退到拖拽开始时记录的全局载荷。
             let transfer = if parse_entry_transfer(&transfer).is_some() {
                 transfer
@@ -3238,6 +3271,22 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_external_files_dropped(move |files| {
             let app = app_weak.upgrade().unwrap();
+            // 整窗兜底 / 画布空白 / 节点级落点都会走到这里：打印悬停状态即可判断
+            // 拖拽期间有没有收到 DragMove（can-drop 有没有跑过）。
+            if debug_on() {
+                let d = app.global::<DndApi>();
+                eprintln!(
+                    "[str-gui] external-files-dropped files={:?} hover-row={} half={} \
+                     panel={} node={} src-visit={} mind-drag={}",
+                    files,
+                    d.get_hover_row(),
+                    d.get_hover_half(),
+                    d.get_hover_panel(),
+                    d.get_hover_node(),
+                    d.get_src_visit(),
+                    d.get_mind_drag()
+                );
+            }
             let result = with_editor(&editor, |e| {
                 if files.is_empty() {
                     return Err("拖拽载荷中没有文件".into());

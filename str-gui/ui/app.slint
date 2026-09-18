@@ -1645,11 +1645,12 @@ export component AppWindow inherits Window {
                         x: parent.width - self.width - 12px;
                         y: parent.height - self.height - 12px;
                         // 面板尺寸随内容包围盒自适应：缩略图紧贴面板边缘，无大片留白。
+                        // 缩略比例必须与面板宽度同源（都按「内容实际宽度」= mind-w 减去
+                        // 右侧的子树按钮占位，缩略图不画按钮）——只扣宽度不扣比例，
+                        // 内容就会超出面板右缘（被 clip 掩盖，clip 一失效就露出来）。
                         property <float> mm-scale: min(
-                            184.0 / max(root.mind-w, 1.0),
+                            184.0 / max(root.mind-w - root.mind-edge-offset, 1.0),
                             116.0 / max(root.mind-h, 1.0));
-                        // 内容宽度扣掉「子树按钮横向占位」：缩略图不画按钮，
-                        // 不扣会让右侧凭空多出一段空白、左右留白不对称。
                         width: clamp(
                             (root.mind-w - root.mind-edge-offset) * mm-scale * 1px + 16px,
                             140px, 220px);
