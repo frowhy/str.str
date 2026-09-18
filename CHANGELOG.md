@@ -48,6 +48,8 @@
   [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。
 - **GUI 修复**：导图内容过多时小地图拖动范围受限 —— 视口中心可移动范围从
   「内容中心 ± 半视口」放宽为「± max(内容跨度×缩放, 视口) / 2」，任意规模内容都能拖到边缘。
+- **GUI 新增**：「帮助 → 关于 STR 编辑器」对话框（此前无任何关于入口）—— 展示应用版本、
+  str-format 库 / CLI 版本、规范版本与 str 主版本、仓库、许可证。
 - **CLI 0.5.1 → 0.6.0**：实现忽略名单（`ignore` 模块 + `Scan` 携带 `IgnoreSet`，
   GUI 复用同一套语义）；`SPEC_VERSION` 同步 1.13.0。详见
   [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。

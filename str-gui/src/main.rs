@@ -1467,6 +1467,14 @@ fn main() -> Result<(), slint::PlatformError> {
     // 此后 dark-mode 重算会触发 .slint 的 `changed dark-mode`，配色与上报随之刷新。
     app.set_system_dark(system_prefers_dark());
 
+    // 「关于」对话框静态信息（编译期常量）
+    app.set_about_app_version(env!("CARGO_PKG_VERSION").into());
+    app.set_about_lib_version(str_format::LIB_VERSION.into());
+    app.set_about_spec_version(str_format::SPEC_VERSION.into());
+    app.set_about_str_major(format!("{}", str_format::STR_MAJOR).into());
+    app.set_about_repository(env!("CARGO_PKG_REPOSITORY").into());
+    app.set_about_license(env!("CARGO_PKG_LICENSE").into());
+
     // 系统外观可能在运行中变化，而 AppKit 没有现成的 Rust 侧通知回调可用，
     // 故用 UI 线程定时器低频复查（2s，开销可忽略）；只在结果变化时写回属性，
     // 避免每次都触发 dark-mode 重算与 Palette 重写。

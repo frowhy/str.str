@@ -220,6 +220,30 @@ component MindIconButton inherits Rectangle {
     }
 }
 
+// 「关于」对话框的信息行：左标签右值（配色由调用处传入，组件外不可见 root 属性）。
+component AboutRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <color> label-color;
+    in property <color> value-color;
+    spacing: 8px;
+    Text {
+        text: label;
+        font-size: 12px;
+        color: label-color;
+        vertical-alignment: center;
+        width: 96px;
+    }
+    Text {
+        text: value;
+        font-size: 12px;
+        color: value-color;
+        vertical-alignment: center;
+        overflow: elide;
+        horizontal-stretch: 1;
+    }
+}
+
 // 内容条目列表面板：列表视图（中栏）与导图节点内容区完全复用 ——
 // 选中 / 文件夹展开 / 右键菜单 / 拖拽重排 / 外部文件导入 / 末尾放置区，功能与样式一致。
 // 约定：所有交互先 EntryApi.activate-visit(src-visit) 确保该分支为当前选中分支，
@@ -855,6 +879,16 @@ export component AppWindow inherits Window {
     // ── 状态栏 ──
     in property <string> status: "打开或新建一个 .str bundle 开始编辑。";
 
+    // ── 关于对话框 ──
+    in-out property <bool> about-visible: false;
+    // 静态信息（Rust 侧启动时写入，编译期常量）
+    in property <string> about-app-version: "";
+    in property <string> about-lib-version: "";
+    in property <string> about-spec-version: "";
+    in property <string> about-str-major: "";
+    in property <string> about-repository: "";
+    in property <string> about-license: "";
+
     // 编辑菜单可用性：需选中条目，且无模态对话框——否则对话框内的文本编辑
     // 会被菜单快捷键（⌘C/⌘V 等）截获，无法正常复制粘贴文字。
     property <bool> entry-cmd-ok: root.entry-selected >= 0
@@ -1021,6 +1055,10 @@ export component AppWindow inherits Window {
                 title: root.appearance-mode == 2 ? "✓ 深色模式" : "　深色模式";
                 activated => { root.appearance-mode = 2; }
             }
+        }
+        Menu {
+            title: "帮助";
+            MenuItem { title: "关于 STR 编辑器…"; activated => { root.about-visible = true; } }
         }
     }
 
@@ -2154,6 +2192,76 @@ export component AppWindow inherits Window {
                         enabled: root.new-name != "" && root.dir-picked;
                         clicked => { root.dialog-create(); }
                     }
+                }
+            }
+        }
+    }
+
+    // ── 关于对话框 ──
+    if root.about-visible: Rectangle {
+        background: #00000066;
+        // 吞掉背景点击，防误触底层控件
+        TouchArea { clicked => { } }
+        Rectangle {
+            width: 460px;
+            height: 330px;
+            background: c-panel;
+            border-radius: 12px;
+            VerticalBox {
+                padding: 24px;
+                spacing: 6px;
+                Text {
+                    text: "STR 编辑器";
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: c-text;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "STR 结构化树资源（.str）bundle 编辑器";
+                    font-size: 12px;
+                    color: c-sub;
+                    horizontal-alignment: center;
+                }
+                Rectangle { height: 1px; background: c-line; }
+                VerticalLayout {
+                    spacing: 6px;
+                    AboutRow {
+                        label: "应用版本";
+                        value: root.about-app-version;
+                        label-color: c-sub;
+                        value-color: c-text;
+                    }
+                    AboutRow {
+                        label: "库 / CLI";
+                        value: "str-format \{root.about-lib-version}（与 `str` CLI 同一代码路径）";
+                        label-color: c-sub;
+                        value-color: c-text;
+                    }
+                    AboutRow {
+                        label: "规范版本";
+                        value: "v\{root.about-spec-version}（str 主版本 \{root.about-str-major}）";
+                        label-color: c-sub;
+                        value-color: c-text;
+                    }
+                    AboutRow {
+                        label: "仓库";
+                        value: root.about-repository;
+                        label-color: c-sub;
+                        value-color: c-text;
+                    }
+                    AboutRow {
+                        label: "许可证";
+                        value: root.about-license;
+                        label-color: c-sub;
+                        value-color: c-text;
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "关闭"; clicked => { root.about-visible = false; } }
                 }
             }
         }
