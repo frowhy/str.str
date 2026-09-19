@@ -3,6 +3,14 @@
 //! 所有 `._meta` 的读取与写回均经由 `str-format` 库，
 //! 写出字节一律是规范 §4.9 的 canonical 形式，保证 Git diff 干净、校验器零告警。
 
+// Windows release 构建不附带控制台（「命令提示符」）窗口。
+//
+// 不设置该属性时，release 二进制被标记为 **console 子系统**：双击运行会多出
+// 一个黑窗口，窗口关闭还会连带结束 GUI 进程；stdout/stderr 也绑定到它。
+// debug 构建**刻意保留**控制台 —— 开发期要看 `STR_DEBUG=1` 时的诊断输出。
+// 若 release 下也需要日志，应改写为落文件（`eprintln!` 在 GUI 子系统下无处可去）。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
