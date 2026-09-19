@@ -60,6 +60,8 @@ struct VisibleRow {
     type_str: String,
     expanded: bool,
     has_children: bool,
+    /// 是否含内容条目（`node` / `branch` 之外）：控制「展开 / 收起内容」可用性。
+    has_entries: bool,
 }
 
 /// 编辑器状态。
@@ -233,6 +235,16 @@ fn collapse_subtree_state(e: &mut Editor, visit: usize) {
     }
 }
 
+/// 分支是否存在**内容条目**（`node` / `branch` 之外的登记项）：决定
+/// 「展开 / 收起内容」菜单项是否可用。
+fn has_content_entries(visit: &Visit) -> bool {
+    visit
+        .meta
+        .as_ref()
+        .map(|m| m.entries.iter().any(|en| !en.is_branch()))
+        .unwrap_or(false)
+}
+
 fn dfs_rows(scan: &Scan, idx: usize, expanded: &HashSet<String>, out: &mut Vec<VisibleRow>) {    let visit = &scan.visits[idx];
     let id = visit.meta.as_ref().and_then(|m| m.id.clone());
     let children = ordered_children(scan, idx);
@@ -243,6 +255,7 @@ fn dfs_rows(scan: &Scan, idx: usize, expanded: &HashSet<String>, out: &mut Vec<V
         type_str: visit_type(visit),
         expanded: id.as_deref().is_some_and(|id| expanded.contains(id)),
         has_children: !children.is_empty(),
+        has_entries: has_content_entries(visit),
     });
     // ROOT 也受展开态控制：折叠根即隐藏全部一级分支。
     if !id.as_deref().is_some_and(|id| expanded.contains(id)) {
@@ -352,11 +365,7 @@ fn mind_layout(e: &Editor) -> MindOut {
         let id = v.meta.as_ref().and_then(|m| m.id.clone());
         let show = id.as_deref().is_some_and(|id| e.content_expanded.contains(id));
         let rows_n = if show { build_entry_rows_for(e, i).len() } else { 0 };
-        let has_entries = v
-            .meta
-            .as_ref()
-            .map(|m| m.entries.iter().any(|en| !en.is_branch()))
-            .unwrap_or(false);
+        let has_entries = has_content_entries(v);
         node_hs[i] = if rows_n == 0 {
             if has_entries { NODE_H_COMPACT } else { NODE_H }
         } else {
@@ -1582,8 +1591,60 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    /// 展开 / 收起某分支的**子分支**（列表树双击、导图节点双击、两处右键菜单
+    /// 与菜单栏「分支」共用同一实现，避免行为漂移）。
+    fn toggle_subtree(e: &mut Editor, app: &AppWindow, visit: usize) {
+        let id = e
+            .scan
+            .as_ref()
+            .and_then(|s| s.visits.get(visit))
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.id.clone());
+        let Some(id) = id else { return };
+        if e.expanded.remove(&id) {
+            collapse_subtree_state(e, visit);
+        } else {
+            e.expanded.insert(id);
+        }
+        e.rebuild();
+        sync_ui(app, e);
+    }
+
+    /// 展开 / 收起某分支的**内容条目**面板（仅视图状态，不写盘）。
+    fn toggle_branch_content(e: &mut Editor, app: &AppWindow, visit: usize) {
+        let id = e
+            .scan
+            .as_ref()
+            .and_then(|s| s.visits.get(visit))
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.id.clone());
+        let Some(id) = id else { return };
+        if !e.content_expanded.remove(&id) {
+            e.content_expanded.insert(id);
+        }
+        sync_detail(app, e);
+    }
+
+    /// 菜单栏「分支」项的可用性：选中分支是否存在子分支 / 内容条目。
+    ///
+    /// `sync_ui` 末尾会调用 `sync_detail`，故在此维护即可覆盖
+    /// 「选中变化」与「模型重建（增删分支 / 切换展开）」两条路径。
+    fn sync_sel_flags(app: &AppWindow, e: &Editor) {
+        let flags = e.scan.as_ref().and_then(|s| {
+            let idx = e.selected_idx_in_visits()?;
+            Some((
+                !ordered_children(s, idx).is_empty(),
+                s.visits.get(idx).is_some_and(has_content_entries),
+            ))
+        });
+        let (children, entries) = flags.unwrap_or((false, false));
+        app.set_sel_has_children(children);
+        app.set_sel_has_entries(entries);
+    }
+
     // ── 选中分支 → 信息页表单 ──
     fn sync_detail(app: &AppWindow, e: &Editor) {
+        sync_sel_flags(app, e);
         // 思维导图不依赖选中状态：无选中时仍渲染完整布局（仅无高亮），
         // 否则点击空白取消选中会把整个画布清空。
         let mind = mind_layout(e);
@@ -1750,6 +1811,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     .is_some_and(|sel| sel == r.visit),
                 expanded: r.expanded,
                 has_children: r.has_children,
+                has_entries: r.has_entries,
             })
             .collect();
         // 行模型尽量原地更新：替换模型会让 ListView 重建所有行组件，
@@ -1872,47 +1934,47 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
-        // 导图节点双击：展开/收起该分支的子分支（与列表树共用 expanded 集合）。
+        // 导图节点双击 / 右键「展开·收起子树」：展开或收起该分支的子分支
+        // （与列表树共用 expanded 集合）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
         app.on_toggle_visit_expand(move |visit| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            let id = e
-                .scan
-                .as_ref()
-                .and_then(|s| s.visits.get(visit as usize))
-                .and_then(|v| v.meta.as_ref())
-                .and_then(|m| m.id.clone());
-            if let Some(id) = id {
-                if e.expanded.remove(&id) {
-                    collapse_subtree_state(&mut e, visit as usize);
-                } else {
-                    e.expanded.insert(id);
-                }
-                e.rebuild();
-                sync_ui(&app, &e);
-            }
+            toggle_subtree(&mut e, &app, visit as usize);
         });
     }
     {
-        // 导图节点 ▶：展开/收起节点内的内容条目（仅影响导图布局与节点渲染）。
+        // 导图节点 ▶ / 右键「展开·收起内容」：展开或收起节点内的内容条目。
         let editor = editor.clone();
         let app_weak = app.as_weak();
         app.on_toggle_node_content(move |visit| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            let id = e
-                .scan
-                .as_ref()
-                .and_then(|s| s.visits.get(visit as usize))
-                .and_then(|v| v.meta.as_ref())
-                .and_then(|m| m.id.clone());
-            if let Some(id) = id {
-                if !e.content_expanded.remove(&id) {
-                    e.content_expanded.insert(id);
-                }
-                sync_detail(&app, &e);
+            toggle_branch_content(&mut e, &app, visit as usize);
+        });
+    }
+    {
+        // 菜单栏「分支」：同样的两个开关，作用于**当前选中分支**
+        // （菜单项拿不到行下标 / visit，故由宿主按选中态解析）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_toggle_sel_subtree(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            if let Some(idx) = e.selected_idx_in_visits() {
+                toggle_subtree(&mut e, &app, idx);
+            }
+        });
+    }
+    {
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_toggle_sel_content(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            if let Some(idx) = e.selected_idx_in_visits() {
+                toggle_branch_content(&mut e, &app, idx);
             }
         });
     }

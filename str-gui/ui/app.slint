@@ -96,6 +96,8 @@ export struct BranchRow {
     is-selected: bool,
     expanded: bool,
     has-children: bool,
+    // 是否含内容条目（`node`/`branch` 之外）：控制「展开 / 收起内容」菜单项可用性。
+    has-entries: bool,
 }
 
 export struct EntryRow {
@@ -879,6 +881,10 @@ export component AppWindow inherits Window {
     // ── 状态栏 ──
     in property <string> status: "打开或新建一个 .str bundle 开始编辑。";
 
+    // ── 菜单栏「分支」项的可用性（由 Rust 随选中态维护）──
+    in property <bool> sel-has-children: false;
+    in property <bool> sel-has-entries: false;
+
     // ── 关于对话框 ──
     // macOS 由 Rust 侧置 true：原生应用菜单自带「关于」（信息经 Slint 补丁注入），
     // 帮助菜单不再重复出现；其余平台保留 帮助 → 关于。
@@ -915,6 +921,10 @@ export component AppWindow inherits Window {
     // 导图：双击节点伸缩子树；▶ 展开/收起节点内内容条目。
     callback toggle-visit-expand(int);
     callback toggle-node-content(int);
+    // 菜单栏「分支」：同上两个开关，作用于**当前选中分支**（菜单项没有行下标 / visit，
+    // 由宿主按选中态解析目标）。
+    callback toggle-sel-subtree();
+    callback toggle-sel-content();
     callback save-details();
     callback add-child();
     callback delete-branch();
@@ -950,6 +960,15 @@ export component AppWindow inherits Window {
             title: "文件";
             MenuItem { title: "打开文件…"; shortcut: @keys(Control + O); activated => { root.open-bundle(); } }
             MenuItem { title: "新建文件…"; shortcut: @keys(Control + N); activated => { root.new-bundle(); } }
+            MenuSeparator { }
+            // 刷新 = 重新扫描磁盘并重建模型（数据层面的「重新载入」），故归「文件」；
+            // 校验是应用级动作，见「工具」。
+            MenuItem {
+                title: "刷新（重新扫描磁盘）";
+                shortcut: @keys(Control + R);
+                enabled: root.has-bundle;
+                activated => { root.refresh(); }
+            }
         }
         // 编辑：统一作用于「当前激活分支内选中的内容条目」（entry-selected），
         // 与内容面板右键菜单同一批回调；未选中条目时相应项置灰。
@@ -1004,10 +1023,61 @@ export component AppWindow inherits Window {
                 activated => { EntryApi.save-entry(); }
             }
         }
+        // 分支：作用于**当前选中分支**（与结构树 / 导图节点右键菜单同一批回调，
+        // 保证两处行为一致）；无选中或功能不适用时置灰。
         Menu {
-            title: "操作";
-            MenuItem { title: "刷新"; shortcut: @keys(Control + R); enabled: root.has-bundle; activated => { root.refresh(); } }
-            MenuItem { title: "校验"; shortcut: @keys(Control + Shift + V); enabled: root.has-bundle; activated => { root.run-validate(); } }
+            title: "分支";
+            MenuItem {
+                title: "新建子分支…";
+                shortcut: @keys(Control + Shift + N);
+                enabled: root.has-selection;
+                activated => { root.child-dialog-open(); }
+            }
+            MenuItem {
+                title: "保存分支信息";
+                shortcut: @keys(Control + Shift + S);
+                enabled: root.has-selection;
+                activated => { root.save-details(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "展开 / 收起子树";
+                enabled: root.has-selection && root.sel-has-children;
+                activated => { root.toggle-sel-subtree(); }
+            }
+            MenuItem {
+                title: "展开 / 收起内容";
+                enabled: root.has-selection && root.sel-has-entries;
+                activated => { root.toggle-sel-content(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "在 Finder 中显示";
+                shortcut: @keys(Control + Shift + R);
+                enabled: root.has-selection;
+                activated => { root.reveal-branch(); }
+            }
+            MenuItem {
+                title: "粘贴";
+                enabled: root.has-selection;
+                activated => { EntryApi.paste(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "删除分支";
+                shortcut: @keys(Control + Shift + Delete);
+                enabled: root.has-selection && !root.is-root;
+                activated => { root.delete-branch(); }
+            }
+        }
+        Menu {
+            title: "工具";
+            MenuItem {
+                title: "校验 bundle";
+                shortcut: @keys(Control + Shift + V);
+                enabled: root.has-bundle;
+                activated => { root.run-validate(); }
+            }
         }
         Menu {
             title: "视图";
@@ -1116,12 +1186,27 @@ export component AppWindow inherits Window {
                                 : (row.is-selected ? c-sel : (Math.mod(index, 2) == 0 ? transparent : c-hover));
                             // 行级 TouchArea 必须先声明，否则会盖住三角按钮的点击区。
                             // 分支级右键菜单：TouchArea 消费右键后手动 show()。
+                            // 分支右键菜单：与菜单栏「分支」同一批操作（右键即选中，
+                            // 见下方 TouchArea 的 pointer-event），仅额外保留两项
+                            // 依赖行下标的子树开关。
                             treectx := ContextMenuArea {
                                 Menu {
                                     MenuItem {
                                         title: "新建子分支…";
                                         activated => { root.child-dialog-open(); }
                                     }
+                                    MenuSeparator { }
+                                    MenuItem {
+                                        title: "展开 / 收起子树";
+                                        enabled: row.has-children;
+                                        activated => { root.toggle-expand(index); }
+                                    }
+                                    MenuItem {
+                                        title: "展开 / 收起内容";
+                                        enabled: row.has-entries;
+                                        activated => { root.toggle-node-content(row.visit); }
+                                    }
+                                    MenuSeparator { }
                                     MenuItem {
                                         title: "在 Finder 中显示";
                                         activated => { root.reveal-branch(); }
@@ -1515,6 +1600,18 @@ export component AppWindow inherits Window {
                                                 root.child-dialog-open();
                                             }
                                         }
+                                        MenuSeparator { }
+                                        MenuItem {
+                                            title: "展开 / 收起子树";
+                                            enabled: node.has-children;
+                                            activated => { root.toggle-visit-expand(node.visit); }
+                                        }
+                                        MenuItem {
+                                            title: "展开 / 收起内容";
+                                            enabled: node.has-entries;
+                                            activated => { root.toggle-node-content(node.visit); }
+                                        }
+                                        MenuSeparator { }
                                         MenuItem {
                                             title: "在 Finder 中显示";
                                             activated => {
@@ -1522,6 +1619,14 @@ export component AppWindow inherits Window {
                                                 root.reveal-branch();
                                             }
                                         }
+                                        MenuItem {
+                                            title: "粘贴";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                EntryApi.paste();
+                                            }
+                                        }
+                                        MenuSeparator { }
                                         MenuItem {
                                             title: "删除分支";
                                             enabled: !node.is-root;
