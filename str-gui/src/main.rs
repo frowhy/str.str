@@ -1625,6 +1625,19 @@ fn main() -> Result<(), slint::PlatformError> {
         sync_detail(app, e);
     }
 
+    /// 全部分支 id（用于「展开全部」类操作）。
+    fn all_branch_ids(e: &Editor) -> Vec<String> {
+        e.scan
+            .as_ref()
+            .map(|s| {
+                s.visits
+                    .iter()
+                    .filter_map(|v| v.meta.as_ref().and_then(|m| m.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 菜单栏「分支」项的可用性：选中分支是否存在子分支 / 内容条目。
     ///
     /// `sync_ui` 末尾会调用 `sync_detail`，故在此维护即可覆盖
@@ -1640,6 +1653,21 @@ fn main() -> Result<(), slint::PlatformError> {
         let (children, entries) = flags.unwrap_or((false, false));
         app.set_sel_has_children(children);
         app.set_sel_has_entries(entries);
+
+        // 全树范围的同类判定：决定「展开全部 / 收起全部」是否可用。
+        let (any_children, any_entries) = e
+            .scan
+            .as_ref()
+            .map(|s| {
+                (
+                    // 存在任一「有父分支」的 visit ⇔ 至少有一条父子边。
+                    s.visits.iter().any(|v| v.parent.is_some()),
+                    s.visits.iter().any(has_content_entries),
+                )
+            })
+            .unwrap_or((false, false));
+        app.set_any_has_children(any_children);
+        app.set_any_has_entries(any_entries);
     }
 
     // ── 选中分支 → 信息页表单 ──
@@ -1976,6 +2004,66 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(idx) = e.selected_idx_in_visits() {
                 toggle_branch_content(&mut e, &app, idx);
             }
+        });
+    }
+    {
+        // 视图菜单：展开 / 收起**全部子树**（纯视图状态，不写盘）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_expand_all_subtrees(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let ids = all_branch_ids(&e);
+            if ids.is_empty() {
+                return;
+            }
+            e.expanded.extend(ids);
+            e.rebuild();
+            sync_ui(&app, &e);
+        });
+    }
+    {
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_collapse_all_subtrees(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            // 清空展开集合即收起到只剩 ROOT 一行（与逐级收起语义一致）。
+            if e.expanded.is_empty() {
+                return;
+            }
+            e.expanded.clear();
+            e.selected_entry_path = None;
+            e.rebuild();
+            sync_ui(&app, &e);
+        });
+    }
+    {
+        // 视图菜单：展开 / 收起**全部内容**面板（导图内嵌内容列表随之显隐）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_expand_all_contents(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let ids = all_branch_ids(&e);
+            if ids.is_empty() {
+                return;
+            }
+            e.content_expanded.extend(ids);
+            sync_detail(&app, &e);
+        });
+    }
+    {
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_collapse_all_contents(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            if e.content_expanded.is_empty() {
+                return;
+            }
+            e.content_expanded.clear();
+            sync_detail(&app, &e);
         });
     }
     {

@@ -884,6 +884,9 @@ export component AppWindow inherits Window {
     // ── 菜单栏「分支」项的可用性（由 Rust 随选中态维护）──
     in property <bool> sel-has-children: false;
     in property <bool> sel-has-entries: false;
+    // ── 「展开全部 / 收起全部」的可用性（全树范围，同由 Rust 维护）──
+    in property <bool> any-has-children: false;
+    in property <bool> any-has-entries: false;
 
     // ── 关于对话框 ──
     // macOS 由 Rust 侧置 true：原生应用菜单自带「关于」（信息经 Slint 补丁注入），
@@ -925,6 +928,11 @@ export component AppWindow inherits Window {
     // 由宿主按选中态解析目标）。
     callback toggle-sel-subtree();
     callback toggle-sel-content();
+    // 菜单栏「视图」：展开 / 收起**全部**（纯视图状态，不写盘）。
+    callback expand-all-subtrees();
+    callback collapse-all-subtrees();
+    callback expand-all-contents();
+    callback collapse-all-contents();
     callback save-details();
     callback add-child();
     callback delete-branch();
@@ -1052,12 +1060,6 @@ export component AppWindow inherits Window {
             }
             MenuSeparator { }
             MenuItem {
-                title: "在 Finder 中显示";
-                shortcut: @keys(Control + Shift + R);
-                enabled: root.has-selection;
-                activated => { root.reveal-branch(); }
-            }
-            MenuItem {
                 title: "粘贴";
                 enabled: root.has-selection;
                 activated => { EntryApi.paste(); }
@@ -1070,8 +1072,22 @@ export component AppWindow inherits Window {
                 activated => { root.delete-branch(); }
             }
         }
+        // 工具：定位（分支 / 内容两类）与应用级校验。
         Menu {
             title: "工具";
+            MenuItem {
+                title: "在 Finder 中显示分支";
+                shortcut: @keys(Control + Shift + R);
+                enabled: root.has-selection;
+                activated => { root.reveal-branch(); }
+            }
+            MenuItem {
+                title: "在 Finder 中显示内容";
+                shortcut: @keys(Control + Alt + R);
+                enabled: root.entry-selected >= 0;
+                activated => { EntryApi.entry-reveal(root.entry-selected); }
+            }
+            MenuSeparator { }
             MenuItem {
                 title: "校验 bundle";
                 shortcut: @keys(Control + Shift + V);
@@ -1112,6 +1128,29 @@ export component AppWindow inherits Window {
                 shortcut: @keys(Control + Digit0);
                 enabled: root.view-mind;
                 activated => { root.zoom-reset(); }
+            }
+            MenuSeparator { }
+            // 全局展开/收起：纯视图状态（不写盘），与右键菜单里的「展开 / 收起
+            // 子树 / 内容」同一批语义，只是作用范围为整棵树。
+            MenuItem {
+                title: "展开全部子树";
+                enabled: root.has-bundle && root.any-has-children;
+                activated => { root.expand-all-subtrees(); }
+            }
+            MenuItem {
+                title: "收起全部子树";
+                enabled: root.has-bundle && root.any-has-children;
+                activated => { root.collapse-all-subtrees(); }
+            }
+            MenuItem {
+                title: "展开全部内容";
+                enabled: root.has-bundle && root.any-has-entries;
+                activated => { root.expand-all-contents(); }
+            }
+            MenuItem {
+                title: "收起全部内容";
+                enabled: root.has-bundle && root.any-has-entries;
+                activated => { root.collapse-all-contents(); }
             }
         }
         Menu {
