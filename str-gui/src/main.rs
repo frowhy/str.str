@@ -1625,7 +1625,7 @@ fn main() -> Result<(), slint::PlatformError> {
         sync_detail(app, e);
     }
 
-    /// 全部分支 id（用于「展开全部」类操作）。
+    /// 全部分支 id（用于「展开全部子树」）。
     fn all_branch_ids(e: &Editor) -> Vec<String> {
         e.scan
             .as_ref()
@@ -1633,6 +1633,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 s.visits
                     .iter()
                     .filter_map(|v| v.meta.as_ref().and_then(|m| m.id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **当前可见**的分支 id：位于 `expanded` 集合内者（含 ROOT）。
+    ///
+    /// 「展开全部内容」以此为基准：只为已经展开、看得见的分支展开内容面板 ——
+    /// 否则「子树都没展开却把全部内容展开」会产出一堆看不见的状态。
+    fn visible_branch_ids(e: &Editor) -> Vec<String> {
+        e.scan
+            .as_ref()
+            .map(|s| {
+                s.visits
+                    .iter()
+                    .filter_map(|v| v.meta.as_ref().and_then(|m| m.id.as_ref()))
+                    .filter(|id| e.expanded.contains(*id))
+                    .map(|id| id.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -1654,20 +1672,28 @@ fn main() -> Result<(), slint::PlatformError> {
         app.set_sel_has_children(children);
         app.set_sel_has_entries(entries);
 
-        // 全树范围的同类判定：决定「展开全部 / 收起全部」是否可用。
-        let (any_children, any_entries) = e
+        // 全树 / 可见范围的同类判定：决定「展开全部 / 收起全部」是否可用。
+        let (any_children, any_visible_entries) = e
             .scan
             .as_ref()
             .map(|s| {
                 (
                     // 存在任一「有父分支」的 visit ⇔ 至少有一条父子边。
                     s.visits.iter().any(|v| v.parent.is_some()),
-                    s.visits.iter().any(has_content_entries),
+                    // 内容侧的基准是「当前可见分支」——与展开动作同一口径。
+                    s.visits.iter().any(|v| {
+                        let visible = v
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.id.as_deref())
+                            .is_some_and(|id| e.expanded.contains(id));
+                        visible && has_content_entries(v)
+                    }),
                 )
             })
             .unwrap_or((false, false));
         app.set_any_has_children(any_children);
-        app.set_any_has_entries(any_entries);
+        app.set_any_visible_has_entries(any_visible_entries);
     }
 
     // ── 选中分支 → 信息页表单 ──
@@ -2039,13 +2065,14 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
-        // 视图菜单：展开 / 收起**全部内容**面板（导图内嵌内容列表随之显隐）。
+        // 视图菜单：展开**当前可见分支**的内容面板（导图内嵌内容列表随之显隐）。
+        // 基准是「已展开的分支」：子树未展开时不越界展开其内容。
         let editor = editor.clone();
         let app_weak = app.as_weak();
         app.on_expand_all_contents(move || {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            let ids = all_branch_ids(&e);
+            let ids = visible_branch_ids(&e);
             if ids.is_empty() {
                 return;
             }
@@ -2054,6 +2081,8 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
     {
+        // 「收起全部内容」则清空全部内容展开态（含被折叠子树内的），
+        // 作为「展开」的逆操作不设可见性门槛 —— 只收回、不越界展开。
         let editor = editor.clone();
         let app_weak = app.as_weak();
         app.on_collapse_all_contents(move || {
@@ -2170,6 +2199,66 @@ fn main() -> Result<(), slint::PlatformError> {
                     app.set_status("已保存（canonical 写回，revision + 1）。".into());
                 }
                 Err(msg) => app.set_status(format!("保存失败：{msg}").into()),
+            }
+        });
+    }
+
+    // ── 重命名分支（只改 `._meta.title`；分支目录名是 UUID，不可变）──
+    {
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_branch_rename_open(move || {
+            let app = app_weak.upgrade().unwrap();
+            let e = editor.borrow();
+            let Some(visit) = e.selected_visit() else {
+                app.set_status("未选择分支".into());
+                return;
+            };
+            let title = visit
+                .meta
+                .as_ref()
+                .and_then(|m| m.title.clone())
+                .unwrap_or_default();
+            app.set_branch_rename_name(title.into());
+            app.set_branch_rename_visible(true);
+        });
+    }
+    {
+        let app_weak = app.as_weak();
+        app.on_branch_rename_cancel(move || {
+            app_weak.upgrade().unwrap().set_branch_rename_visible(false);
+        });
+    }
+    {
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_branch_rename_confirm(move || {
+            let app = app_weak.upgrade().unwrap();
+            app.set_branch_rename_visible(false);
+            let name = app.get_branch_rename_name().trim().to_string();
+            let result = with_editor(&editor, |e| {
+                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
+                let idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                let visit = &e.scan.as_ref().unwrap().visits[idx];
+                let mut meta = read_meta(bundle, &visit.dir)?;
+                meta.set_str_or_remove("title", &name);
+                meta.touch();
+                meta.save(&bundle.meta_path(&visit.dir))
+                    .map_err(|err| err.to_string())?;
+                e.rescan()?;
+                Ok(())
+            });
+            match result {
+                Ok(()) => {
+                    sync_ui(&app, &editor.borrow());
+                    let msg = if name.is_empty() {
+                        "已清除分支标题。".to_string()
+                    } else {
+                        format!("分支已重命名为「{name}」。")
+                    };
+                    app.set_status(msg.into());
+                }
+                Err(msg) => app.set_status(format!("重命名失败：{msg}").into()),
             }
         });
     }

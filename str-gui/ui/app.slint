@@ -869,9 +869,13 @@ export component AppWindow inherits Window {
     in property <string> new-dir: "";
     in property <bool> dir-picked: false;
 
-    // ── 重命名对话框 ──
+    // ── 重命名对话框（条目：改磁盘文件 / 目录名）──
     in property <bool> rename-visible: false;
     in-out property <string> rename-name;
+
+    // ── 重命名分支对话框（只改显示名 `._meta.title`）──
+    in property <bool> branch-rename-visible: false;
+    in-out property <string> branch-rename-name;
 
     // ── 新建子分支对话框（结构树右键）──
     in property <bool> branch-dialog-visible: false;
@@ -884,9 +888,10 @@ export component AppWindow inherits Window {
     // ── 菜单栏「分支」项的可用性（由 Rust 随选中态维护）──
     in property <bool> sel-has-children: false;
     in property <bool> sel-has-entries: false;
-    // ── 「展开全部 / 收起全部」的可用性（全树范围，同由 Rust 维护）──
+    // ── 「展开全部 / 收起全部」的可用性（由 Rust 维护）──
+    // 子树侧看全树；内容侧只看**当前可见（已展开）的分支** —— 与展开动作同口径。
     in property <bool> any-has-children: false;
-    in property <bool> any-has-entries: false;
+    in property <bool> any-visible-has-entries: false;
 
     // ── 关于对话框 ──
     // macOS 由 Rust 侧置 true：原生应用菜单自带「关于」（信息经 Slint 补丁注入），
@@ -933,6 +938,10 @@ export component AppWindow inherits Window {
     callback collapse-all-subtrees();
     callback expand-all-contents();
     callback collapse-all-contents();
+    // 分支重命名（只改 `._meta.title`；目录名是 UUID，不参与重命名）。
+    callback branch-rename-open();
+    callback branch-rename-confirm();
+    callback branch-rename-cancel();
     callback save-details();
     callback add-child();
     callback delete-branch();
@@ -1008,7 +1017,9 @@ export component AppWindow inherits Window {
                 activated => { EntryApi.entry-duplicate(root.entry-selected); }
             }
             MenuItem {
-                title: "重命名…";
+                // 条目重命名 = 改磁盘文件名 / 目录名（与「分支 → 重命名分支…」
+                // 只改 `._meta.title` 不同），标题里写明作用对象以免混淆。
+                title: "重命名条目…";
                 enabled: root.entry-cmd-ok;
                 activated => { EntryApi.entry-rename-open(root.entry-selected); }
             }
@@ -1046,6 +1057,11 @@ export component AppWindow inherits Window {
                 shortcut: @keys(Control + Shift + S);
                 enabled: root.has-selection;
                 activated => { root.save-details(); }
+            }
+            MenuItem {
+                title: "重命名分支…";
+                enabled: root.has-selection;
+                activated => { root.branch-rename-open(); }
             }
             MenuSeparator { }
             MenuItem {
@@ -1143,13 +1159,13 @@ export component AppWindow inherits Window {
                 activated => { root.collapse-all-subtrees(); }
             }
             MenuItem {
-                title: "展开全部内容";
-                enabled: root.has-bundle && root.any-has-entries;
+                title: "展开全部内容（当前可见分支）";
+                enabled: root.has-bundle && root.any-visible-has-entries;
                 activated => { root.expand-all-contents(); }
             }
             MenuItem {
                 title: "收起全部内容";
-                enabled: root.has-bundle && root.any-has-entries;
+                enabled: root.has-bundle && root.any-visible-has-entries;
                 activated => { root.collapse-all-contents(); }
             }
         }
@@ -1233,6 +1249,10 @@ export component AppWindow inherits Window {
                                     MenuItem {
                                         title: "新建子分支…";
                                         activated => { root.child-dialog-open(); }
+                                    }
+                                    MenuItem {
+                                        title: "重命名分支…";
+                                        activated => { root.branch-rename-open(); }
                                     }
                                     MenuSeparator { }
                                     MenuItem {
@@ -1637,6 +1657,13 @@ export component AppWindow inherits Window {
                                             activated => {
                                                 root.select-visit(node.visit);
                                                 root.child-dialog-open();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "重命名分支…";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.branch-rename-open();
                                             }
                                         }
                                         MenuSeparator { }
@@ -2296,6 +2323,40 @@ export component AppWindow inherits Window {
                         enabled: root.rename-name != "";
                         clicked => { root.rename-confirm(); }
                     }
+                }
+            }
+        }
+    }
+
+    // ── 重命名分支对话框（改的是显示名 `._meta.title`，不是磁盘目录名）──
+    if root.branch-rename-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        Rectangle {
+            width: 440px;
+            height: 216px;
+            background: c-panel;
+            border-radius: 12px;
+            VerticalBox {
+                padding: 20px;
+                spacing: 10px;
+                Text { text: "重命名分支"; font-size: 17px; font-weight: 700; color: c-text; }
+                Text {
+                    text: "只改显示名（`._meta.title`）；分支目录名是 UUID，不参与重命名。留空即清除标题。";
+                    font-size: 11px;
+                    color: c-sub;
+                    wrap: TextWrap.word-wrap;
+                }
+                LineEdit {
+                    text <=> root.branch-rename-name;
+                    placeholder-text: "分支标题";
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "取消"; clicked => { root.branch-rename-cancel(); } }
+                    Button { text: "确定"; clicked => { root.branch-rename-confirm(); } }
                 }
             }
         }
