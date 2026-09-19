@@ -216,9 +216,27 @@ jobs:
       - name: 打包（各平台归档 + skill zip + 校验和）
         run: |
           set -euo pipefail
+          DIST="$PWD/dist"
           mkdir -p dist
 
-          # 1) 每个 target 一个归档；Windows 用 .zip，其余用 .tar.gz
+          # 归档一律在**临时目录**里组装：仓库根存在同名目录（如 str-gui/），
+          # 直接在根目录 cp 会把文件拷进那个目录、随后的清理动作失败。
+          # 打包函数：build_archive <源文件> <归档内名> <输出文件>
+          build_archive() {
+            local src="$1" inner="$2" out="$3"
+            local stage
+            stage="$(mktemp -d)"
+            cp "$src" "$stage/$inner"
+            if [ "${out##*.}" = "zip" ]; then
+              ( cd "$stage" && zip -q "$out" "$inner" )
+            else
+              chmod +x "$stage/$inner"
+              tar -czf "$out" -C "$stage" "$inner"
+            fi
+            rm -rf "$stage"
+          }
+
+          # 1) CLI：每个 target 一个归档；Windows 用 .zip，其余用 .tar.gz
           shopt -s nullglob
           for d in artifacts/str-*; do
             [ -d "$d" ] || continue
@@ -226,14 +244,9 @@ jobs:
             [[ "$d" == artifacts/str-gui-* ]] && continue
             target="${d#artifacts/str-}"
             if [ -f "$d/str.exe" ]; then
-              cp "$d/str.exe" str.exe
-              zip -q "dist/str-${TAG}-${target}.zip" str.exe
-              rm -f str.exe
+              build_archive "$d/str.exe" str.exe "$DIST/str-${TAG}-${target}.zip"
             elif [ -f "$d/str" ]; then
-              cp "$d/str" str
-              chmod +x str
-              tar -czf "dist/str-${TAG}-${target}.tar.gz" str
-              rm -f str
+              build_archive "$d/str" str "$DIST/str-${TAG}-${target}.tar.gz"
             else
               echo "::error::$d 中既无 str 也无 str.exe"
               exit 1
@@ -246,14 +259,9 @@ jobs:
             [ -d "$d" ] || continue
             target="${d#artifacts/str-gui-}"
             if [ -f "$d/str-gui.exe" ]; then
-              cp "$d/str-gui.exe" str-gui.exe
-              zip -q "dist/str-gui-${TAG}-${target}.zip" str-gui.exe
-              rm -f str-gui.exe
+              build_archive "$d/str-gui.exe" str-gui.exe "$DIST/str-gui-${TAG}-${target}.zip"
             elif [ -f "$d/str-gui" ]; then
-              cp "$d/str-gui" str-gui
-              chmod +x str-gui
-              tar -czf "dist/str-gui-${TAG}-${target}.tar.gz" str-gui
-              rm -f str-gui
+              build_archive "$d/str-gui" str-gui "$DIST/str-gui-${TAG}-${target}.tar.gz"
             else
               echo "::error::$d 中既无 str-gui 也无 str-gui.exe"
               exit 1
