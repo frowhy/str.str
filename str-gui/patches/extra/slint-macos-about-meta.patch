@@ -1,0 +1,30 @@
+diff --git a/internal/backends/winit/muda.rs b/internal/backends/winit/muda.rs
+index 1b89967..33a4ac3 100644
+--- a/internal/backends/winit/muda.rs
++++ b/internal/backends/winit/muda.rs
+@@ -402,8 +402,24 @@ fn create_default_app_menu(menu_bar: &muda::Menu) -> Result<(), i_slint_core::ap
+     menu_bar
+         .append(&app_menu)
+         .and_then(|_| {
++            // str-gui extra patch：原生「关于」面板的应用信息由宿主程序在运行时经
++            // 环境变量注入（非 .app bundle 直跑时 Info.plist 近乎为空，标准面板
++            // 只显示进程名）；未设置时退回默认行为。
++            let about_meta = match (
++                std::env::var("STR_ABOUT_NAME"),
++                std::env::var("STR_ABOUT_VERSION"),
++                std::env::var("STR_ABOUT_COPYRIGHT"),
++            ) {
++                (Ok(name), Ok(version), Ok(copyright)) => Some(muda::AboutMetadata {
++                    name: Some(name),
++                    version: Some(version),
++                    copyright: Some(copyright),
++                    ..Default::default()
++                }),
++                _ => None,
++            };
+             app_menu.append_items(&[
+-                &muda::PredefinedMenuItem::about(None, None),
++                &muda::PredefinedMenuItem::about(Some("关于 STR 编辑器…"), about_meta),
+                 &muda::PredefinedMenuItem::separator(),
+                 &muda::PredefinedMenuItem::services(None),
+                 &muda::PredefinedMenuItem::separator(),

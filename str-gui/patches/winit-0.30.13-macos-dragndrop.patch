@@ -1,0 +1,59 @@
+diff --git a/src/platform_impl/macos/window_delegate.rs b/src/platform_impl/macos/window_delegate.rs
+index e293505..f32716e 100644
+--- a/src/platform_impl/macos/window_delegate.rs
++++ b/src/platform_impl/macos/window_delegate.rs
+@@ -27,6 +27,7 @@ use objc2_foundation::{
+ use tracing::{trace, warn};
+ 
+ use super::app_state::ApplicationDelegate;
++use super::DEVICE_ID;
+ use super::cursor::cursor_from_icon;
+ use super::monitor::{self, flip_window_screen_coordinates, get_display_id};
+ use super::observer::RunLoop;
+@@ -383,10 +384,23 @@ declare_class!(
+                 let path = PathBuf::from(file.to_string());
+                 self.queue_event(WindowEvent::HoveredFile(path));
+             });
++            self.emit_drag_cursor_moved(sender);
+ 
+             true
+         }
+ 
++        /// Invoked when the dragged image is repositioned within the window.
++        ///
++        /// Returning `YES` is required for the drop to be accepted at all; we also
++        /// deliver the drag cursor position as a `CursorMoved` event so applications
++        /// can offer position-dependent drop targets (e.g. tree rows).
++        #[method(draggingUpdated:)]
++        fn dragging_updated(&self, sender: &NSObject) -> bool {
++            trace_scope!("draggingUpdated:");
++            self.emit_drag_cursor_moved(sender);
++            true
++        }
++
+         /// Invoked when the image is released
+         #[method(prepareForDragOperation:)]
+         fn prepare_for_drag_operation(&self, _sender: &NSObject) -> bool {
+@@ -806,6 +820,22 @@ impl WindowDelegate {
+         unsafe { Retained::cast(self.window().contentView().unwrap()) }
+     }
+ 
++    /// Deliver the current OS-drag cursor position as a `CursorMoved` event.
++    ///
++    /// `sender` is the `NSDraggingInfo` (the target window); `draggingLocation` is
++    /// in window base coordinates (bottom-left origin), which the winit view
++    /// converts to client-area coordinates exactly like `NSView::mouse_motion`.
++    fn emit_drag_cursor_moved(&self, sender: &NSObject) {
++        let location: NSPoint = unsafe { objc2::msg_send![sender, draggingLocation] };
++        let view = self.view();
++        let view_point: NSPoint = view.convertPoint_fromView(location, None);
++        let logical = LogicalPosition::new(view_point.x, view_point.y);
++        self.queue_event(WindowEvent::CursorMoved {
++            device_id: DEVICE_ID,
++            position: logical.to_physical(self.scale_factor()),
++        });
++    }
++
+     #[track_caller]
+     pub(super) fn window(&self) -> &WinitWindow {
+         &self.ivars().window

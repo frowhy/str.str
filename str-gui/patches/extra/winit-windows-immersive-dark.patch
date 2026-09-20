@@ -1,0 +1,93 @@
+diff --git a/src/platform_impl/windows/dark_mode.rs b/src/platform_impl/windows/dark_mode.rs
+index 366e44c..04f5cb1 100644
+--- a/src/platform_impl/windows/dark_mode.rs
++++ b/src/platform_impl/windows/dark_mode.rs
+@@ -58,28 +58,79 @@ static LIGHT_THEME_NAME: Lazy<Vec<u16>> = Lazy::new(|| util::encode_wide(""));
+ /// Attempt to set a theme on a window, if necessary.
+ /// Returns the theme that was picked
+ pub fn try_theme(hwnd: HWND, preferred_theme: Option<Theme>) -> Theme {
+-    if *DARK_MODE_SUPPORTED {
+-        let is_dark_mode = match preferred_theme {
+-            Some(theme) => theme == Theme::Dark,
+-            None => should_use_dark_mode(),
+-        };
++    let is_dark_mode = match preferred_theme {
++        Some(theme) => theme == Theme::Dark,
++        None => should_use_dark_mode(),
++    };
++    let theme = if is_dark_mode { Theme::Dark } else { Theme::Light };
+ 
+-        let theme = if is_dark_mode { Theme::Dark } else { Theme::Light };
++    // str-gui patch: 先驱动**有文档**的 DWM 沉浸式深色属性。上游只依赖两条未文档化
++    // 的路径（`SetWindowTheme` + `SetWindowCompositionAttribute`），在部分 Windows 11
++    // 构建上它们不再生效：标题栏与菜单栏都只能跟随系统主题 —— 表现为「深色模式下
++    // 菜单栏不变色」「切回浅色后标题栏仍是深色（因为系统是深色）」。DWM 属性同时
++    // 负责深/浅两个方向，才能可靠复位。
++    let dwm_ok = set_immersive_dark_mode(hwnd, is_dark_mode);
++    let mut set_theme_ok = false;
++    let mut composition_ok = false;
++
++    if *DARK_MODE_SUPPORTED {
+         let theme_name = match theme {
+             Theme::Dark => DARK_THEME_NAME.as_ptr(),
+             Theme::Light => LIGHT_THEME_NAME.as_ptr(),
+         };
+ 
+         let status = unsafe { SetWindowTheme(hwnd, theme_name, ptr::null()) };
++        set_theme_ok = status == S_OK;
++        composition_ok = set_dark_mode_for_window(hwnd, is_dark_mode);
++    }
+ 
+-        if status == S_OK && set_dark_mode_for_window(hwnd, is_dark_mode) {
+-            return theme;
+-        }
++    if theme_debug() {
++        eprintln!(
++            "[str-theme] try_theme(hwnd={hwnd:?}, {preferred_theme:?}) -> {theme:?} \
++             dwm={dwm_ok} set_window_theme={set_theme_ok} composition={composition_ok}"
++        );
++    }
++
++    // str-gui patch: 三者任一成功即认为请求的主题已生效（DWM 属性单独就足以改变
++    // 标题栏），避免调用方（winit 的 current_theme）与实际状态不一致。
++    if dwm_ok || set_theme_ok || composition_ok {
++        return theme;
+     }
+ 
+     Theme::Light
+ }
+ 
++/// str-gui patch: `STR_DEBUG=1` 打开 stderr 诊断（与拖放诊断同一开关）。
++fn theme_debug() -> bool {
++    static ON: Lazy<bool> = Lazy::new(|| std::env::var_os("STR_DEBUG").is_some());
++    *ON
++}
++
++/// str-gui patch: 用有文档的 `DWMWA_USE_IMMERSIVE_DARK_MODE` 显式设置窗口框架明暗。
++/// 属性号 20 自 Windows 10 2004 起可用；1809~1909 只能用它当时的 19，故两者都试。
++/// 不支持的构建会返回错误码，因此调用是安全的。
++fn set_immersive_dark_mode(hwnd: HWND, is_dark_mode: bool) -> bool {
++    use windows_sys::Win32::Graphics::Dwm::{
++        DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
++    };
++
++    let value = BOOL::from(is_dark_mode);
++    for attribute in [DWMWA_USE_IMMERSIVE_DARK_MODE as u32, 19u32] {
++        let hr = unsafe {
++            DwmSetWindowAttribute(
++                hwnd,
++                attribute,
++                &value as *const BOOL as *const c_void,
++                std::mem::size_of::<BOOL>() as u32,
++            )
++        };
++        if hr == S_OK {
++            return true;
++        }
++    }
++    false
++}
++
+ fn set_dark_mode_for_window(hwnd: HWND, is_dark_mode: bool) -> bool {
+     // Uses Windows undocumented API SetWindowCompositionAttribute,
+     // as seen in win32-darkmode example linked at top of file.

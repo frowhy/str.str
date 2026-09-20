@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  str-gui 的 .app 包描述文件模板。CI（gui-build 工作流）组装 Str.app 时把
+  @VERSION@ 替换为构建来源的短 SHA。本地可用 `plutil -lint` 校验。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>str-gui</string>
+    <key>CFBundleDisplayName</key>
+    <string>STR 编辑器</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.frowhy.str-gui</string>
+    <key>CFBundleExecutable</key>
+    <string>str-gui</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+</dict>
+</plist>

@@ -1,0 +1,45 @@
+[package]
+name = "str-gui"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.92"
+description = "STR 结构化树资源（.str）bundle 的 GUI 编辑器（Rust + Slint）"
+license = "AGPL-3.0-only"
+repository = "https://github.com/frowhy/str.str"
+publish = false
+
+[[bin]]
+name = "str-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Slint 需要两项上游尚不具备的能力，故不直接用 git 依赖，而用本地 vendor 版：
+#   1. DragArea / DropArea（计划随 1.18 发布，未上 crates.io）；
+#   2. 外部文件拖入：winit 的 HoveredFile/DroppedFile → Slint DropEvent 的转换链路
+#      （各公开分支均无此链路，是本地补丁；落点依赖 vendor-winit 补发的 CursorMoved）。
+# 源码由 `str-gui/scripts/vendor-slint.sh` 从「钉死的 base rev + 仓库内补丁」生成，
+# 因此这里是仓库内相对路径：任何人 clone 后执行该脚本都得到字节一致的结果。
+slint = { path = "vendor/slint/api/rs/slint" }
+# 直接依赖 i-slint-core：Window::set_color_scheme 的 ColorScheme 参数类型来自此 crate，
+# 而 slint crate 未对外导出该枚举。指向与 slint 完全相同的内部包，Cargo 合并为同一份。
+i-slint-core = { version = "=1.18.0", path = "vendor/slint/internal/core", default-features = false }
+str-format = { path = "../str-cli" }
+rfd = "0.15"
+trash = "5"
+
+[build-dependencies]
+slint-build = { path = "vendor/slint/api/rs/build" }
+
+# 向 OS 上报窗口配色偏好：Slint 的 Window::set_color_scheme 即便存在，也只实现了
+# Windows(muda) 与 Linux(xdg) 两条分支，macOS 无通路，故直接对着 NSApp 设置
+# NSAppearance。版本号刻意与依赖树中的现有版本一致，避免引入第二份 objc2。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSWindow"] }
+
+# macOS 拖放补丁：winit 0.30.x 未实现 draggingUpdated:（返回 YES 才允许落下），
+# 也不在拖拽悬停时上报光标位置，而本 GUI 的树形/行内拖放依赖二者。
+# 产物由 `str-gui/scripts/vendor-winit.sh` 从「官方 tarball（sha256 钉死）+ 仓库内补丁」生成，
+# 因此这里是仓库内相对路径：任何人 clone 后执行该脚本都得到字节一致的结果。
+[patch.crates-io]
+winit = { path = "vendor/winit" }
