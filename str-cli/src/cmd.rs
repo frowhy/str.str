@@ -1,0 +1,1838 @@
+//! CLI 子命令实现（规范第 9 章）。
+
+use std::path::{Path, PathBuf};
+
+use serde_json::Value as JValue;
+
+use crate::bundle::{Bundle, Scan};
+use crate::error::{Error, Result, code};
+use crate::meta::{Author, Entry, Kind, Meta, MetaLoad, RefItem};
+use crate::meta_edit::{meta_from_text, render_branch_meta, render_root_meta, toml_str};
+use crate::util::{self, SCHEMA_DIR};
+use crate::{SPEC_VERSION, STR_MAJOR};
+
+// ─────────────────────────── 公共辅助 ───────────────────────────
+
+/// 打开 bundle：`<dir>` 可为 bundle 根，也可为其内部的分支/内容目录。
+///
+/// 解析规则（见 [`bundle_root_of`]）：向上找到真正持有这份 bundle 的根目录再整体扫描 ——
+/// 因此 `str <cmd> <bundle>/<分支>` 与在分支目录内执行 `str <cmd>` 等价，
+/// `[uuid]` 的缺省目标随之成为「当前节点」（见 [`target_branch`]）。
+pub fn open(dir: &Path) -> Result<Bundle> {
+    Bundle::new(bundle_root_of(dir)?)
+}
+
+/// 从 `<dir>` 向上解析 bundle 根：停在**第一个**满足下列条件之一的目录（含自身）——
+///
+/// 1. 目录名以 `.str` 结尾（规范 §3.5：`.str` 目录是 bundle 硬边界）；
+/// 2. 其父目录不含 `._meta`（元数据链顶端；兼容无 `.str` 后缀的 bundle 与文件系统根）。
+///
+/// 由此子 bundle 边界不会被向上穿越（`examples/客户运营.str` 内部解析到它自身为止）。
+fn bundle_root_of(dir: &Path) -> Result<PathBuf> {
+    let mut cur = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+    loop {
+        let name = cur
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let parent_has_meta = cur
+            .parent()
+            .map(|p| p.join(util::META_FILE).is_file())
+            .unwrap_or(false);
+        if name.ends_with(".str") || !parent_has_meta {
+            return Ok(cur);
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => return Ok(cur),
+        }
+    }
+}
+
+/// 定位某 uuid 对应的 visit 下标。
+pub fn locate(scan: &Scan, uuid: &str) -> Option<usize> {
+    scan.resolve(uuid)
+}
+
+/// 依据扩展名猜测媒体类型。
+pub fn media_type_for(name: &str) -> Option<String> {
+    let ext = Path::new(name)
+        .extension()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let s = match ext.as_str() {
+        "json" => "application/json",
+        "toml" => "application/toml",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "yaml" | "yml" => "application/yaml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        _ => return None,
+    };
+    Some(s.to_string())
+}
+
+/// 目录直接子项数（排除 `._meta`）。
+fn child_count(dir: &Path) -> Option<i64> {
+    crate::validate::dir_child_count(dir)
+}
+
+// ─────────────────────────── init ───────────────────────────
+
+/// 创建一个新的 `.str` bundle。
+pub fn init(
+    dir: &Path,
+    name: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    id_version: usize,
+) -> Result<()> {
+    if !matches!(id_version, 4 | 7) {
+        return Err(Error::BadArg(format!(
+            "`--id-version` = {id_version} 不受支持（`policies.id_version` 只允许 4 或 7）"
+        )));
+    }
+    let target = if dir.extension().map(|e| e == "str").unwrap_or(false) {
+        dir.to_path_buf()
+    } else {
+        PathBuf::from(format!("{}.str", dir.display()))
+    };
+    if target.exists() {
+        return Err(Error::BadArg(format!("{} 已存在", target.display())));
+    }
+    let bundle_name = name.clone().unwrap_or_else(|| {
+        target
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bundle".to_string())
+    });
+
+    std::fs::create_dir_all(target.join(SCHEMA_DIR)).map_err(|e| Error::io(&target, e))?;
+    for (file, body) in crate::EMBEDDED_SCHEMAS {
+        let p = target.join(SCHEMA_DIR).join(file);
+        std::fs::write(&p, body).map_err(|e| Error::io(&p, e))?;
+    }
+
+    let created = util::now_rfc3339();
+    let root_id = util::new_uuid(id_version);
+    let text = render_root_meta(
+        &bundle_name,
+        title.as_deref(),
+        summary.as_deref(),
+        &root_id,
+        &created,
+        id_version,
+    );
+    let meta = meta_from_text(&text)?;
+    let meta_path = target.join(util::META_FILE);
+    meta.save(&meta_path)?;
+
+    println!("已创建 bundle：{}", target.display());
+    println!("  spec = {SPEC_VERSION}  str = {STR_MAJOR}");
+    println!("  policies.id_version = {id_version}");
+    println!(
+        "  {} 内已写入 {} 份校验 Schema",
+        SCHEMA_DIR,
+        crate::EMBEDDED_SCHEMAS.len()
+    );
+    Ok(())
+}
+
+/// ROOT `policies.id_version`（缺省 7）—— 生成端必须产出同版本的 UUID，否则 `E_ID_VERSION`。
+fn root_id_version(bundle: &Bundle) -> usize {
+    match bundle.read_meta(&bundle.root) {
+        Ok(MetaLoad::Ok(m, _)) => m.policies.id_version,
+        _ => 7,
+    }
+}
+
+/// 写回一份 `._meta` 并登记 `E_REVISION_STALE` 的历史基线（见 [`crate::baseline`]）。
+fn save_meta(bundle: &Bundle, dir: &Path, meta: &Meta) -> Result<()> {
+    meta.save(&bundle.meta_path(dir))?;
+    crate::baseline::record(bundle, dir, meta);
+    Ok(())
+}
+
+/// 取目标分支下标：给了 `uuid` 就解析；缺省目标为**当前节点**。
+///
+/// 规范 §9（v1.11.0 起）：`[uuid]` 省略时，`[dir]` 为 bundle 根即 ROOT，
+/// `[dir]` 指向 bundle 内部时为其所属分支（`<dir>` 本身或最近含 `._meta` 的祖先）。
+/// 本函数是这条规则的唯一实现点 —— 新增命令时复用它，不要各自内联缺省逻辑。
+fn target_branch(bundle: &Bundle, scan: &Scan, dir: &Path, uuid: Option<&str>) -> Result<usize> {
+    match uuid {
+        Some(u) => {
+            locate(scan, u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))
+        }
+        None => {
+            let mut probe = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+            loop {
+                if let Some(i) = scan.visits.iter().position(|v| v.dir == probe) {
+                    return Ok(i);
+                }
+                match probe.parent() {
+                    // `probe` 已到 bundle 根仍无 visit（根缺 `._meta`）→ 交由 root_index 报因
+                    Some(p) if probe != bundle.root => probe = p.to_path_buf(),
+                    _ => {
+                        return scan
+                            .root_index
+                            .ok_or_else(|| Error::BadArg("bundle 缺少 `._meta`".into()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `--out` 的统一出口：缺省或 `-` 走 stdout，其余路径写文件。
+fn emit(text: &str, out: Option<&str>) -> Result<()> {
+    match out {
+        None | Some("-") => {
+            print!("{text}");
+            Ok(())
+        }
+        Some(p) => std::fs::write(p, text).map_err(|e| Error::io(p, e)),
+    }
+}
+
+/// `str export` 的产物是派生数据，**不得**写回 bundle 内部（规范 §9）。
+///
+/// 比较前把目标路径的**最深已存在祖先**也 canonicalize：否则 `Bundle::new` 归一化过的
+/// 根路径与未归一化的 `--out`（macOS `/var` → `/private/var` 这类符号链接）会对不上，
+/// 判定形同虚设。
+fn resolve_out_path(bundle: &Bundle, out: &str) -> Result<PathBuf> {
+    let p = abs(out);
+    let probe = match p.parent() {
+        Some(dir) => canonical_ancestor(dir),
+        None => p.clone(),
+    };
+    if probe.starts_with(&bundle.root) {
+        return Err(Error::BadArg(format!(
+            "`--out` 不得指向 bundle 内部（{} 在 {} 内）：export 的产物是派生数据",
+            p.display(),
+            bundle.root.display()
+        )));
+    }
+    Ok(p)
+}
+
+/// `dir` 的最深已存在祖先（canonicalize 后）；一层都不存在时原样返回。
+fn canonical_ancestor(dir: &Path) -> PathBuf {
+    let mut cur = dir.to_path_buf();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(&cur) {
+            return resolved;
+        }
+        match cur.parent() {
+            Some(parent) if parent != cur => cur = parent.to_path_buf(),
+            _ => return dir.to_path_buf(),
+        }
+    }
+}
+
+// ─────────────────────────── validate ───────────────────────────
+
+/// 校验整个 bundle。
+pub fn validate(dir: &Path, strict: bool, json: bool, fix_manifest: bool) -> Result<i32> {
+    let bundle = open(dir)?;
+    if fix_manifest {
+        // 规范 §9：`--fix-manifest` 是「校验前先修正清单」——必须**真正写盘**。
+        sync(dir, false)?;
+    }
+    let mut report = crate::validate::validate(&bundle)?;
+    if strict {
+        // `--strict`：把告警也视为失败（CI 用）
+        for i in &mut report.issues {
+            if i.level == crate::error::Level::Warn {
+                i.level = crate::error::Level::Error;
+            }
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.to_json()).unwrap_or_default()
+        );
+    } else {
+        println!("{}", report.to_text());
+    }
+    Ok(report.exit_code())
+}
+
+// ─────────────────────────── tree ───────────────────────────
+
+/// 渲染分支树（含 `refs` 关联线）。
+pub fn tree(
+    dir: &Path,
+    max_depth: Option<usize>,
+    show_refs: bool,
+    show_entries: bool,
+    ascii: bool,
+) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let Some(ri) = scan.root_index else {
+        println!("（缺少 `._meta`，无法渲染）");
+        return Ok(());
+    };
+    // 根节点与子节点同样式：`[0] 标题  (type)`；根无 `type` 时以档位 `root` 兜底。
+    let v = &scan.visits[ri];
+    match v.meta.as_ref() {
+        Some(m) => {
+            let title = m
+                .title
+                .clone()
+                .or_else(|| m.name.clone())
+                .unwrap_or_else(|| bundle.name());
+            let kind_label = m.r#type.clone().unwrap_or_else(|| "root".to_string());
+            let mut line = format!("[0] {title}  ({kind_label})");
+            if !v.readable {
+                line.push_str("  ! 解析失败");
+            }
+            println!("{line}");
+        }
+        None => println!("[0] {}  ! 解析失败", bundle.name()),
+    }
+    if show_entries {
+        render_entries(&scan, ri, "  ");
+    }
+    render_children(&scan, ri, "", max_depth, show_refs, show_entries, ascii);
+    Ok(())
+}
+
+/// 渲染某分支的内容清单（`entries[]`，保持落盘次序；`node` / `branch` 结构行由树本身呈现，跳过）。
+fn render_entries(scan: &Scan, idx: usize, prefix: &str) {
+    let Some(meta) = scan.visits[idx].meta.as_ref() else {
+        return;
+    };
+    for e in &meta.entries {
+        if e.role == "node" || e.role == "branch" {
+            continue;
+        }
+        let mut line = format!("{prefix}· {}  ({})", e.path, e.role);
+        if let Some(t) = &e.title {
+            line.push_str(&format!("  {t}"));
+        }
+        if let Some(s) = e.size {
+            line.push_str(&format!("  {s}B"));
+        }
+        println!("{line}");
+    }
+}
+
+/// 树形符号：`(false)` 为 Unicode 制表符，`(true)` 为纯 ASCII（`--ascii`）。
+fn marks(ascii: bool) -> (&'static str, &'static str, &'static str, &'static str) {
+    if ascii {
+        ("|-- ", "`-- ", "|   ", "    ")
+    } else {
+        ("├─ ", "└─ ", "│  ", "   ")
+    }
+}
+
+/// 子分支下标，顺序取父级 `entries[]` 的 `(order, path)`（规范 §4.6：`order` 为同层排序键）。
+///
+/// 与 §4.9 的落盘顺序同源，因此 `str tree` 的次序与 `._meta` 中的条目次序一致。
+fn ordered_children(scan: &Scan, idx: usize) -> Vec<usize> {
+    let parent = scan.visits[idx].meta.as_ref();
+    let mut children: Vec<(i64, String, usize)> = Vec::new();
+    for (i, v) in scan.visits.iter().enumerate() {
+        if v.parent != Some(idx) {
+            continue;
+        }
+        let name = v
+            .dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let order = parent
+            .and_then(|m| m.entries.iter().find(|e| e.path == name))
+            .and_then(|e| e.order)
+            .unwrap_or(i64::MAX);
+        children.push((order, name, i));
+    }
+    children.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    children.into_iter().map(|(_, _, i)| i).collect()
+}
+
+fn render_children(
+    scan: &Scan,
+    idx: usize,
+    prefix: &str,
+    max_depth: Option<usize>,
+    show_refs: bool,
+    show_entries: bool,
+    ascii: bool,
+) {
+    let Some(meta) = scan.visits[idx].meta.as_ref() else {
+        return;
+    };
+    let children = ordered_children(scan, idx);
+    let (mid, last_mark, pipe, blank) = marks(ascii);
+    if show_refs {
+        let arrow = if ascii { "->" } else { "⇢" };
+        for r in &meta.refs {
+            let target = scan
+                .resolve(&r.target)
+                .map(|i| scan.visits[i].rel.clone())
+                .unwrap_or_else(|| format!("{}（未解析）", r.target));
+            println!("{prefix}{arrow} 关联: {target}  --{}--", r.rel);
+        }
+    }
+    for (n, ci) in children.iter().enumerate() {
+        let last = n + 1 == children.len();
+        let v = &scan.visits[*ci];
+        let (title, type_) = match v.meta.as_ref() {
+            Some(m) => (
+                m.title.clone().unwrap_or_default(),
+                m.r#type.clone().unwrap_or_default(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let mark = if last { last_mark } else { mid };
+        let mut line = format!("{prefix}{mark}[{}] {}", n + 1, title);
+        if !type_.is_empty() {
+            line.push_str(&format!("  ({type_})"));
+        }
+        if v.meta.is_none() {
+            line.push_str("  ! 解析失败");
+        }
+        println!("{line}");
+        let next_prefix = format!("{prefix}{}", if last { blank } else { pipe });
+        if show_entries {
+            render_entries(scan, *ci, &next_prefix);
+        }
+        if max_depth.map(|d| v.depth < d).unwrap_or(true) {
+            render_children(scan, *ci, &next_prefix, max_depth, show_refs, show_entries, ascii);
+        }
+    }
+}
+
+// ─────────────────────────── ls / show ───────────────────────────
+
+/// 列出某分支的清单（读 `._meta`）或磁盘原始内容。
+pub fn ls(dir: &Path, uuid: Option<String>, raw: bool) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let v = &scan.visits[idx];
+    println!("{}  （{}）", v.rel, if raw { "磁盘原始" } else { "清单" });
+    if raw {
+        for (name, is_dir) in bundle.list_names(&v.dir)? {
+            if util::is_meta_file(&name) {
+                continue;
+            }
+            println!("  {}{}", if is_dir { "d " } else { "- " }, name);
+        }
+        return Ok(());
+    }
+    let Some(meta) = v.meta.as_ref() else {
+        println!("  （`._meta` 解析失败）");
+        return Ok(());
+    };
+    for e in &meta.entries {
+        let mut line = format!("  {:<28} {}", e.path, e.role);
+        if let Some(t) = &e.title {
+            line.push_str(&format!("  {t}"));
+        }
+        if let Some(s) = e.size {
+            line.push_str(&format!("  {s}B"));
+        }
+        if e.optional {
+            line.push_str("  (optional)");
+        }
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// 打印某分支的 `._meta`（归一化 JSON）。（规范 §9：`<UUID>` 缺省为当前节点。）
+pub fn show(dir: &Path, uuid: Option<String>, full: bool) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let v = &scan.visits[idx];
+    let Some(meta) = v.meta.as_ref() else {
+        return Err(Error::BadArg(format!("{} 的 `._meta` 解析失败", v.rel)));
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&meta.to_json()).unwrap_or_default()
+    );
+    if full {
+        for e in &meta.entries {
+            if (e.role == "payload" || e.role == "asset") && !e.path.is_empty() {
+                let p = v.dir.join(&e.path);
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    println!("\n── {} ──\n{}", e.path, text);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────── node / branch ───────────────────────────
+
+/// 新增独立节点（深度 1，只能登记在 ROOT 下）。
+pub fn node_add(
+    dir: &Path,
+    type_: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+) -> Result<()> {
+    let bundle = open(dir)?;
+    // `[dir]` 指向分支/内容目录时明确拒绝 —— 独立节点只能挂在 ROOT，避免「在分支里
+    // 执行 node add 却把节点加到了 ROOT」的静默意外（规范 §9：拒绝必须带原因）。
+    let cur = std::fs::canonicalize(dir).map_err(|e| Error::io(dir, e))?;
+    if cur != bundle.root {
+        return Err(Error::BadArg(
+            "当前目录不是 bundle 根：`node add` 只能向 ROOT 新增深度 1 的独立节点；\
+             在分支下新增请改用 `branch add`"
+                .into(),
+        ));
+    }
+    let root = match bundle.read_meta(&bundle.root)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => {
+            return Err(Error::BadArg("root `._meta` 解析失败，无法新增节点".into()));
+        }
+    };
+    if root.kind != Some(Kind::Root) {
+        return Err(Error::BadArg("root `._meta` 的 kind 不是 root".into()));
+    }
+    let id = util::new_uuid(root.policies.id_version);
+    let created = util::now_rfc3339();
+    let child_dir = bundle.root.join(&id);
+    std::fs::create_dir_all(&child_dir).map_err(|e| Error::io(&child_dir, e))?;
+    let text = render_branch_meta(
+        Kind::Node,
+        &id,
+        type_.as_deref(),
+        title.as_deref(),
+        summary.as_deref(),
+        &created,
+    );
+    let child = meta_from_text(&text)?;
+    save_meta(&bundle, &child_dir, &child)?;
+
+    let mut root = root;
+    let order = root
+        .entries
+        .iter()
+        .filter(|e| e.role == "node")
+        .filter_map(|e| e.order)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let entry = Entry {
+        path: id.clone(),
+        role: "node".into(),
+        id: Some(id.clone()),
+        r#type: type_,
+        title,
+        summary,
+        order: Some(order),
+        ..Default::default()
+    };
+    root.upsert_entry(&entry);
+    root.sort_collections();
+    root.touch();
+    save_meta(&bundle, &bundle.root, &root)?;
+    println!("已新增独立节点 {id}（深度 1）");
+    Ok(())
+}
+
+/// 在指定分支下新增关联分支（任意深度）。
+///
+/// 规范 §9：`<ANCHOR-UUID>` 缺省为**当前节点**（`[dir]` 即 bundle 根时为 ROOT）；但真 ROOT 的
+/// 直接子分支是 `node` 而非 `branch`，因此缺省/显式落到真 ROOT 时由下方的深度判据拒绝并指引到
+/// `str node add`。
+pub fn branch_add(
+    dir: &Path,
+    anchor: Option<String>,
+    type_: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    order: Option<i64>,
+) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, anchor.as_deref())?;
+    if scan.visits[idx].depth == 0 {
+        return Err(Error::BadArg(
+            "ROOT 的直接子分支应使用 `str node add`（role = node）；\
+             `branch add` 的锚点须是深度 ≥ 1 的分支"
+                .into(),
+        ));
+    }
+    let anchor_dir = scan.visits[idx].dir.clone();
+    let mut parent = match bundle.read_meta(&anchor_dir)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => return Err(Error::BadArg("锚点 `._meta` 解析失败".into())),
+    };
+
+    let id = util::new_uuid(root_id_version(&bundle));
+    let created = util::now_rfc3339();
+    let child_dir = anchor_dir.join(&id);
+    std::fs::create_dir_all(&child_dir).map_err(|e| Error::io(&child_dir, e))?;
+    let text = render_branch_meta(
+        Kind::Branch,
+        &id,
+        type_.as_deref(),
+        title.as_deref(),
+        summary.as_deref(),
+        &created,
+    );
+    let child = meta_from_text(&text)?;
+    save_meta(&bundle, &child_dir, &child)?;
+
+    let order = order.unwrap_or_else(|| {
+        parent
+            .entries
+            .iter()
+            .filter(|e| e.is_branch())
+            .filter_map(|e| e.order)
+            .max()
+            .unwrap_or(0)
+            + 1
+    });
+    let entry = Entry {
+        path: id.clone(),
+        role: "branch".into(),
+        id: Some(id.clone()),
+        r#type: type_,
+        title,
+        summary,
+        order: Some(order),
+        ..Default::default()
+    };
+    parent.upsert_entry(&entry);
+    parent.sort_collections();
+    parent.touch();
+    save_meta(&bundle, &anchor_dir, &parent)?;
+    println!("已在 {} 下新增关联分支 {id}（深度 {}）", scan.visits[idx].rel, scan.visits[idx].depth + 1);
+    Ok(())
+}
+
+/// 删除关联分支（含其全部下级）。
+///
+/// 规范 §9：`<UUID>` 缺省为**当前节点** —— `[dir]` 指向某分支目录时即删除该分支本身
+/// （父级 `entries[]` 由全树扫描修复）；`[dir]` 为 bundle 根时目标为 ROOT，而 ROOT 不可删除，
+/// 故缺省调用会得到明确拒绝（而不是靠「参数缺失」这种不含原因的错误挡住）。
+pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let v = &scan.visits[idx];
+    if v.depth == 0 {
+        return Err(Error::BadArg(
+            "不能删除 ROOT（`[dir]` 为 bundle 根时 `<UUID>` 缺省即 ROOT；\
+             要删除某个分支，把 `[dir]` 指向它或显式给出其 id）"
+                .into(),
+        ));
+    }
+    if !force {
+        return Err(Error::BadArg(format!(
+            "删除 {} 会移除其全部下级，请加 `--force` 确认",
+            v.rel
+        )));
+    }
+    let target = v.dir.clone();
+    let rel = v.rel.clone();
+    let parent_idx = v.parent;
+    std::fs::remove_dir_all(&target).map_err(|e| Error::io(&target, e))?;
+
+    if let Some(pi) = parent_idx {
+        let parent_dir = scan.visits[pi].dir.clone();
+        let name = target
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut parent = match bundle.read_meta(&parent_dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => return Ok(()),
+        };
+        parent.remove_entry_path(&name);
+        parent.touch();
+        save_meta(&bundle, &parent_dir, &parent)?;
+    }
+    // 重扫一遍以丢弃被删分支的基线条目（否则 `E_REVISION_STALE` 基线会残留）
+    if let Ok(after) = bundle.scan() {
+        crate::baseline::record_scan(&bundle, &after);
+    }
+    println!("已删除 {rel}");
+    Ok(())
+}
+
+// ─────────────────────────── ref ───────────────────────────
+
+/// 新增跨枝关联线。（规范 §9：源分支 `<UUID>` 缺省为当前节点；`--target` 仍必填。）
+pub fn ref_add(
+    dir: &Path,
+    uuid: Option<String>,
+    target: &str,
+    rel: String,
+    title: Option<String>,
+    note: Option<String>,
+) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    if locate(&scan, target).is_none() {
+        return Err(Error::BadArg(format!("找不到目标分支 id `{target}`")));
+    }
+    let src_dir = scan.visits[idx].dir.clone();
+    let mut meta = match bundle.read_meta(&src_dir)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => return Err(Error::BadArg("源分支 `._meta` 解析失败".into())),
+    };
+    let ref_id = util::new_uuid_v7();
+    let order = meta.refs.len() as i64 + 1;
+    meta.push_ref(&RefItem {
+        id: ref_id.clone(),
+        target: target.to_string(),
+        rel,
+        title,
+        order: Some(order),
+        note,
+    });
+    meta.touch();
+    save_meta(&bundle, &src_dir, &meta)?;
+    // 源分支可能是缺省来的 ROOT / 当前节点（其 `id` 与目录名无关），故打印解析后的真实 `id`
+    let src_id = meta
+        .id
+        .clone()
+        .unwrap_or_else(|| scan.visits[idx].rel.clone());
+    println!("已新增关联线 {ref_id}：{src_id} → {target}");
+    Ok(())
+}
+
+/// 删除关联线。
+///
+/// 规范 §9 的形式是 `str ref rm <dir> <ref-uuid>`：只给关联线 id，由 CLI 在全 bundle 内定位
+/// 它所属的源分支。`--uuid <源分支>` 可把搜索范围钉死在一个分支上（旧版 `--ref` 形式等价）。
+pub fn ref_rm(dir: &Path, uuid: Option<String>, ref_id: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let has_ref = |i: usize| -> bool {
+        scan.visits[i]
+            .meta
+            .as_ref()
+            .map(|m| m.refs.iter().any(|r| r.id == ref_id))
+            .unwrap_or(false)
+    };
+    let idx = match uuid {
+        Some(u) => {
+            let i = locate(&scan, &u).ok_or_else(|| Error::BadArg(format!("找不到分支 id `{u}`")))?;
+            if !has_ref(i) {
+                return Err(Error::BadArg(format!("分支 `{u}` 内找不到关联线 `{ref_id}`")));
+            }
+            i
+        }
+        None => {
+            let hits: Vec<usize> = (0..scan.visits.len()).filter(|i| has_ref(*i)).collect();
+            match hits.as_slice() {
+                [only] => *only,
+                [] => return Err(Error::BadArg(format!("找不到关联线 `{ref_id}`"))),
+                _ => {
+                    let rels: Vec<String> =
+                        hits.iter().map(|i| scan.visits[*i].rel.clone()).collect();
+                    return Err(Error::BadArg(format!(
+                        "关联线 `{ref_id}` 在多个分支中出现（{}），请用 `--uuid` 指定源分支",
+                        rels.join("、")
+                    )));
+                }
+            }
+        }
+    };
+    let rel = scan.visits[idx].rel.clone();
+    let src_dir = scan.visits[idx].dir.clone();
+    let mut meta = match bundle.read_meta(&src_dir)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => return Err(Error::BadArg("分支 `._meta` 解析失败".into())),
+    };
+    if !meta.remove_ref(ref_id) {
+        return Err(Error::BadArg(format!("找不到关联线 `{ref_id}`")));
+    }
+    meta.touch();
+    save_meta(&bundle, &src_dir, &meta)?;
+    println!("已删除关联线 {ref_id}（源分支 {rel}）");
+    Ok(())
+}
+
+// ─────────────────── meta / entry / author（写入既有字段）───────────────────
+
+/// 允许的 `authors[].role`（规范 §4.4 与 `._schema` 枚举一致）。
+const AUTHOR_ROLES: &[&str] = &["owner", "editor", "viewer", "agent"];
+
+/// 读取目标分支的 `._meta`（供字段写入类命令复用）。
+fn read_target_meta(bundle: &Bundle, dir: &Path) -> Result<Meta> {
+    match bundle.read_meta(dir)? {
+        MetaLoad::Ok(m, _) => Ok(*m),
+        MetaLoad::Failed(_) => Err(Error::BadArg(format!(
+            "{} 的 `._meta` 解析失败",
+            bundle.rel(dir)
+        ))),
+    }
+}
+
+/// 至少给出一个字段，否则拒绝执行（避免「无参数空写」把 `revision` 白白推进）。
+fn need_one(given: bool, hint: &str) -> Result<()> {
+    if given {
+        Ok(())
+    } else {
+        Err(Error::BadArg(format!("至少需要指定一个字段（{hint}）")))
+    }
+}
+
+/// `str meta set`：设置分支自身（`._meta` 顶层）的元信息字段。
+///
+/// 空串表示**移除**该字段。字段语义见规范 §4.3。
+pub fn meta_set(
+    dir: &Path,
+    uuid: Option<String>,
+    type_: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    name: Option<String>,
+    tags: Option<Vec<String>>,
+) -> Result<()> {
+    need_one(
+        type_.is_some() || title.is_some() || summary.is_some() || name.is_some() || tags.is_some(),
+        "--type / --title / --summary / --name / --tags",
+    )?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    if let Some(v) = &type_ {
+        meta.set_str_or_remove("type", v);
+    }
+    if let Some(v) = &title {
+        meta.set_str_or_remove("title", v);
+    }
+    if let Some(v) = &summary {
+        meta.set_str_or_remove("summary", v);
+    }
+    if let Some(v) = &name {
+        meta.set_str_or_remove("name", v);
+    }
+    if let Some(v) = &tags {
+        // `--tags ""` → 清空；顺带滤掉空项（否则写出 `tags = [""]` 会被 Schema 拒绝）
+        let cleaned: Vec<String> = v.iter().filter(|s| !s.is_empty()).cloned().collect();
+        meta.set_str_array("tags", &cleaned);
+    }
+
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已更新 {rel} 的元信息");
+    Ok(())
+}
+
+/// `str entry set` 的字段补丁：`None` 表示不改动，`Some("")` 表示移除该键。
+#[derive(Debug, Clone, Default)]
+pub struct EntryPatch {
+    /// 子分支类型。
+    pub type_: Option<String>,
+    /// 展示名。
+    pub title: Option<String>,
+    /// 子分支摘要。
+    pub summary: Option<String>,
+    /// 备注。
+    pub note: Option<String>,
+    /// 同层排序键。
+    pub order: Option<i64>,
+}
+
+impl EntryPatch {
+    /// 是否一个字段都没给。
+    pub fn is_empty(&self) -> bool {
+        self.type_.is_none()
+            && self.title.is_none()
+            && self.summary.is_none()
+            && self.note.is_none()
+            && self.order.is_none()
+    }
+}
+
+/// `str entry set`：设置某分支 `entries[]` 中指定 `path` 条目的字段。
+///
+/// `str sync` 补登出来的行只有 `path` / `role` / `id`，其 `type` / `title` / `summary`
+/// 由此命令补齐 —— 不再需要「手改 `._meta` 的唯一例外」。空串表示移除该字段。
+pub fn entry_set(dir: &Path, uuid: Option<String>, path: &str, patch: &EntryPatch) -> Result<()> {
+    need_one(
+        !patch.is_empty(),
+        "--type / --title / --summary / --note / --order",
+    )?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    let mut applied = false;
+    for (key, val) in [
+        ("type", &patch.type_),
+        ("title", &patch.title),
+        ("summary", &patch.summary),
+        ("note", &patch.note),
+    ] {
+        if let Some(v) = val {
+            applied |= meta.set_entry_str(path, key, v);
+        }
+    }
+    if let Some(n) = patch.order {
+        applied |= meta.set_entry_int(path, "order", Some(n));
+    }
+    if !applied {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 内找不到 `path` = {path:?}"
+        )));
+    }
+
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已更新 {rel} 的条目 {path}");
+    Ok(())
+}
+
+/// `str author add`：按 `id` 新增 / 覆盖一条 `[[authors]]`（规范 §4.4）。
+pub fn author_add(
+    dir: &Path,
+    uuid: Option<String>,
+    id: String,
+    name: Option<String>,
+    role: String,
+    at: Option<String>,
+) -> Result<()> {
+    if !AUTHOR_ROLES.contains(&role.as_str()) {
+        return Err(Error::BadArg(format!(
+            "`--role` = {role:?} 非法（owner / editor / viewer / agent）"
+        )));
+    }
+    let at = match at {
+        Some(v) => {
+            let dt = v.parse::<toml_edit::Datetime>().map_err(|_| {
+                Error::BadArg(format!(
+                    "`--at` = {v:?} 不是合法 offset date-time（如 2026-09-14T10:03:11+08:00）"
+                ))
+            })?;
+            if dt.offset.is_none() {
+                return Err(Error::BadArg(format!("`--at` = {v:?} 缺少时区偏移（规范 4.1）")));
+            }
+            Some(dt.to_string())
+        }
+        None => Some(util::now_rfc3339()),
+    };
+
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    let added = meta.upsert_author(&Author {
+        id: id.clone(),
+        name,
+        role: role.clone(),
+        at,
+    });
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!(
+        "已{} {rel} 的协作者 {id}（role = {role}）",
+        if added { "新增" } else { "更新" }
+    );
+    Ok(())
+}
+
+/// `str author rm`：按 `id` 删除一条 `[[authors]]`。
+pub fn author_rm(dir: &Path, uuid: Option<String>, id: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+    if !meta.remove_author(id) {
+        return Err(Error::BadArg(format!("{rel} 内找不到协作者 `{id}`")));
+    }
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已删除 {rel} 的协作者 {id}");
+    Ok(())
+}
+
+// ─────────────────────────── entry add / entry rm ───────────────────────────
+
+/// `entries[]` 的全部合法 role。
+const ENTRY_ROLES: &[&str] = &[
+    "node", "branch", "payload", "asset", "dir", "schema", "cache", "other",
+];
+/// 要求磁盘对象是目录的 role。
+const DIR_ROLES: &[&str] = &["node", "branch", "dir", "schema", "cache"];
+
+/// `str entry add` 的可选字段。
+#[derive(Debug, Clone, Default)]
+pub struct EntryNew {
+    /// role（缺省按磁盘对象自动推断）。
+    pub role: Option<String>,
+    /// 子分支类型。
+    pub type_: Option<String>,
+    /// 展示名。
+    pub title: Option<String>,
+    /// 摘要。
+    pub summary: Option<String>,
+    /// 备注。
+    pub note: Option<String>,
+    /// 同层排序键。
+    pub order: Option<i64>,
+    /// 媒体类型（仅文件类条目；缺省按扩展名推断）。
+    pub media_type: Option<String>,
+    /// 登记为 `optional = true`（缺失被允许）。
+    pub optional: bool,
+}
+
+/// `str entry add`：向目标分支 `entries[]` 登记一个实体条目。
+///
+/// - `--path` 必须是单段名，且不得与既有登记重复；
+/// - 磁盘对象存在时自动补 `size` / `sha256`（文件）或 `count`（目录），
+///   `role` 缺省按对象类型推断（含 `._meta` 的目录按深度推断 node/branch）；
+/// - 磁盘对象不存在时必须给 `--optional`（先登记占位）；
+/// - 显式 `--role node|branch` 仅用于「收编」已含 `._meta` 的目录 —— 新建分支结构
+///   仍应使用 `node add` / `branch add`。
+pub fn entry_add(dir: &Path, uuid: Option<String>, path: &str, e: &EntryNew) -> Result<()> {
+    if path.is_empty() || path.contains('/') || path.contains('\\') {
+        return Err(Error::BadArg(format!(
+            "`--path` = {path:?} 非法：须是单段名（不含路径分隔符）"
+        )));
+    }
+    if util::is_reserved_name(path) || path == util::META_FILE || path == util::LOCK_FILE {
+        return Err(Error::BadArg(format!(
+            "`--path` = {path:?} 属格式保留名，禁止登记为业务条目"
+        )));
+    }
+    if let Some(r) = &e.role {
+        if !ENTRY_ROLES.contains(&r.as_str()) {
+            return Err(Error::BadArg(format!(
+                "`--role` = {r:?} 非法（{}）",
+                ENTRY_ROLES.join(" / ")
+            )));
+        }
+        if r == "other" && e.note.is_none() {
+            return Err(Error::BadArg(
+                "`role = \"other\"` 必须提供 `--note` 说明（规范 §4.6）".into(),
+            ));
+        }
+    }
+
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+
+    if meta.entries.iter().any(|x| x.path == path) {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 已登记 {path:?}（改字段用 `str entry set`）"
+        )));
+    }
+
+    let fs_path = target_dir.join(path);
+    let exists = fs_path.symlink_metadata().is_ok();
+    let is_dir = fs_path.is_dir();
+    if !exists && !e.optional {
+        return Err(Error::BadArg(format!(
+            "磁盘不存在 {rel}/{path}；若要先登记占位请加 `--optional`"
+        )));
+    }
+
+    // role 推断 / 磁盘一致性校验
+    let role = match &e.role {
+        Some(r) => {
+            let dir_role = DIR_ROLES.contains(&r.as_str());
+            if exists {
+                if dir_role && !is_dir {
+                    return Err(Error::BadArg(format!(
+                        "`--role {r}` 要求目录，但磁盘上是文件"
+                    )));
+                }
+                if !dir_role && is_dir {
+                    return Err(Error::BadArg(format!(
+                        "`--role {r}` 要求文件，但磁盘上是目录"
+                    )));
+                }
+            }
+            if matches!(r.as_str(), "node" | "branch") {
+                if exists && !bundle.has_meta(&fs_path) {
+                    return Err(Error::BadArg(format!(
+                        "{rel}/{path} 不含 `._meta`，不能登记为分支（新建分支用 `node add` / `branch add`）"
+                    )));
+                }
+                let want = if scan.visits[idx].depth == 0 { "node" } else { "branch" };
+                if r != want {
+                    return Err(Error::BadArg(format!(
+                        "深度 {} 的子分支必须是 `role = \"{want}\"`（`node` 仅限 ROOT 直下）",
+                        scan.visits[idx].depth
+                    )));
+                }
+            }
+            r.clone()
+        }
+        None => {
+            if !exists {
+                "payload".to_string()
+            } else if is_dir {
+                if bundle.has_meta(&fs_path) {
+                    if scan.visits[idx].depth == 0 { "node" } else { "branch" }.to_string()
+                } else {
+                    "dir".to_string()
+                }
+            } else {
+                guess_file_role(path).to_string()
+            }
+        }
+    };
+
+    let is_branch_role = matches!(role.as_str(), "node" | "branch");
+    let mut entry = if exists && is_dir {
+        if is_branch_role {
+            Entry {
+                path: path.to_string(),
+                role: role.clone(),
+                id: Some(path.to_string()),
+                ..Default::default()
+            }
+        } else {
+            Entry {
+                path: path.to_string(),
+                role: role.clone(),
+                count: child_count(&fs_path),
+                ..Default::default()
+            }
+        }
+    } else if exists {
+        Entry {
+            path: path.to_string(),
+            role: role.clone(),
+            media_type: e.media_type.clone().or_else(|| media_type_for(path)),
+            size: std::fs::metadata(&fs_path).ok().map(|m| m.len() as i64),
+            sha256: util::sha256_file(&fs_path).ok(),
+            ..Default::default()
+        }
+    } else {
+        // 占位登记（--optional）：不带指纹，由 sync 在实体落盘后补齐
+        Entry {
+            path: path.to_string(),
+            role: role.clone(),
+            ..Default::default()
+        }
+    };
+    entry.r#type = e.type_.clone();
+    entry.title = e.title.clone();
+    entry.summary = e.summary.clone();
+    entry.note = e.note.clone();
+    entry.order = e.order;
+    entry.optional = e.optional;
+
+    meta.upsert_entry(&entry);
+    meta.sort_collections();
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已登记 {rel}/{path}  role={role}");
+    Ok(())
+}
+
+/// `str entry rm`：把一个条目从目标分支 `entries[]` 的登记中移除。
+///
+/// **只移除登记，不删除磁盘文件**；磁盘文件由作者自行处置
+/// （`str sync` 之后会因「磁盘有、清单无」而重新补登）。
+pub fn entry_rm(dir: &Path, uuid: Option<String>, path: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let target_dir = scan.visits[idx].dir.clone();
+    let rel = scan.visits[idx].rel.clone();
+    let mut meta = read_target_meta(&bundle, &target_dir)?;
+    if !meta.entries.iter().any(|x| x.path == path) {
+        return Err(Error::BadArg(format!(
+            "{rel} 的 `entries[]` 内没有 {path:?}"
+        )));
+    }
+    meta.remove_entry_path(path);
+    meta.touch();
+    save_meta(&bundle, &target_dir, &meta)?;
+    println!("已移除登记 {rel}/{path}（磁盘文件未删除）");
+    Ok(())
+}
+
+// ─────────────────────────── ignore / policies ───────────────────────────
+
+/// `str ignore add`：向 ROOT `[policies].ignore` 追加一条模式（幂等）。
+pub fn ignore_add(dir: &Path, pattern: &str) -> Result<()> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err(Error::BadArg("忽略模式不能为空".into()));
+    }
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    let mut cur = meta.policies.ignore.clone();
+    if cur.iter().any(|p| p == pattern) {
+        println!("已存在（忽略名单未变化）：{pattern}");
+        return Ok(());
+    }
+    cur.push(pattern.to_string());
+    meta.set_policies_str_array("ignore", &cur);
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("已加入忽略名单（共 {} 条）：{pattern}", cur.len());
+    Ok(())
+}
+
+/// `str ignore rm`：从 ROOT `[policies].ignore` 移除一条模式。
+pub fn ignore_rm(dir: &Path, pattern: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    let mut cur = meta.policies.ignore.clone();
+    let Some(pos) = cur.iter().position(|p| p == pattern) else {
+        return Err(Error::BadArg(format!(
+            "忽略名单中没有 {pattern:?}（`str ignore list` 查看）"
+        )));
+    };
+    cur.remove(pos);
+    meta.set_policies_str_array("ignore", &cur);
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("已移出忽略名单（剩 {} 条）：{pattern}", cur.len());
+    Ok(())
+}
+
+/// `str ignore list`：查看 `policies.ignore` 与检测到的 `.gitignore` 来源。
+pub fn ignore_list(dir: &Path) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let policies = scan.visits[0]
+        .meta
+        .as_ref()
+        .map(|m| m.policies.clone())
+        .unwrap_or_default();
+    println!("policies.gitignore = {}", policies.gitignore);
+    if policies.ignore.is_empty() {
+        println!("policies.ignore：（空）");
+    } else {
+        println!("policies.ignore：");
+        for p in &policies.ignore {
+            println!("  - {p}");
+        }
+    }
+    println!(".gitignore 来源：");
+    let mut found = 0usize;
+    for v in &scan.visits {
+        if v.dir.join(".gitignore").is_file() {
+            let scope = if v.rel == "." { "bundle 根" } else { &v.rel };
+            println!("  - {scope}");
+            found += 1;
+        }
+    }
+    if found == 0 {
+        println!("  （无）");
+    }
+    Ok(())
+}
+
+/// `str policies set`：写入 ROOT `[policies]` 的标量键。
+///
+/// `ignore` 是数组键，须用 `str ignore add` / `str ignore rm` 维护。
+pub fn policies_set(dir: &Path, key: &str, val: &str) -> Result<()> {
+    use toml_edit::value;
+    let item = match key {
+        "id_version" => {
+            let v: usize = val.parse().map_err(|_| bad_policy(key, val))?;
+            if v != 4 && v != 7 {
+                return Err(bad_policy(key, val));
+            }
+            value(v as i64)
+        }
+        "max_depth" | "deep_tree_warn" => {
+            let v: i64 = val.parse().map_err(|_| bad_policy(key, val))?;
+            if v < 1 {
+                return Err(bad_policy(key, val));
+            }
+            value(v)
+        }
+        "large_asset_bytes" => {
+            let v: u64 = val.parse().map_err(|_| bad_policy(key, val))?;
+            value(v as i64)
+        }
+        "manifest" => match val {
+            "strict" | "advisory" => value(val.to_string()),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "sha256" => match val {
+            "required" | "optional" | "off" => value(val.to_string()),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "gitignore" => match val {
+            "true" | "false" => value(val == "true"),
+            _ => return Err(bad_policy(key, val)),
+        },
+        "ignore" => {
+            return Err(Error::BadArg(
+                "`ignore` 是数组键：追加 / 移除请用 `str ignore add` / `str ignore rm`，\
+                 `str ignore list` 查看"
+                    .into(),
+            ))
+        }
+        other => {
+            return Err(Error::BadArg(format!(
+                "未知策略键 {other:?}（id_version / max_depth / manifest / sha256 / \
+                 gitignore / large_asset_bytes / deep_tree_warn）"
+            )))
+        }
+    };
+    let bundle = open(dir)?;
+    let mut meta = read_target_meta(&bundle, &bundle.root)?;
+    meta.set_policies_value(key, Some(item));
+    meta.canonicalize();
+    meta.touch();
+    save_meta(&bundle, &bundle.root, &meta)?;
+    println!("policies.{key} = {val}");
+    Ok(())
+}
+
+fn bad_policy(key: &str, value: &str) -> Error {
+    Error::BadArg(format!("`policies.{key}` = {value:?} 非法"))
+}
+
+// ─────────────────────────── spec ───────────────────────────
+
+/// 校验并规整 `spec` 版本串。
+///
+/// 只接受形如 `1.<minor>.<patch>` 的值 —— 与 `._schema` 里 `^1\.[0-9]+\.[0-9]+$` 的正则一致
+/// （写进去的必须能通过 bundle 自己声明的 Schema）；允许 `v` 前缀，规整时去掉。
+/// `str` 主版本固定为 `1`（规范 §13：只有 `str` 主版本需要工具显式支持）。
+fn normalize_spec_version(raw: &str) -> Result<String> {
+    let v = raw.trim().trim_start_matches('v').trim().to_string();
+    let parts: Vec<&str> = v.split('.').collect();
+    let ok = parts.len() == 3
+        && parts[0] == "1"
+        && parts[1].parse::<u64>().is_ok()
+        && parts[2].parse::<u64>().is_ok();
+    if !ok {
+        return Err(Error::BadArg(format!(
+            "`spec` 版本串 {raw:?} 非法：须形如 `1.<minor>.<patch>`（`str` 主版本固定为 `1`）。\
+             注意自规范 v1.10.0 起 `spec set` 的参数顺序为 `<VERSION> [dir]`（如 `str spec set 1.10.0`）"
+        )));
+    }
+    Ok(v)
+}
+
+/// `str spec set`：把整份 bundle 声明的规范版本（`._meta.spec`）统一改写为 `version`。
+///
+/// 为什么是**整份 bundle**：`spec` 在三种档位里都是必填字段（规范 §4.3），只改 ROOT 会让
+/// 其余分支的声明与 ROOT 不一致 —— 文档就在说谎。子 bundle（`.str` 目录）是硬边界（§3.5），
+/// 不进入。只改写与目标值不同的分支，因此**幂等**（第二次「已更新 0 份」）。
+///
+/// 这是「不再需要手改 `._meta`」的最后一块：v1.9.0 之前 `spec` 没有任何 CLI 写入命令。
+pub fn spec_set(dir: &Path, version: &str, dry_run: bool) -> Result<()> {
+    let version = normalize_spec_version(version)?;
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+
+    // 先整体体检：任何一份 `._meta` 解析失败就拒绝执行 —— 既不半途写一半，也不静默跳过
+    let broken: Vec<String> = scan
+        .visits
+        .iter()
+        .filter(|v| v.meta.is_none())
+        .map(|v| v.rel.clone())
+        .collect();
+    if !broken.is_empty() {
+        return Err(Error::BadArg(format!(
+            "{} 份 `._meta` 解析失败（{}），改 `spec` 前请先修复",
+            broken.len(),
+            broken.join("、")
+        )));
+    }
+
+    // 计划：只挑 `spec` 与目标值不同的分支
+    let mut plan: Vec<(usize, String)> = Vec::new();
+    for (i, v) in scan.visits.iter().enumerate() {
+        let from = v
+            .meta
+            .as_ref()
+            .and_then(|m| m.spec.clone())
+            .unwrap_or_else(|| "（缺失）".to_string());
+        if from == version {
+            continue;
+        }
+        plan.push((i, from));
+    }
+    for (i, from) in &plan {
+        println!("~ {}  spec: {from} → {version}", scan.visits[*i].rel);
+    }
+    if !plan.is_empty() && version != SPEC_VERSION {
+        println!(
+            "注意：目标 `spec` = {version} 与本实现对应的规范版本（{SPEC_VERSION}）不同；\
+             `spec` 仅用于人类追溯，工具只强校验 `str` 主版本（规范 §13）"
+        );
+    }
+
+    if plan.is_empty() {
+        println!(
+            "全部 `._meta` 的 `spec` 已是 {version}（{} 份）",
+            scan.visits.len()
+        );
+        return Ok(());
+    }
+    if dry_run {
+        println!("（dry-run）将更新 {} 份 `._meta`", plan.len());
+        return Ok(());
+    }
+
+    for (i, _) in &plan {
+        let branch_dir = scan.visits[*i].dir.clone();
+        let mut work = match bundle.read_meta(&branch_dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => {
+                // 体检已通过，此处仅防御并发改动；一旦发生就中止，不留下写一半的结果
+                return Err(Error::BadArg(format!(
+                    "{} 的 `._meta` 解析失败，已中止（未写出部分结果）",
+                    scan.visits[*i].rel
+                )));
+            }
+        };
+        let had_spec = work.doc.as_table().contains_key("spec");
+        work.set_str("spec", &version);
+        if !had_spec {
+            // 缺失时插入会落到文件末尾，而 TOML 要求裸键写在任何表头之前 → 用 §4.9 规范化归位
+            work.canonicalize();
+        }
+        work.touch();
+        save_meta(&bundle, &branch_dir, &work)?;
+    }
+    println!("已更新 {} 份 `._meta`", plan.len());
+    Ok(())
+}
+
+// ─────────────────────────── sync ───────────────────────────
+
+/// 用磁盘实际状态修正全部 `entries`，并更新 `size` / `sha256`。
+pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let mut changed = 0usize;
+    let mut planned: Vec<String> = Vec::new();
+
+    for v in &scan.visits {
+        if v.meta.is_none() {
+            continue;
+        }
+        let dir_path = v.dir.clone();
+        let rel = v.rel.clone();
+        let mut work = match bundle.read_meta(&v.dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => continue,
+        };
+        let real = crate::validate::real_entries(&dir_path, &rel, &scan.ignore);
+        let declared: Vec<Entry> = work.entries.clone();
+        let mut touched = false;
+
+        // 补登
+        for (name, is_dir) in &real {
+            if declared.iter().any(|e| e.path == *name) {
+                continue;
+            }
+            let path = dir_path.join(name);
+            let e = if *is_dir {
+                if bundle.has_meta(&path) {
+                    Entry {
+                        path: name.clone(),
+                        role: if v.depth == 0 { "node" } else { "branch" }.into(),
+                        id: Some(name.clone()),
+                        order: Some(declared.len() as i64 + 1),
+                        ..Default::default()
+                    }
+                } else {
+                    Entry {
+                        path: name.clone(),
+                        role: "dir".into(),
+                        count: child_count(&path),
+                        ..Default::default()
+                    }
+                }
+            } else {
+                let meta_info = std::fs::metadata(&path).ok();
+                let size = meta_info.map(|m| m.len() as i64);
+                let sha = util::sha256_file(&path).ok();
+                Entry {
+                    path: name.clone(),
+                    role: guess_file_role(name).into(),
+                    media_type: media_type_for(name),
+                    size,
+                    sha256: sha,
+                    ..Default::default()
+                }
+            };
+            planned.push(format!("+ {rel}/{name}  role={}", e.role));
+            work.upsert_entry(&e);
+            touched = true;
+        }
+
+        // 移除已消失的条目 + 刷新指纹
+        for e in &declared {
+            let path = dir_path.join(&e.path);
+            if !path.exists() {
+                if !e.optional {
+                    planned.push(format!("- {rel}/{}", e.path));
+                    work.remove_entry_path(&e.path);
+                    touched = true;
+                }
+                continue;
+            }
+            if !e.is_file_like() {
+                continue;
+            }
+            let size = std::fs::metadata(&path).ok().map(|m| m.len() as i64);
+            let sha = util::sha256_file(&path).ok();
+            if size != e.size || sha != e.sha256 {
+                planned.push(format!("~ {rel}/{}  指纹更新", e.path));
+                let mut ne = e.clone();
+                ne.size = size;
+                ne.sha256 = sha;
+                if ne.media_type.is_none() {
+                    ne.media_type = media_type_for(&e.path);
+                }
+                work.upsert_entry(&ne);
+                touched = true;
+            }
+        }
+
+        if touched {
+            work.sort_collections();
+            work.touch();
+            changed += 1;
+            if !dry_run {
+                work.save(&bundle.meta_path(&dir_path))?;
+            }
+        }
+    }
+
+    for line in &planned {
+        println!("{line}");
+    }
+    if dry_run {
+        println!("（dry-run）将更新 {changed} 份 `._meta`");
+    } else {
+        // `sync` 是「与磁盘对齐」的总入口：顺手把 `E_REVISION_STALE` 的基线刷成当前状态。
+        if let Ok(after) = bundle.scan() {
+            crate::baseline::record_scan(&bundle, &after);
+        }
+        println!("已更新 {changed} 份 `._meta`");
+    }
+    Ok(())
+}
+
+fn guess_file_role(name: &str) -> &'static str {
+    match media_type_for(name).as_deref() {
+        Some("application/json")
+        | Some("application/toml")
+        | Some("application/yaml")
+        | Some("text/csv")
+        | Some("text/markdown")
+        | Some("text/plain") => "payload",
+        _ => "asset",
+    }
+}
+
+// ─────────────────────────── fmt ───────────────────────────
+
+/// 按规范 §4.9 键序 / 表序重写 `._meta`（保注释）。
+///
+/// 规范化**不触碰** `revision` / `updated_at`，因此不影响 `E_REVISION_STALE` 基线。
+pub fn fmt(dir: &Path, check: bool, strip_comments: bool) -> Result<i32> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let mut would_change = 0usize;
+    for v in &scan.visits {
+        if v.meta.is_none() {
+            continue;
+        }
+        let meta = match bundle.read_meta(&v.dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => continue,
+        };
+        let text = meta.canonical_text(strip_comments);
+        let path = bundle.meta_path(&v.dir);
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        if current != text {
+            would_change += 1;
+            if !check {
+                std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+                println!("已规范化 {}", v.rel);
+            }
+        }
+    }
+    if check {
+        if would_change == 0 {
+            println!("全部 `._meta` 已是规范形式");
+            return Ok(0);
+        }
+        println!("{would_change} 份 `._meta` 需要规范化");
+        return Ok(1);
+    }
+    if would_change == 0 {
+        println!("全部 `._meta` 已是规范形式");
+    }
+    Ok(0)
+}
+
+// ─────────────────────────── norm / context / export ───────────────────────────
+
+/// 输出归一化 JSON。
+///
+/// `--out -`（或缺省）写 stdout；给路径则写文件（规范 §9）。
+/// `<UUID>` 缺省为当前节点。
+pub fn norm(dir: &Path, uuid: Option<String>, out: Option<String>) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let Some(meta) = scan.visits[idx].meta.as_ref() else {
+        return Err(Error::BadArg("`._meta` 解析失败".into()));
+    };
+    let mut text = serde_json::to_string_pretty(&meta.to_json()).unwrap_or_default();
+    text.push('\n');
+    emit(&text, out.as_deref())
+}
+
+/// 生成供 AI 使用的上下文片段。（规范 §9：`<UUID>` 缺省为当前节点。）
+pub fn context(dir: &Path, uuid: Option<String>, depth: usize, budget: usize) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let mut out = String::new();
+    out.push_str(&format!("# STR 上下文：{}\n\n", bundle.name()));
+    render_context(&scan, idx, depth, &mut out, 0);
+    if out.len() > budget {
+        out.truncate(floor_char_boundary(&out, budget));
+        out.push_str("\n…（已按 --budget 截断）\n");
+    }
+    print!("{out}");
+    Ok(())
+}
+
+fn render_context(scan: &Scan, idx: usize, depth: usize, out: &mut String, level: usize) {
+    let v = &scan.visits[idx];
+    let Some(meta) = v.meta.as_ref() else {
+        return;
+    };
+    let indent = "  ".repeat(level);
+    out.push_str(&format!(
+        "{indent}- `{}` **{}** ({}) depth={}\n",
+        meta.id.clone().unwrap_or_default(),
+        meta.title.clone().unwrap_or_else(|| v.rel.clone()),
+        meta.r#type.clone().unwrap_or_else(|| "-".into()),
+        v.depth
+    ));
+    if let Some(s) = &meta.summary {
+        out.push_str(&format!("{indent}  {s}\n"));
+    }
+    if !meta.tags.is_empty() {
+        out.push_str(&format!("{indent}  tags: {}\n", meta.tags.join(", ")));
+    }
+    let files: Vec<String> = meta
+        .entries
+        .iter()
+        .filter(|e| !e.is_branch())
+        .map(|e| format!("{}({})", e.path, e.role))
+        .collect();
+    if !files.is_empty() {
+        out.push_str(&format!("{indent}  内容：{}\n", files.join("、")));
+    }
+    for r in &meta.refs {
+        let t = scan
+            .resolve(&r.target)
+            .map(|i| scan.visits[i].rel.clone())
+            .unwrap_or_else(|| r.target.clone());
+        out.push_str(&format!("{indent}  关联线 → {t} ({})\n", r.rel));
+    }
+    if level >= depth {
+        return;
+    }
+    let children = ordered_children(scan, idx);
+    for c in children {
+        render_context(scan, c, depth, out, level + 1);
+    }
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// 导出为单一 JSON / TOML（派生数据，只读）。
+///
+/// `--out -`（或缺省）写 stdout；给路径则写文件，且**不得**落在 bundle 内部（规范 §9）。
+pub fn export(
+    dir: &Path,
+    format: String,
+    depth: Option<usize>,
+    out: Option<String>,
+) -> Result<()> {
+    if !matches!(format.as_str(), "json" | "toml") {
+        return Err(Error::BadArg(format!(
+            "`--format` = {format:?} 非法（只允许 json / toml）"
+        )));
+    }
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let Some(root_idx) = scan.root_index else {
+        return Err(Error::BadArg("bundle 缺少 `._meta`".into()));
+    };
+    let value = export_node(&scan, root_idx, depth);
+    let mut text = if format == "toml" {
+        toml_from_json(&value, 0)
+    } else {
+        serde_json::to_string_pretty(&value).unwrap_or_default()
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    match out.as_deref() {
+        None | Some("-") => emit(&text, None),
+        Some(p) => {
+            let path = resolve_out_path(&bundle, p)?;
+            std::fs::write(&path, text).map_err(|e| Error::io(&path, e))
+        }
+    }
+}
+
+fn export_node(scan: &Scan, idx: usize, depth: Option<usize>) -> JValue {
+    let v = &scan.visits[idx];
+    let meta = match v.meta.as_ref() {
+        Some(m) => m.to_json(),
+        None => serde_json::json!({ "id": null, "error": "parse_failed" }),
+    };
+    let children = ordered_children(scan, idx);
+    let descend = depth.map(|d| v.depth < d).unwrap_or(true);
+    let kids: Vec<JValue> = if descend {
+        children.iter().map(|c| export_node(scan, *c, depth)).collect()
+    } else {
+        Vec::new()
+    };
+    serde_json::json!({
+        "path": v.rel,
+        "depth": v.depth,
+        "meta": meta,
+        "children": kids,
+    })
+}
+
+/// 简易 JSON → TOML（仅用于 `str export --format toml`）。
+fn toml_from_json(v: &JValue, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    match v {
+        JValue::Object(m) => {
+            let mut scalars = String::new();
+            let mut tables = String::new();
+            for (k, val) in m {
+                match val {
+                    JValue::Object(_) | JValue::Array(_) => {
+                        tables.push_str(&format!("\n{pad}[{k}]\n{}", toml_from_json(val, indent + 1)));
+                    }
+                    _ => scalars.push_str(&format!("{pad}{k} = {}\n", toml_from_json(val, 0))),
+                }
+            }
+            format!("{scalars}{tables}")
+        }
+        JValue::Array(items) => {
+            if items.iter().all(|i| matches!(i, JValue::Object(_))) {
+                let mut s = String::new();
+                for it in items {
+                    s.push_str(&format!("{pad}[[_item]]\n{}", toml_from_json(it, indent + 1)));
+                }
+                s
+            } else {
+                let inner: Vec<String> = items.iter().map(|i| toml_from_json(i, 0)).collect();
+                format!("[{}]", inner.join(", "))
+            }
+        }
+        JValue::String(s) => toml_str(s),
+        JValue::Bool(b) => b.to_string(),
+        JValue::Number(n) => n.to_string(),
+        JValue::Null => "\"\"".to_string(),
+    }
+}
+
+// ─────────────────────────── reveal ───────────────────────────
+
+/// 平台适配：macOS 上把 `.str` 目录标记为 bundle，并让 `._meta` 可见。
+pub fn reveal(dir: &Path) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let root = bundle.root.display().to_string();
+    if cfg!(target_os = "macos") {
+        // Finder 里显示包内容的前提是 bundle 位（SetFile 属于 Xcode CLI 工具）
+        let status = std::process::Command::new("SetFile")
+            .args(["-a", "B", &root])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("已设置 bundle 位：{root}"),
+            _ => println!(
+                "未找到 `SetFile`（需 Xcode Command Line Tools）。手动执行：SetFile -a B {}",
+                root
+            ),
+        }
+        let mut n = 0;
+        for v in &scan.visits {
+            let p = bundle.meta_path(&v.dir);
+            let _ = std::process::Command::new("chflags")
+                .args(["nohidden", &p.display().to_string()])
+                .status();
+            n += 1;
+        }
+        println!("已取消 {n} 个 `._meta` 的隐藏标记");
+    } else {
+        println!("当前平台无 bundle 概念：`.str` 就是普通目录，`._meta` 为点文件（可能默认隐藏）。");
+    }
+    Ok(())
+}
+
+// ─────────────────────────── codes ───────────────────────────
+
+/// 列出全部错误码（测试矩阵用）。
+pub fn list_codes() {
+    for c in code::ALL {
+        println!("{c}");
+    }
+}
+
+/// 便捷：把相对路径映射为绝对路径。
+pub fn abs(p: &str) -> PathBuf {
+    let path = Path::new(p);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
