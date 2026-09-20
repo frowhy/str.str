@@ -1,0 +1,20 @@
+str = 1
+spec = "1.13.0"
+kind = "node"
+id = "01928f3a-7c4b-7003-8a03-000000000003"
+type = "crm.tag_system"
+title = "标签体系"
+summary = "客户与订单共用的标签字典。"
+tags = ["taxonomy"]
+revision = 3
+created_at = 2026-09-03T15:30:00+08:00
+updated_at = 2026-09-18T15:59:33+00:00
+
+[[entries]]
+path = "tags.json"
+role = "payload"
+media_type = "application/json"
+size = 63
+sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
+
+[ext]
