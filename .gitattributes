@@ -1,0 +1,6 @@
+# 补丁文件必须保持 LF：跨平台（含 Windows runner 的 git-bash）`git apply` 对
+# CRLF 补丁会因行尾不匹配而失败，这里显式锁定，不随 checkout 平台转换。
+*.patch text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

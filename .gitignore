@@ -1,0 +1,31 @@
+# ── 操作系统噪声 ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+# macOS AppleDouble 伴生文件（exFAT/SMB/zip 解压产物）
+**/._*
+# ⚠ STR 格式自身就使用 ._ 前缀，规范文件必须入库（顺序敏感：后者覆盖前者）
+!**/._meta
+!**/._schema/
+# 派生缓存不入库（规范 §7.4）
+**/._cache/
+**/.lock
+
+# ── 实现产物（str-cli/ 为 Rust 工程根）────────────────────
+# Rust
+str-cli/target/
+str-gui/target/
+# scripts/vendor-winit.sh 生成的补丁版 winit 源码：不可入库，须从钉死的 tarball + 补丁复现
+str-gui/vendor/
+# Node
+node_modules/
+dist/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+# 编辑器
+.idea/
+.vscode/
+*.swp
