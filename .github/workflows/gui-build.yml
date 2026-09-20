@@ -1,0 +1,263 @@
+name: gui-build
+
+# str-gui 的自动化编译。
+#
+# 平台分层：
+#   - macOS（aarch64 / x86_64）：受支持平台。GUI 的 macOS 拖放（AppKit
+#     draggingUpdated:）与配色上报（NSAppearance）能力依赖 str-gui/patches/
+#     下的平台专属补丁，日常开发与运行验证都在 macOS 上进行。
+#     产物：按架构的 Str.app 安装镜像（dmg，内含拖入 Applications 的引导软链）。
+#   - Linux / Windows（x86_64）：实验性编译验证。代码里的平台分支（文件管理器
+#     reveal 的 open/explorer/xdg-open、剪贴板读取的 cfg）已就位，但运行时
+#     行为未经人工测试——它们先跑通编译，产物上传供自行验证。
+#
+# job 结构：
+#   build      矩阵编译；macOS 额外出 dmg，并上传裸二进制供 universal 合并
+#   universal  lipo 合并双架构 → Universal Str.app → zip
+#   release-gui tag 触发时把 dmg 与 universal zip 发布到 GitHub Release
+#
+# 触发：
+#   - push 到 main 且改动落在 str-gui/ 或本工作流
+#   - push v* tag（此时 release-gui 才会上传到 Release）
+#   - PR 改动 str-gui/
+#   - Actions 页手动 workflow_dispatch
+#
+# 构建前必须先跑两个 vendor 脚本：str-gui 的 slint / winit 依赖是
+# 「钉死 rev 的上游源码 + 本仓库补丁」的生成物（vendor/ 已 gitignore），
+# 任何人 clone 后都要先执行它们才能得到字节一致的依赖源码。
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "str-gui/**"
+      - ".github/workflows/gui-build.yml"
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "str-gui/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 两个架构都在 macos-latest 上编译：Xcode SDK 同时含两种
+          # slice，不依赖已退役的 macos-13（x86_64）runner
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            tier: supported
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            tier: supported
+          # Linux：winit 后端需要 X11 / Wayland / xkbcommon / fontconfig 的
+          # 开发库；产物依赖运行时动态库，未随 artifact 打包说明。
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            tier: experimental
+            apt: >-
+              libfontconfig1-dev
+              libxcb1-dev
+              libxcb-render0-dev
+              libxcb-shape0-dev
+              libxcb-xfixes0-dev
+              libxkbcommon-dev
+              libwayland-dev
+          # Windows：原生 MSVC 编译
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            tier: experimental
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检
+        run: rustc --version
+
+      - name: 安装目标平台标准库
+        run: rustup target add ${{ matrix.target }}
+
+      # Linux：winit 后端需要的系统库（macOS / Windows 的系统库已随 runner 提供）
+      - name: 安装 Linux GUI 系统库
+        if: matrix.apt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      # 幂等：vendor/ 已存在且 stamp 校验和一致时直接跳过；CI 全新环境会
+      # 完整执行（下载约 11MB tarball + 校验 + 打补丁 + 特征断言）。
+      # shell: bash 让同一份 bash 脚本在 windows runner 的 git-bash 里也能跑。
+      - name: 生成 vendored 依赖（slint + winit 补丁源码）
+        shell: bash
+        run: |
+          bash str-gui/scripts/vendor-slint.sh
+          bash str-gui/scripts/vendor-winit.sh
+
+      - name: 编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: str-gui
+          key: ${{ matrix.target }}
+
+      - name: 编译 release
+        working-directory: str-gui
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # ── macOS：组装 Str.app 并按架构打包 dmg ──
+      # dmg 内含拖入 Applications 的引导软链；产物未公证，接收方首次打开
+      # 需右键 → 打开，或 `xattr -cr` 去除隔离属性。
+      - name: 组装 Str.app（单架构，ad-hoc 签名）
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_SHA:0:7}"
+          APP=Str.app
+          mkdir -p "$APP/Contents/MacOS"
+          sed "s/@VERSION@/$VERSION/" str-gui/assets/Info.plist \
+            > "$APP/Contents/Info.plist"
+          cp "str-gui/target/${{ matrix.target }}/release/str-gui" \
+            "$APP/Contents/MacOS/str-gui"
+          chmod +x "$APP/Contents/MacOS/str-gui"
+          codesign --force --sign - "$APP"
+
+      - name: 打包按架构 dmg
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          mkdir -p dmgroot dist
+          cp -R Str.app dmgroot/
+          ln -s /Applications dmgroot/Applications
+          hdiutil create -volname "STR Editor" -srcfolder dmgroot \
+            -ov -format UDZO -o "str-gui-${{ matrix.target }}.dmg"
+
+      - name: 上传裸二进制（供 universal 合并）
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-bin-${{ matrix.target }}
+          path: str-gui/target/${{ matrix.target }}/release/str-gui
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传按架构 dmg
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-dmg-${{ matrix.target }}
+          path: str-gui-${{ matrix.target }}.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传产物（windows）
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-${{ matrix.target }}
+          path: str-gui/target/${{ matrix.target }}/release/str-gui.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传产物（linux）
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-${{ matrix.target }}
+          path: str-gui/target/${{ matrix.target }}/release/str-gui
+          if-no-files-found: error
+          retention-days: 7
+
+  # 把两个架构的二进制 lipo 成 Universal，组装成可分发的 Universal Str.app。
+  universal:
+    name: universal .app
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载两个架构的二进制
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: str-gui-bin-*
+
+      - name: 合并为 Universal 二进制
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          lipo -create \
+            artifacts/str-gui-bin-aarch64-apple-darwin/str-gui \
+            artifacts/str-gui-bin-x86_64-apple-darwin/str-gui \
+            -output dist/str-gui
+          lipo -info dist/str-gui
+
+      - name: 组装 Universal Str.app（ad-hoc 签名）
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_SHA:0:7}"
+          APP=Str.app
+          mkdir -p "$APP/Contents/MacOS"
+          sed "s/@VERSION@/$VERSION/" str-gui/assets/Info.plist \
+            > "$APP/Contents/Info.plist"
+          cp dist/str-gui "$APP/Contents/MacOS/str-gui"
+          chmod +x "$APP/Contents/MacOS/str-gui"
+          codesign --force --sign - "$APP"
+          zip -qry "dist/str-gui-universal.zip" "$APP"
+
+      - name: 上传 Universal .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: str-gui-universal
+          path: dist/str-gui-universal.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # tag 触发时把 dmg 与 universal zip 发布到 GitHub Release。
+  # 与 release.yml 并行：若它尚未建好 release，这里兜底创建；
+  # 资产名互不冲突（CLI 用 str-<tag>-<target>，GUI 用 str-gui- 前缀）。
+  release-gui:
+    name: release gui artifacts
+    needs: [build, universal]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 GUI 产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: str-gui-*
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp artifacts/str-gui-dmg-*/str-gui-*.dmg dist/
+          cp artifacts/str-gui-universal/str-gui-universal.zip dist/
+          ( cd dist && shasum -a 256 ./* > SHA256SUMS.txt )
+          ls -la dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "STR $TAG" --generate-notes \
+              || gh release upload "$TAG" dist/* --clobber
+          fi

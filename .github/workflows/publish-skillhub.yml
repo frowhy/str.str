@@ -1,0 +1,171 @@
+name: publish-skillhub
+
+# 把 `str-skill` 发布到 SkillHub（skillhub.cn）。
+#
+# 触发：
+#   - push tag `v*`      —— 与 release.yml / publish.yml 同一个 tag 触发；三者互相独立，
+#                           本工作流失败**不影响** GitHub Release 与 crates.io 发布。
+#   - workflow_dispatch  —— 手动发布 / 演练；`dry_run` 默认 true，必须显式关掉才会上传。
+#
+# 鉴权：GitHub Secret `SKILLHUB_KEY`（SkillHub 个人 API Token，形如 `skh_...`）。
+#   获取：skillhub.cn 登录（**需先完成实名认证**）→ 个人中心 → API keys → 创建。
+#   配置：仓库 Settings → Secrets and variables → Actions → New repository secret。
+#   ⚠ Token 只在创建时完整显示一次；工作流里只经环境变量注入，不打印、不落盘到仓库。
+#
+# 发布身份来自 `str-skill/SKILL.md` 的 frontmatter（`slug` / `displayName` / `version` /
+# `summary` / `license`），真源登记在 `VERSIONS.toml` 的 `[skill]`，由 `scripts/check-versions.sh`
+# 守卫 —— 所以「发布的 slug 与真源不一致」这类错误会在发布前就被拦下。
+#
+# ⚠ `slug` 是全网唯一且**首次发布后不应更改**：改了在平台上就是另一个 skill。
+#
+# 幂等：tag 触发时会比较本次 tag 与上一个 tag 之间 `str-skill/` 是否有变化 ——
+#   没有变化即跳过发布（技能包是独立的一条版本轴，CLI / 规范发版不必连带重发技能包）。
+#   手动触发可用 `force` 覆盖该判断。
+#
+# 常用错误码（来自官方发布指南，便于排障）：
+#   401 Token 无效 / 已撤销 → 重建 API key 并更新 Secret
+#   403 未完成实名认证     → 回 skillhub.cn 完成实名认证
+#   409 slug 已被占用      → 换一个全网唯一的 slug（**并同步 `VERSIONS.toml` 与 SKILL.md**）
+#   429 触发限频           → 等约 1 分钟后重试
+#
+# 本地预检不需要 Token（`--dry-run` 仅校验 frontmatter 与打包，不发起任何 HTTP 请求）：
+#   skillhub publish str-skill --dry-run
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "仅本地预检（不发起发布请求）"
+        type: boolean
+        default: true
+      force:
+        description: "即使 str-skill/ 自上一条 tag 以来没有变化也发布"
+        type: boolean
+        default: false
+      changelog:
+        description: "本次变更说明（留空则自动取 str-skill/CHANGELOG.md 中当前版本一节）"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-skillhub
+  cancel-in-progress: false
+
+env:
+  SKILL_DIR: str-skill
+  SKILLHUB_HOST: https://api.skillhub.cn
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: skillhub publish
+    runs-on: ubuntu-latest
+    steps:
+      # 需要完整历史：下一个步骤要 diff 上一条 tag 与本条 tag 之间的 str-skill/
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 SkillHub CLI
+        run: |
+          set -euo pipefail
+          # 官方 bootstrap 只是下载 kit 后 `bash cli/install.sh "$@"`（参数全部转发），
+          # `--cli-only` 只装 CLI（需 python3；写 ~/.skillhub/ 与 ~/.local/bin/skillhub；不需要 sudo）。
+          # `--no-self-upgrade`：把 auto_self_upgrade=false 持久化进 ~/.skillhub/config.json ——
+          # 该 CLI 每次启动都会自查更新（甚至可能交互提示），在 CI 里既要确定性也不能挂住，
+          # 官方也建议「版本必须稳定」的部署这样用。
+          curl -fsSL https://skillhub.cn/install/install.sh | bash -s -- --cli-only --no-self-upgrade
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: 版本一致性门禁 + CLI 自检
+        run: |
+          set -euo pipefail
+          bash scripts/check-versions.sh
+          skillhub --version
+
+      # 本地预检：只校验 frontmatter + 打包，不发起 HTTP 请求，因此不需要 Token，
+      # 也不会因为 Secret 缺失而失败。它跑的是平台自己的 `_validate_metadata()` ——
+      # 缺 `slug` / `version` / `displayName`、`slug` 非 kebab-case、`version` 非合法 SemVer
+      # 都会在这里以非零退出码拦住。注意：这只是**平台侧**的必填校验，不含「与真源一致」——
+      # 那由上面的 check-versions.sh 负责，两者互补。
+      - name: 本地预检（--dry-run）
+        run: skillhub publish "${SKILL_DIR}" --dry-run
+
+      - name: 判断是否需要发布（技能包轴是否真的变了）
+        id: gate
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ inputs.force }}" != "true" ]; then
+            prev_tag="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+            if [ -n "${prev_tag}" ] && git diff --quiet "${prev_tag}" "${TAG}" -- "${SKILL_DIR}"; then
+              echo "::notice::${prev_tag}..${TAG} 之间 ${SKILL_DIR}/ 无变化，跳过发布（技能包是一条独立版本轴）"
+              echo "publish=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "对照基线：${prev_tag:-（无上一条 tag）}"
+          fi
+          echo "publish=true" >> "${GITHUB_OUTPUT}"
+
+      - name: 发布到 SkillHub
+        if: steps.gate.outputs.publish == 'true' && (github.event_name == 'push' || inputs.dry_run == false)
+        env:
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_KEY }}
+          CHANGELOG_INPUT: ${{ inputs.changelog }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SKILLHUB_KEY:-}" ]; then
+            echo "::error::缺少 Secret SKILLHUB_KEY。请到 skillhub.cn 完成实名认证 → 个人中心 → API keys 创建 Token，再于仓库 Settings → Secrets and variables → Actions 添加名为 SKILLHUB_KEY 的 Secret。"
+            exit 1
+          fi
+
+          # 用 awk 而非 `sed … | head`：本步骤带 `set -euo pipefail`，而 `head` 提前退出会让
+          # `sed` 收到 SIGPIPE（141），在 pipefail 下会中止步骤。awk 取到即 exit，无此风险。
+          skill_slug="$(awk -F': ' '/^slug: /{print $2; exit}' "${SKILL_DIR}/SKILL.md")"
+          skill_ver="$(awk -F': ' '/^version: /{print $2; exit}' "${SKILL_DIR}/SKILL.md")"
+
+          # 变更说明：优先用入参，其次取 CHANGELOG 里标题含当前版本号的那一节，最后兜底一句话。
+          changelog="${CHANGELOG_INPUT:-}"
+          if [ -z "${changelog}" ]; then
+            changelog="$(awk -v v="${skill_ver}" '
+              /^## / { if (found) exit; found = (index($0, v) > 0); next }
+              found { print }
+            ' "${SKILL_DIR}/CHANGELOG.md" | sed '/^[[:space:]]*$/d')"
+          fi
+          if [ -z "${changelog}" ]; then
+            changelog="str-skill ${skill_ver}（发行 ${TAG}）"
+          fi
+
+          echo "发布 ${skill_slug}@${skill_ver}"
+          echo "--- changelog ---"
+          printf '%s\n' "${changelog}"
+          echo "-----------------"
+          skillhub login --key "${SKILLHUB_KEY}" --host "${SKILLHUB_HOST}"
+          skillhub auth whoami
+          skillhub publish "${SKILL_DIR}" --host "${SKILLHUB_HOST}" --changelog "${changelog}"
+
+      - name: 结果摘要
+        if: always()
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "### SkillHub 发布"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 技能目录 | \`${SKILL_DIR}\` |"
+            echo "| slug / version | \`$(awk -F': ' '/^slug: /{print $2; exit}' "${SKILL_DIR}/SKILL.md")@$(awk -F': ' '/^version: /{print $2; exit}' "${SKILL_DIR}/SKILL.md")\` |"
+            echo "| 触发 | \`${TAG}\` / \`${{ github.event_name }}\` |"
+            echo "| 是否走到发布步骤 | \`${{ steps.gate.outputs.publish || 'false' }}\` |"
+            echo ""
+            echo "https://skillhub.cn"
+          } >> "${GITHUB_STEP_SUMMARY}"
