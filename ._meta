@@ -1,0 +1,108 @@
+# ── STR 自举：本仓库自身即一个 .str bundle ──────────────────────
+# ROOT 的 [[entries]] 中 role = "node" 的条目才是「分支」；
+# 其余 role（payload / dir / bundle / cache）是 ROOT 的内容。
+str = 1
+spec = "1.13.0"
+kind = "root"
+id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
+name = "str"
+title = "STR 结构化树资源格式 · 规范与参考实现"
+summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
+tags = ["str", "format", "self-hosted"]
+revision = 72
+created_at = 2026-09-14T01:26:52+08:00
+updated_at = 2026-09-20T14:24:22+00:00
+
+[policies]
+id_version = 7
+max_depth = 32
+manifest = "strict"
+sha256 = "optional"
+large_asset_bytes = 10485760
+deep_tree_warn = 16
+
+[[authors]]
+id = "u:frowhy"
+name = "Frowhy"
+role = "owner"
+at = 2026-09-14T01:26:52+08:00
+
+[[entries]]
+path = "CHANGELOG.md"
+role = "payload"
+media_type = "text/markdown"
+size = 24577
+sha256 = "fa1e8ca79acaabca8b58019ab889534bc7906b3502122541751dbcbcc2a38575"
+
+[[entries]]
+path = "LICENSE-APACHE"
+role = "asset"
+title = "Apache License 2.0"
+size = 11357
+sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+
+[[entries]]
+path = "LICENSE-MIT"
+role = "asset"
+title = "MIT 许可证"
+size = 1061
+sha256 = "563e5a728846d6ccf046f433476fb851dc8f106995e23d364b8712ed39a4505c"
+
+[[entries]]
+path = "README.md"
+role = "payload"
+media_type = "text/markdown"
+size = 21713
+sha256 = "15a952ff1bdb02136ecd2a8ae20f774d802da43cca8c08d256b02ee4344f2ba2"
+
+[[entries]]
+path = "SPEC-CHANGELOG.md"
+role = "payload"
+media_type = "text/markdown"
+size = 5378
+sha256 = "3946af6094b7d327dbc3c1a3d038992bd42261c11e0888eef7feb4895ed6874b"
+
+[[entries]]
+path = "SPEC.md"
+role = "payload"
+title = "规范正文（唯一真源）"
+media_type = "text/markdown"
+size = 86586
+sha256 = "6031b17c096d22da22c2f4cecf26ad2d27d5c9b87b1f1abb473f8ea0f3095bd5"
+
+[[entries]]
+path = "VERSIONS.toml"
+role = "payload"
+media_type = "application/toml"
+size = 5192
+sha256 = "bb8446fdca1e5741057e9df5cce9a4ef3407f9af2f83e9e0f78c079dcbd2c209"
+
+[[entries]]
+path = "examples"
+role = "dir"
+title = "示例 bundle 目录"
+
+[[entries]]
+path = "scripts"
+role = "dir"
+title = "辅助脚本"
+
+[[entries]]
+path = "str-cli"
+role = "dir"
+title = "Rust 参考实现（CLI）"
+
+[[entries]]
+path = "str-gui"
+role = "dir"
+type = "code.project"
+title = "GUI 编辑器（Rust + Slint）"
+summary = "STR bundle 的 Slint 桌面编辑器：树形浏览、元信息编辑、分支增删与内置校验"
+count = 6
+
+[[entries]]
+path = "str-skill"
+role = "dir"
+title = "AI Agent 技能包（强制经 str CLI 操作 .str）"
+
+[ext]
