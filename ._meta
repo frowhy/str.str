@@ -9,9 +9,9 @@ name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 72
+revision = 73
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-20T14:24:22+00:00
+updated_at = 2026-09-21T11:40:02+00:00
 
 [policies]
 id_version = 7
@@ -31,8 +31,8 @@ at = 2026-09-14T01:26:52+08:00
 path = "CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 24577
-sha256 = "fa1e8ca79acaabca8b58019ab889534bc7906b3502122541751dbcbcc2a38575"
+size = 25382
+sha256 = "f6fa67007984b8f2226ec191e0cfd5b0f90c41e1e830565eaf4fd484071d337e"
 
 [[entries]]
 path = "LICENSE-APACHE"
@@ -53,7 +53,7 @@ path = "README.md"
 role = "payload"
 media_type = "text/markdown"
 size = 21713
-sha256 = "15a952ff1bdb02136ecd2a8ae20f774d802da43cca8c08d256b02ee4344f2ba2"
+sha256 = "55d5a0aee30e157842ec807fd7136c31198ad7da45705077984c6377807fbf2a"
 
 [[entries]]
 path = "SPEC-CHANGELOG.md"
@@ -75,7 +75,7 @@ path = "VERSIONS.toml"
 role = "payload"
 media_type = "application/toml"
 size = 5192
-sha256 = "bb8446fdca1e5741057e9df5cce9a4ef3407f9af2f83e9e0f78c079dcbd2c209"
+sha256 = "992e326e89ab712e15ece8d3553e07de7f2773d4538c6f3f8870a34fd3ee5661"
 
 [[entries]]
 path = "examples"

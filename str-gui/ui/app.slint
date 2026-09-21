@@ -50,6 +50,9 @@ export global DndApi {
     in-out property <int> src-visit: -1;
     // 内部条目拖拽的载荷（拖拽开始时写入，规避 data-transfer 文本往返问题）。
     in-out property <string> payload;
+    // 条目拖拽进行中（行 DragArea 写入）：选中组内的其余行同步变暗，
+    // 与被抓取行保持一致的「正在被拖」视觉（Finder 语义）。
+    in-out property <bool> entry-drag-active: false;
     // ── 导图边缘自动滚动 ──
     // 光标在 mind 可视区内的坐标（由画布级 / 节点级 DropArea 的 can-drop 持续上报）。
     in-out property <length> mind-pos-x: -1px;
@@ -73,6 +76,7 @@ export global DndApi {
         hover-src-top = false;
         hover-external = false;
         payload = "";
+        entry-drag-active = false;
     }
 
     /// 清空「上一个悬停区域」留下的指示，并复位画布边缘滚动。
@@ -108,18 +112,40 @@ export global EntryApi {
     callback select-entry(int);
     callback clear-selection();
     callback toggle-dir(int);
-    callback entry-open(int);
-    callback entry-reveal(int);
-    callback entry-rename-open(int);
-    callback entry-copy(int);
-    callback entry-cut(int);
-    callback entry-duplicate(int);
+    // 条目动作**不接收行号**：目标 = `menu-targets`（与右侧栏视图同步的
+    // 「当前生效选区」解析结果，相对路径 \n 分隔，由 Rust 在每次选中状态
+    // 变化时刷新）——彻底消除行号空间错位 / 右键时序导致的作用域漂移。
+    callback entry-open();
+    callback entry-reveal();
+    callback entry-copy-path();
+    callback entry-reveal-terminal();
+    callback entry-rename-open();
+    callback entry-copy();
+    callback entry-cut();
+    callback entry-duplicate();
+    in-out property <string> menu-targets;
+    // 右键目标所属分支（visits 下标）：右键会先激活所在节点，故此属性随
+    // fill 刷新为激活分支；跨节点右键后动作作用于新激活分支的选中行。
+    in-out property <int> menu-target-visit: -1;
     callback delete-entry();
     callback save-entry();
     callback new-folder();
     callback paste();
     // 落点处理：transfer / files / 行号(-1=末尾) / 是否移入文件夹 / 是否插到行后。
     callback drop-row(string, string, int, bool, bool);
+    // ── 内容条目批量操作（Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选）──
+    // 多选对象是内容条目（payload / asset / dir），分支不参与；状态由 Rust 侧维护。
+    // 参数：面板归属分支 visit（Rust 侧仅当其 == 当前选中分支时处理）、行下标、修饰键。
+    // 注意不能用 pure：带副作用（改多选集合 + 重建 UI），pure 会被求值器缓存/折叠。
+    // 条目行左键点击：修饰键决策在 Rust 侧（macOS 用 NSEvent 实时查询，
+    // Slint 的 ctrl/shift 仅作非 macOS 平台的提示值）。
+    callback entry-click(int, int, bool, bool);
+    // 多选摘要（Rust 侧随选中状态刷新）：「已选中 n 个条目：名称…」。
+    // 右侧栏在多选无主选中时显示该摘要，多选有主选中时作为编辑范围提示。
+    in-out property <string> multi-summary: "";
+    callback entries-select-all();
+    callback entries-batch-rename();
+    in-out property <int> multi-count: 0;
     /// 拖拽收尾：清理全局拖拽状态（唯一实现在 `DndApi.reset`），并要求 Rust 侧把
     /// `src-visit` 复位到当前激活分支（拖拽期间被面板改写为拖拽源）。
     public function end-drop() {
@@ -143,6 +169,13 @@ export struct BranchRow {
     has-entries: bool,
 }
 
+/// 批量操作汇总的一行：`status` = "✓" 成功 / "✗" 失败（汇总对话框逐行展示）。
+export struct BatchResultRow {
+    status: string,
+    title: string,
+    message: string,
+}
+
 export struct EntryRow {
     path: string,
     // 显示用名称：顶层条目 = path；文件夹子行 = 真实文件名（不带父路径前缀）。
@@ -155,6 +188,8 @@ export struct EntryRow {
     depth: int,
     is-dir: bool,
     expanded: bool,
+    // 多选（Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选）标记。
+    in-multi: bool,
 }
 
 export struct RefRow {
@@ -465,11 +500,14 @@ component EntryListPanel inherits Rectangle {
                     && hover-bottom && !entry.is-dir
                     && index == entries.length - 1;
                 property <bool> is-dragging: dragarea.dragging;
-                background: selected-index == index ? col-sel
+                // 单选与多选**同一高亮**：主选中与选区成员都用 col-sel。
+                background: (selected-index == index || entry.in-multi) ? col-sel
                     : hover-folder ? col-badge
                     : (Math.mod(index, 2) == 0 ? transparent : col-hover);
-                // 源行在拖动中半透明。
-                opacity: is-dragging ? 0.4 : 1.0;
+                // 拖动中：被抓取行与同面板内选区成员一起半透明（整组"正在被拖"）。
+                opacity: (is-dragging
+                    || (DndApi.entry-drag-active && DndApi.src-visit == src-visit && entry.in-multi))
+                    ? 0.4 : 1.0;
                 Rectangle {
                     y: 0;
                     height: 3px;
@@ -491,15 +529,25 @@ component EntryListPanel inherits Rectangle {
                         MenuItem {
                             title: "打开";
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-open(index);
+                                EntryApi.entry-open();
                             }
                         }
                         MenuItem {
                             title: "在 Finder 中显示";
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-reveal(index);
+                                EntryApi.entry-reveal();
+                            }
+                        }
+                        MenuItem {
+                            title: "拷贝路径";
+                            activated => {
+                                EntryApi.entry-copy-path();
+                            }
+                        }
+                        MenuItem {
+                            title: "在终端中显示";
+                            activated => {
+                                EntryApi.entry-reveal-terminal();
                             }
                         }
                         MenuSeparator { }
@@ -507,40 +555,38 @@ component EntryListPanel inherits Rectangle {
                             title: "重命名…";
                             enabled: entry.depth == 0;
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-rename-open(index);
+                                EntryApi.entry-rename-open();
                             }
                         }
                         MenuItem {
-                            title: "复制";
+                            title: "拷贝";
                             enabled: entry.depth == 0;
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-copy(index);
+                                EntryApi.entry-copy();
                             }
                         }
                         MenuItem {
                             title: "剪切";
                             enabled: entry.depth == 0;
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-cut(index);
+                                EntryApi.entry-cut();
                             }
                         }
                         MenuItem {
                             title: "制作副本";
                             enabled: entry.depth == 0;
                             activated => {
-                                EntryApi.activate-visit(src-visit);
-                                EntryApi.entry-duplicate(index);
+                                EntryApi.entry-duplicate();
                             }
                         }
                         MenuSeparator { }
                         MenuItem {
                             title: "移到废纸篓";
                             activated => {
+                                // 不可 select-entry：右键弹出前 pointer-event 已按
+                                // Finder 语义处理选区（落在选区内→保留整组，否则单选）；
+                                // 这里再单选会把整组选区清成 1 条，导致只删 1 个。
                                 EntryApi.activate-visit(src-visit);
-                                EntryApi.select-entry(index);
                                 EntryApi.delete-entry();
                             }
                         }
@@ -692,9 +738,14 @@ component EntryListPanel inherits Rectangle {
                     changed dragging => {
                         if (self.dragging) {
                             DndApi.src-visit = src-visit;
+                            DndApi.entry-drag-active = true;
+                            // 兜底载荷为单路径（data-transfer 主路径携带整组载荷，
+                            // 由 entry-to-transfer 展开；仅当其不可解析时才回退到这里）。
                             DndApi.payload = "\{src-visit}|\{entry.path}";
                             DndApi.hover-src-row = index;
                             DndApi.hover-src-top = entry.depth == 0;
+                        } else {
+                            DndApi.entry-drag-active = false;
                         }
                     }
                     // 拖拽结束（落下 / 落在无效区域 / 取消）→ 统一收尾。
@@ -704,25 +755,42 @@ component EntryListPanel inherits Rectangle {
                         EntryApi.end-drop();
                     }
                     TouchArea {
-                        clicked => {
-                            EntryApi.activate-visit(src-visit);
-                            EntryApi.select-entry(index);
-                        }
+                        // 选择逻辑**全部**收敛到 pointer-event（左键抬起）：
+                        // Slint 的 clicked 先于 pointer-event(Up) 触发（vendored
+                        // input_items.rs），若把普通选中放 clicked、多选放
+                        // pointer-event，clicked 里的「清空多选 + 重置锚点」会把
+                        // Shift 范围选择的锚点摧毁（范围塌缩成单行）。这里统一
+                        // 分发：无修饰键 = 单选；⌘(Ctrl) = 切换；Shift = 范围。
                         double-clicked => {
                             EntryApi.activate-visit(src-visit);
                             if (entry.is-dir) {
                                 EntryApi.toggle-dir(index);
                             } else {
-                                EntryApi.entry-open(index);
+                                EntryApi.entry-open();
                             }
                         }
-                        // 右键弹菜单（不触发任何状态变更——activate 延迟到菜单项
-                        // 点击时执行，否则模型重建会销毁正在弹出的菜单）。
                         pointer-event(event) => {
                             if (event.button == PointerEventButton.right
                                 && event.kind == PointerEventKind.up) {
-                                EntryApi.select-entry(index);
+                                // 右键 = 激活所在节点 + 选中该行（Finder 语义）：
+                                // 先激活（跨节点时切换分支并重建行模型——与结构树
+                                // 右键同模式，此刻菜单尚未弹出，重建安全），再选中，
+                                // 菜单动作经 menu-targets 精确作用于该行。
+                                EntryApi.activate-visit(src-visit);
+                                if (!entry.in-multi) {
+                                    EntryApi.select-entry(index);
+                                }
                                 ctxmenu.show({x: self.mouse-x, y: self.mouse-y});
+                                return EventResult.accept;
+                            }
+                            if (event.button == PointerEventButton.left
+                                && event.kind == PointerEventKind.up) {
+                                // 修饰键决策统一收敛到 Rust 侧（entry-click）：
+                                // macOS 上 Slint 的键盘事件跟踪不可靠，由 NSEvent
+                                // 实时查询兜底；这里的 modifiers 只作非 macOS 提示值。
+                                EntryApi.entry-click(src-visit, index,
+                                    event.modifiers.control || event.modifiers.meta,
+                                    event.modifiers.shift);
                                 return EventResult.accept;
                             }
                             return EventResult.reject;
@@ -1065,7 +1133,9 @@ export component AppWindow inherits Window {
 
     // 编辑菜单可用性：需选中条目，且无模态对话框——否则对话框内的文本编辑
     // 会被菜单快捷键（⌘C/⌘V 等）截获，无法正常复制粘贴文字。
-    property <bool> entry-cmd-ok: root.entry-selected >= 0
+    // 有主选中**或**存在多选区（⌘A / ⌘ 点击后主选中可能为空，但选区非空，
+    // 复制 / 剪切 / 删除都应作用于整个选区）。
+    property <bool> entry-cmd-ok: (root.entry-selected >= 0 || EntryApi.multi-count > 0)
         && !root.dialog-visible
         && !root.rename-visible
         && !root.branch-dialog-visible;
@@ -1112,6 +1182,8 @@ export component AppWindow inherits Window {
     callback entry-drop-to-branch(string, string, int);
     callback external-files-dropped(string);
     callback reveal-branch();
+    callback branch-copy-path();
+    callback branch-reveal-terminal();
     callback child-dialog-open();
     callback child-dialog-create();
     callback child-dialog-cancel();
@@ -1122,6 +1194,29 @@ export component AppWindow inherits Window {
     callback dialog-browse();
     callback dialog-create();
     callback dialog-cancel();
+
+    // ── 内容条目批量操作状态（进度 / 汇总 / 批量重命名对话框）──
+    // 多选集合与计数在 EntryApi（条目域）；这里的属性是批量执行的执行态。
+    in-out property <bool> batch-busy: false;
+    in-out property <int> progress-done: 0;
+    in-out property <int> progress-total: 0;
+    in-out property <string> progress-text: "";
+    in-out property <bool> summary-visible: false;
+    in-out property <string> summary-title: "";
+    in-out property <bool> summary-has-failed: false;
+    in property <[BatchResultRow]> summary-rows;
+    callback summary-retry();
+    callback summary-close();
+    // 批量完成（后台线程经 invoke 触发）：主线程重扫磁盘并刷新多选状态。
+    callback batch-finished();
+    in-out property <bool> br-visible: false;
+    in-out property <int> br-mode: 0;
+    in-out property <string> br-find;
+    in-out property <string> br-replace;
+    in-out property <string> br-prefix;
+    in-out property <string> br-suffix;
+    callback br-apply();
+    callback br-cancel();
 
     // ── 整窗外部文件拖放兜底：导入当前选中分支 ──
     // 先声明 → 位于最底层：树/条目的 DropArea（更晚声明、在上层）优先命中；
@@ -1158,16 +1253,24 @@ export component AppWindow inherits Window {
         Menu {
             title: "编辑";
             MenuItem {
-                title: "复制";
+                // Finder 语义：⌘A 全选作用于当前内容列表（多选入口之一）。
+                title: "全选";
+                shortcut: @keys(Control + A);
+                enabled: root.has-bundle;
+                activated => { EntryApi.entries-select-all(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "拷贝";
                 shortcut: @keys(Control + C);
                 enabled: root.entry-cmd-ok;
-                activated => { EntryApi.entry-copy(root.entry-selected); }
+                activated => { EntryApi.entry-copy(); }
             }
             MenuItem {
                 title: "剪切";
                 shortcut: @keys(Control + X);
                 enabled: root.entry-cmd-ok;
-                activated => { EntryApi.entry-cut(root.entry-selected); }
+                activated => { EntryApi.entry-cut(); }
             }
             MenuItem {
                 title: "粘贴";
@@ -1180,14 +1283,14 @@ export component AppWindow inherits Window {
                 title: "制作副本";
                 shortcut: @keys(Control + D);
                 enabled: root.entry-cmd-ok;
-                activated => { EntryApi.entry-duplicate(root.entry-selected); }
+                activated => { EntryApi.entry-duplicate(); }
             }
             MenuItem {
                 // 条目重命名 = 改磁盘文件名 / 目录名（与「分支 → 重命名分支…」
                 // 只改 `._meta.title` 不同），标题里写明作用对象以免混淆。
                 title: "重命名条目…";
                 enabled: root.entry-cmd-ok;
-                activated => { EntryApi.entry-rename-open(root.entry-selected); }
+                activated => { EntryApi.entry-rename-open(); }
             }
             MenuItem {
                 title: "删除";
@@ -1237,7 +1340,8 @@ export component AppWindow inherits Window {
             }
             MenuItem {
                 title: "展开 / 收起内容";
-                enabled: root.has-selection && root.sel-has-entries;
+                // 内容内嵌面板只存在于导图节点 → 列表视图下无效，随之禁用。
+                enabled: root.has-selection && root.sel-has-entries && root.view-mind;
                 activated => { root.toggle-sel-content(); }
             }
             MenuSeparator { }
@@ -1267,7 +1371,7 @@ export component AppWindow inherits Window {
                 title: "在 Finder 中显示内容";
                 shortcut: @keys(Control + Alt + R);
                 enabled: root.entry-selected >= 0;
-                activated => { EntryApi.entry-reveal(root.entry-selected); }
+                activated => { EntryApi.entry-reveal(); }
             }
             MenuSeparator { }
             MenuItem {
@@ -1446,15 +1550,18 @@ export component AppWindow inherits Window {
                                             enabled: row.has-children;
                                             activated => { root.toggle-expand(index); }
                                         }
-                                        MenuItem {
-                                            title: "展开 / 收起内容";
-                                            enabled: row.has-entries;
-                                            activated => { root.toggle-node-content(row.visit); }
-                                        }
                                         MenuSeparator { }
                                         MenuItem {
                                             title: "在 Finder 中显示";
                                             activated => { root.reveal-branch(); }
+                                        }
+                                        MenuItem {
+                                            title: "拷贝路径";
+                                            activated => { root.branch-copy-path(); }
+                                        }
+                                        MenuItem {
+                                            title: "在终端中显示";
+                                            activated => { root.branch-reveal-terminal(); }
                                         }
                                         MenuItem {
                                             title: "粘贴";
@@ -1952,6 +2059,20 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         MenuItem {
+                                            title: "拷贝路径";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.branch-copy-path();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "在终端中显示";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.branch-reveal-terminal();
+                                            }
+                                        }
+                                        MenuItem {
                                             title: "粘贴";
                                             activated => {
                                                 root.select-visit(node.visit);
@@ -1976,6 +2097,9 @@ export component AppWindow inherits Window {
                                     pointer-event(event) => {
                                         if (event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.up) {
+                                            // 右键即选中（Finder 语义）：菜单操作作用于
+                                            // 右键的节点，而非之前激活的分支。
+                                            root.select-visit(node.visit);
                                             nodectx.show({x: self.mouse-x, y: self.mouse-y});
                                             return EventResult.accept;
                                         }
@@ -2489,64 +2613,106 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                HorizontalLayout {
+                                // ── 多选视图（>1）：与单选表单**完全不同**的展现 ——
+                                // 摘要 + 整组操作，不显示单条目编辑表单。
+                                if EntryApi.multi-count > 1: VerticalLayout {
                                     spacing: 8px;
-                                    Text { text: "路径：" + root.e-path; font-size: 11px; color: c-sub; overflow: elide; }
-                                }
-
-                                Rectangle { height: 1px; background: c-line; }
-
-                                if root.entry-selected >= 0: VerticalLayout {
-                                    spacing: 8px;
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        VerticalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: 8px;
-                                            Text { text: "标题"; font-size: 12px; color: c-sub; }
-                                            LineEdit {
-                                                width: 100%;
-                                                enabled: root.entry-editable;
-                                                placeholder-text: "标题";
-                                                text <=> root.e-title;
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            width: 60px;
-                                            spacing: 8px;
-                                            Text { text: "排序"; font-size: 12px; color: c-sub; }
-                                            LineEdit {
-                                                width: 100%;
-                                                enabled: root.entry-editable;
-                                                placeholder-text: "空";
-                                                text <=> root.e-order;
-                                            }
-                                        }
-                                    }
-
-                                    Text { text: "备注"; font-size: 12px; color: c-sub; }
-                                    // 多行备注（同上：换行经 TOML 转义后原样往返）。
-                                    TextEdit {
-                                        enabled: root.entry-editable;
-                                        placeholder-text: "备注";
-                                        text <=> root.e-note;
+                                    Text {
+                                        text: EntryApi.multi-summary;
+                                        font-size: 13px;
+                                        color: c-text;
                                         wrap: TextWrap.word-wrap;
-                                        height: 72px;
                                     }
-
+                                    Text {
+                                        text: "以下操作作用于整个选区；点击单个条目可查看与编辑其详情。";
+                                        font-size: 11px;
+                                        color: c-sub;
+                                        wrap: TextWrap.word-wrap;
+                                    }
+                                    Rectangle { height: 1px; background: c-line; }
                                     HorizontalLayout {
                                         spacing: 8px;
                                         Button {
-                                            text: "保存";
-                                            enabled: root.entry-editable;
-                                            clicked => { EntryApi.save-entry(); }
+                                            text: "重命名…";
+                                            clicked => { EntryApi.entries-batch-rename(); }
                                         }
-                                        Rectangle { horizontal-stretch: 1; }
+                                        Button {
+                                            text: "拷贝";
+                                            // index = -1：Rust 侧解析为整个选区。
+                                            clicked => { EntryApi.entry-copy(); }
+                                        }
+                                        Button {
+                                            text: "剪切";
+                                            clicked => { EntryApi.entry-cut(); }
+                                        }
                                         Button {
                                             text: "移到废纸篓";
                                             clicked => { EntryApi.delete-entry(); }
                                         }
+                                    }
+                                    Rectangle { vertical-stretch: 1; }
+                                }
+
+                                // ── 单选 / 无选区视图：路径 + 单条目表单。
+                                if EntryApi.multi-count <= 1: VerticalLayout {
+                                    spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text { text: "路径：" + root.e-path; font-size: 11px; color: c-sub; overflow: elide; }
+                                    }
+                                    Rectangle { height: 1px; background: c-line; }
+                                    if root.entry-selected >= 0: VerticalLayout {
+                                        spacing: 8px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                spacing: 8px;
+                                                Text { text: "标题"; font-size: 12px; color: c-sub; }
+                                                LineEdit {
+                                                    width: 100%;
+                                                    enabled: root.entry-editable;
+                                                    placeholder-text: "标题";
+                                                    text <=> root.e-title;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                width: 60px;
+                                                spacing: 8px;
+                                                Text { text: "排序"; font-size: 12px; color: c-sub; }
+                                                LineEdit {
+                                                    width: 100%;
+                                                    enabled: root.entry-editable;
+                                                    placeholder-text: "空";
+                                                    text <=> root.e-order;
+                                                }
+                                            }
+                                        }
+                                        Text { text: "备注"; font-size: 12px; color: c-sub; }
+                                        // 多行备注（同上：换行经 TOML 转义后原样往返）。
+                                        TextEdit {
+                                            enabled: root.entry-editable;
+                                            placeholder-text: "备注";
+                                            text <=> root.e-note;
+                                            wrap: TextWrap.word-wrap;
+                                            height: 72px;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Button {
+                                                text: "保存";
+                                                enabled: root.entry-editable;
+                                                clicked => { EntryApi.save-entry(); }
+                                            }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Button {
+                                                text: "移到废纸篓";
+                                                clicked => { EntryApi.delete-entry(); }
+                                            }
+                                        }
+                                        // 空间吸收元素：缺了它表单子项（按钮/输入框）会被
+                                        // 拉伸填满剩余高度（样式异常）。
+                                        Rectangle { vertical-stretch: 1; }
                                     }
                                     // 空间吸收元素：理由同「分支」页——内层布局缺拉伸项时，
                                     // 多余可用高度会被均摊给所有子项（输入框、按钮一起被撑高）。
@@ -3043,6 +3209,176 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "关闭"; clicked => { root.shortcuts-visible = false; } }
+                }
+            }
+        }
+    }
+
+    // ── 批量操作：进行中进度（内容条目批量删除 / 批量重命名共用）──
+    if root.batch-busy: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        Rectangle {
+            width: 380px;
+            height: 132px;
+            background: c-panel;
+            border-radius: 12px;
+            VerticalBox {
+                padding: 20px;
+                spacing: 10px;
+                Text { text: "批量操作进行中…"; font-size: 16px; font-weight: 700; color: c-text; }
+                Text { text: root.progress-text; font-size: 12px; color: c-sub; overflow: elide; }
+                Rectangle {
+                    height: 8px;
+                    border-radius: 4px;
+                    background: c-hover;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width * Math.min(1.0,
+                            root.progress-total > 0 ? root.progress-done / root.progress-total : 0.0);
+                        border-radius: 4px;
+                        background: c-sel;
+                    }
+                }
+                Text { text: root.progress-done + " / " + root.progress-total; font-size: 11px; color: c-sub; }
+            }
+        }
+    }
+
+    // ── 批量操作：完成汇总（失败项可重试）──
+    if root.summary-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        FocusScope {
+            width: 100%;
+            height: 100%;
+            focus-on-click: false;
+            // 必须主动持有焦点，Esc 才能进到 key-pressed（与其它对话框一致）。
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == "\u{1b}") {
+                    root.summary-close();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+            Rectangle {
+                width: 480px;
+                height: 380px;
+                background: c-panel;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text { text: root.summary-title; font-size: 16px; font-weight: 700; color: c-text; }
+                    ListView {
+                        vertical-stretch: 1;
+                        for r in root.summary-rows: Rectangle {
+                            height: 26px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: r.status;
+                                    width: 18px;
+                                    color: r.status == "✓" ? #3c9a50 : (r.status == "↓" ? c-sub : #c04545);
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: r.title;
+                                    color: c-text;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 0;
+                                }
+                                Text {
+                                    text: r.message;
+                                    font-size: 11px;
+                                    color: c-sub;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "重试失败项";
+                            visible: root.summary-has-failed;
+                            clicked => { root.summary-retry(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "关闭"; clicked => { root.summary-close(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 批量重新命名（对标 Finder「批量重新命名…」：替换文本 / 添加文本）──
+    if root.br-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        FocusScope {
+            width: 100%;
+            height: 100%;
+            focus-on-click: false;
+            // 必须主动持有焦点，Esc 才能进到 key-pressed（与其它对话框一致）。
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == "\u{1b}") {
+                    root.br-cancel();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+            Rectangle {
+                width: 440px;
+                height: 250px;
+                background: c-panel;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 20px;
+                    spacing: 10px;
+                    Text { text: "批量重新命名（已选 " + EntryApi.multi-count + " 项）"; font-size: 16px; font-weight: 700; color: c-text; }
+                    ComboBox {
+                        model: ["替换文本", "添加文本"];
+                        current-index <=> root.br-mode;
+                    }
+                    // 模式 0 = 替换文本：查找 / 替换为；模式 1 = 添加文本：前缀 / 后缀。
+                    if root.br-mode == 0: HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "查找"; font-size: 12px; color: c-sub; }
+                            LineEdit { placeholder-text: "要替换的文本"; text <=> root.br-find; }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "替换为"; font-size: 12px; color: c-sub; }
+                            LineEdit { placeholder-text: "可为空（删除该文本）"; text <=> root.br-replace; }
+                        }
+                    }
+                    if root.br-mode == 1: HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "前缀"; font-size: 12px; color: c-sub; }
+                            LineEdit { placeholder-text: "添加在名称前"; text <=> root.br-prefix; }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: "后缀（自动加在扩展名前）"; font-size: 12px; color: c-sub; }
+                            LineEdit { placeholder-text: "如 -草案"; text <=> root.br-suffix; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "取消"; clicked => { root.br-cancel(); } }
+                        Button { text: "应用"; clicked => { root.br-apply(); } }
+                    }
                 }
             }
         }

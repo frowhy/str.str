@@ -12,7 +12,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -82,8 +82,31 @@ struct Editor {
     expanded_dirs: HashSet<String>,
     /// 导图节点内已展开内容的分支 id 集合（跨 rescan 稳定）。
     content_expanded: HashSet<String>,
+    /// 批量操作（内容条目多选）的条目路径集合（仅当前选中分支内；路径跨 rescan 稳定）。
+    /// Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选、点空白 / 切分支清空。
+    entry_multi: HashSet<String>,
+    /// Shift 范围多选的锚点（条目列表行下标）。
+    entry_anchor: Option<usize>,
     /// 结构树模型句柄：行点击时原地更新选中标记，避免重建模型破坏双击手势。
     rows_model: RefCell<Option<Rc<VecModel<BranchRow>>>>,
+    /// 导图节点模型句柄：节点右键时原地更新选中标记，避免重建模型销毁
+    /// 正在显示右键菜单的节点组件（菜单项点击失效）。
+    mind_nodes_model: RefCell<Option<Rc<VecModel<MindNode>>>>,
+    /// 内容条目模型句柄：行数不变时原地更新，避免右键盘某行时重建模型
+    /// 销毁承载右键菜单的行组件（与 rows_model 同款）。
+    entries_model: RefCell<Option<Rc<VecModel<EntryRow>>>>,
+    /// 导图节点内嵌内容面板的行模型句柄（键 = visit 下标）：节点模型原地更新时
+    /// 若行数不变则复用同一句柄，节点内右键菜单 / 拖拽不会被打断。
+    node_entry_models: RefCell<HashMap<usize, Rc<VecModel<EntryRow>>>>,
+    /// scan 代次：open / rescan 递增。visit 下标与结构随之变化，用作布局缓存
+    /// 与行模型句柄的失效依据。
+    scan_gen: u64,
+    /// 导图布局缓存（签名 → 布局）。几何只与可见行结构、展开集合有关，
+    /// 与选中 / 多选无关——选中变化不该重排整棵树（见 `mind_sig`）。
+    mind_cache: RefCell<Option<(u64, MindOut)>>,
+    /// 小地图位图最近一次烘焙的键（布局签名 + 映射参数 + 选中路径 + 用色）：
+    /// 键不变就跳过重烘焙（selection_spine 只影响高亮路径）。
+    mini_raster_key: RefCell<Option<String>>,
 }
 
 impl Editor {
@@ -98,7 +121,15 @@ impl Editor {
             selected_entry_path: None,
             expanded_dirs: HashSet::new(),
             content_expanded: HashSet::new(),
+            entry_multi: HashSet::new(),
+            entry_anchor: None,
             rows_model: RefCell::new(None),
+            mind_nodes_model: RefCell::new(None),
+            entries_model: RefCell::new(None),
+            node_entry_models: RefCell::new(HashMap::new()),
+            scan_gen: 0,
+            mind_cache: RefCell::new(None),
+            mini_raster_key: RefCell::new(None),
         }
     }
 
@@ -118,8 +149,18 @@ impl Editor {
         self.scan = Some(scan);
         self.selected_entry_path = None;
         self.content_expanded.clear();
+        self.entry_multi.clear();
+        self.entry_anchor = None;
+        self.scan_gen += 1;
+        self.reset_entry_models();
         self.rebuild();
         Ok(())
+    }
+
+    /// 内容行模型句柄按 visit 下标缓存，visit 空间随 scan 变化 → 必须清空。
+    fn reset_entry_models(&mut self) {
+        self.node_entry_models.borrow_mut().clear();
+        *self.entries_model.borrow_mut() = None;
     }
 
     /// 重新扫描磁盘（按 id 保留展开与选中状态）。
@@ -127,6 +168,13 @@ impl Editor {
         let bundle = self.bundle.as_ref().ok_or("未打开 bundle")?;
         let scan = bundle.scan().map_err(|e| e.to_string())?;
         self.kids = children_index(&scan);
+        // 条目多选剪除磁盘上已消失的路径（批量操作后的幸存失败项保持选中，便于重试）
+        if let Some(vi) = self.selected_idx_in_visits() {
+            let dir = scan.visits[vi].dir.clone();
+            self.entry_multi.retain(|p| dir.join(p).exists());
+        } else {
+            self.entry_multi.clear();
+        }
         self.scan = Some(scan);
         if self
             .selected
@@ -141,6 +189,8 @@ impl Editor {
                 .first()
                 .and_then(|v| v.meta.as_ref().and_then(|m| m.id.clone()));
         }
+        self.scan_gen += 1;
+        self.reset_entry_models();
         self.rebuild();
         Ok(())
     }
@@ -170,14 +220,222 @@ impl Editor {
     }
 
     fn select_visit(&mut self, visit: usize) {
-        self.selected = self
+        let new_id = self
             .scan
             .as_ref()
             .and_then(|s| s.visits.get(visit))
             .and_then(|v| v.meta.as_ref())
             .and_then(|m| m.id.clone());
+        // 条目多选只属于当前分支：**切换**分支才清空（Finder 语义）。
+        // 同分支重复激活（EntryListPanel 的「先 activate 再操作」约定）不得清空，
+        // 否则 ⌘/Shift 多选与范围锚点会在每次点击时被摧毁。
+        let changed = self.selected.as_deref() != new_id.as_deref();
+        self.selected = new_id;
         self.selected_entry_path = None;
+        if changed {
+            self.entry_multi.clear();
+            self.entry_anchor = None;
+        }
     }
+}
+
+// ─────────────────── 批量操作（内容条目，Finder 语义）───────────────────
+
+/// 批量操作的单项结果：`status` = "✓" 成功 / "✗" 失败（汇总对话框逐行展示）。
+/// `new_path` = 落地后的登记路径（粘贴 = 去重后的目标路径；其余操作为空），
+/// 供「粘贴后激活被粘贴条目」使用。
+struct BatchOutcome {
+    id: String,
+    title: String,
+    status: &'static str,
+    msg: String,
+    new_path: String,
+}
+
+/// 内容条目批量操作：持有执行所需的全部数据（Send + Sync，可跨线程 / 可重试）。
+///
+/// 语义与单条目操作一致（同一代码路径）：删除 = 废纸篓（可恢复）+ `entries[]` 登记同步；
+/// 重命名 = 磁盘 rename + 登记路径同步；粘贴 = 逐项 `apply_clip_at` 落到发起粘贴的分支。
+#[derive(Clone)]
+enum ContentOp {
+    /// 删除条目（trash + 登记同步；≡ 单条目「移到废纸篓」）。
+    Trash { branch_dir: PathBuf },
+    /// 批量重命名（磁盘 rename + 登记路径同步；≡ 单条目「重命名」）。
+    Rename {
+        branch_dir: PathBuf,
+        renames: Vec<(String, String)>,
+    },
+    /// 批量粘贴（发起粘贴时固定目标分支与剪贴板快照；≡ 单条目「粘贴」）。
+    /// bundle_root 用于剪切时的源登记清理边界（跨分支剪切必须以 bundle 根为界）。
+    Paste {
+        clips: Vec<ClipItem>,
+        bundle_root: PathBuf,
+        visit_dir: PathBuf,
+        depth: usize,
+        id_version: usize,
+    },
+}
+
+impl ContentOp {
+    /// `index` = 项在批量清单中的下标（粘贴按序取剪贴板项）；`id` = 清单 id。
+    /// 成功返回 (提示文案, 落地后的登记路径)。
+    fn run(&self, index: usize, id: &str) -> Result<(String, String), String> {
+        match self {
+            ContentOp::Trash { branch_dir } => {
+                let bundle = Bundle::new(branch_dir.clone()).map_err(|e| e.to_string())?;
+                let file = branch_dir.join(id);
+                if file.exists() {
+                    trash::delete(&file).map_err(|e| e.to_string())?;
+                }
+                let mut meta = read_meta(&bundle, branch_dir)?;
+                meta.remove_entry_path(id);
+                meta.touch();
+                meta.save(&bundle.meta_path(branch_dir))
+                    .map_err(|e| e.to_string())?;
+                Ok((String::new(), String::new()))
+            }
+            ContentOp::Rename {
+                branch_dir,
+                renames,
+            } => {
+                let new_name = renames
+                    .iter()
+                    .find(|(old, _)| old == id)
+                    .map(|(_, new)| new.clone())
+                    .ok_or_else(|| format!("重命名映射缺失：{id}"))?;
+                let bundle = Bundle::new(branch_dir.clone()).map_err(|e| e.to_string())?;
+                std::fs::rename(branch_dir.join(id), branch_dir.join(&new_name))
+                    .map_err(|e| e.to_string())?;
+                let mut meta = read_meta(&bundle, branch_dir)?;
+                let entry = meta
+                    .entries
+                    .iter()
+                    .find(|x| x.path == id)
+                    .cloned()
+                    .ok_or("未找到条目")?;
+                meta.remove_entry_path(id);
+                let mut ne = entry;
+                ne.path = new_name.clone();
+                meta.upsert_entry(&ne);
+                meta.touch();
+                meta.save(&bundle.meta_path(branch_dir))
+                    .map_err(|e| e.to_string())?;
+                Ok((String::new(), new_name))
+            }
+            ContentOp::Paste {
+                clips,
+                bundle_root,
+                visit_dir,
+                depth,
+                id_version,
+            } => {
+                let clip = clips.get(index).ok_or("粘贴项不存在")?;
+                let bundle = Bundle::new(bundle_root.clone()).map_err(|e| e.to_string())?;
+                let (msg, registered) =
+                    apply_clip_at(&bundle, visit_dir, *depth, *id_version, clip)?;
+                Ok((format!("{msg}（→ {registered}）"), registered))
+            }
+        }
+    }
+}
+
+/// 后台线程执行批量操作：顺序逐项（`._meta` 登记写回需要互斥），
+/// 逐项推进进度（invoke_from_event_loop），结束后把结果写入 `results_slot`
+/// 并在主线程弹出汇总对话框 + 触发 rescan。
+///
+/// 线程只持有路径与弱 UI 句柄（不碰 `Rc<RefCell<Editor>>`）；
+/// 完成后的重扫 / 模型同步经 `invoke_batch_finished()` 回到主线程完成。
+fn spawn_gui_batch(
+    app_weak: Weak<AppWindow>,
+    results_slot: std::sync::Arc<std::sync::Mutex<(ContentOp, Vec<BatchOutcome>)>>,
+    summary_title: &str,
+    items: Vec<(String, String)>,
+) {
+    let title = summary_title.to_string();
+    std::thread::spawn(move || {
+        let op = match results_slot.lock() {
+            Ok(slot) => slot.0.clone(),
+            Err(_) => return,
+        };
+        let total = items.len();
+        let mut results: Vec<BatchOutcome> = Vec::with_capacity(total);
+        for (i, (id, t)) in items.iter().enumerate() {
+            {
+                let w = app_weak.clone();
+                let text = format!("{}/{} · {}", i + 1, total, t);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(a) = w.upgrade() {
+                        a.set_progress_done(i as i32);
+                        a.set_progress_text(SharedString::from(text));
+                    }
+                });
+            }
+            match op.run(i, id) {
+                Ok((msg, new_path)) => results.push(BatchOutcome {
+                    id: id.clone(),
+                    title: t.clone(),
+                    status: "✓",
+                    msg,
+                    new_path,
+                }),
+                Err(msg) => results.push(BatchOutcome {
+                    id: id.clone(),
+                    title: t.clone(),
+                    status: "✗",
+                    msg,
+                    new_path: String::new(),
+                }),
+            }
+        }
+        let failed = results.iter().filter(|r| r.status == "✗").count();
+        if let Ok(mut slot) = results_slot.lock() {
+            slot.1 = results;
+        }
+        let w = app_weak.clone();
+        let slot = std::sync::Arc::clone(&results_slot);
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(a) = w.upgrade() {
+                let rows: Vec<BatchResultRow> = slot
+                    .lock()
+                    .map(|v| {
+                        v.1.iter()
+                            .map(|r| BatchResultRow {
+                                status: r.status.into(),
+                                title: r.title.clone().into(),
+                                message: r.msg.clone().into(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                a.set_summary_title(title.into());
+                a.set_summary_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+                a.set_summary_has_failed(failed > 0);
+                a.set_progress_done(total as i32);
+                a.set_batch_busy(false);
+                a.set_summary_visible(true);
+                a.invoke_batch_finished();
+            }
+        });
+    });
+}
+
+/// 收集多选条目（path, 显示名）—— 按当前选中分支的可视行顺序，
+/// 仅限**顶层登记条目**（文件夹子行无登记、分支行不参与批量）。
+fn collect_entry_multi(e: &Editor) -> Vec<(String, String)> {
+    e.selected_idx_in_visits()
+        .map(|vi| build_entry_rows_for(e, vi))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| entry_multi_eligible(v))
+        .filter(|v| e.entry_multi.contains(&v.path))
+        .map(|v| (v.path.clone(), basename(&v.path)))
+        .collect()
+}
+
+/// 可进入批量选区的行：顶层登记条目（文件夹子行无登记、分支行在结构树中呈现）。
+/// 选择 / 高亮 / 操作三方必须共用同一判定，否则会出现「高亮了却操作不到」。
+fn entry_multi_eligible(v: &VisibleEntry) -> bool {
+    v.depth == 0 && v.entries_idx.is_some()
 }
 
 /// 全部分支的直接子分支索引：`index[i]` = 分支 i 的子分支，按父级 `entries[]`
@@ -252,8 +510,13 @@ fn collapse_subtree_state(e: &mut Editor, visit: usize) {
         e.content_expanded.remove(cid);
     }
     if selected_in_subtree {
-        e.selected = None;
+        // 收回的子树包含选中分支：若直接清空选中，树里没有任何行高亮、
+        // 右侧栏也清空——焦点凭空丢失。改为选中**收回的分支本身**（它仍可见，
+        // Finder/VSCode 同语义：收起父级后选中落在父级上），并清空内容选区。
+        e.selected = scan.visits[visit].meta.as_ref().and_then(|m| m.id.clone());
         e.selected_entry_path = None;
+        e.entry_multi.clear();
+        e.entry_anchor = None;
     }
 }
 
@@ -567,14 +830,7 @@ fn mini_density_raster(
     // 先画连线（骨架），再画节点覆盖其上：与画布同样的层序。
     for e in &out.edges {
         let (ax, ay, bx, by) = edge_spine(e);
-        raster_line(
-            &mut cov,
-            w,
-            h,
-            (ax * kx, ay * ky),
-            (bx * kx, by * ky),
-            0.7,
-        );
+        raster_line(&mut cov, w, h, (ax * kx, ay * ky), (bx * kx, by * ky), 0.7);
     }
     for (i, n) in out.nodes.iter().enumerate() {
         raster_rect(
@@ -595,7 +851,11 @@ fn mini_density_raster(
             continue;
         }
         let a = 0.7 * (c / (c + 1.2));
-        let (rgb, a) = if hot[i] { (accent, a.max(0.9)) } else { (ink, a) };
+        let (rgb, a) = if hot[i] {
+            (accent, a.max(0.9))
+        } else {
+            (ink, a)
+        };
         px[i * 4] = rgb[0];
         px[i * 4 + 1] = rgb[1];
         px[i * 4 + 2] = rgb[2];
@@ -664,11 +924,21 @@ fn mind_layout(e: &Editor) -> MindOut {
     let mut node_hs = vec![NODE_H; n];
     for (i, v) in scan.visits.iter().enumerate() {
         let id = v.meta.as_ref().and_then(|m| m.id.clone());
-        let show = id.as_deref().is_some_and(|id| e.content_expanded.contains(id));
-        let rows_n = if show { build_entry_rows_for(e, i).len() } else { 0 };
+        let show = id
+            .as_deref()
+            .is_some_and(|id| e.content_expanded.contains(id));
+        let rows_n = if show {
+            build_entry_rows_for(e, i).len()
+        } else {
+            0
+        };
         let has_entries = has_content_entries(v);
         node_hs[i] = if rows_n == 0 {
-            if has_entries { NODE_H_COMPACT } else { NODE_H }
+            if has_entries {
+                NODE_H_COMPACT
+            } else {
+                NODE_H
+            }
         } else {
             // 标题行 + 行列表 + 末尾放置区 + 底部留白 + 内容伸缩条。
             NODE_H + rows_n as f32 * ENTRY_ROW_H + ENTRY_END_H + ENTRY_PAD_BOTTOM + CONTENT_BAR_H
@@ -690,7 +960,9 @@ fn mind_layout(e: &Editor) -> MindOut {
         let span: f32 = children.iter().map(|&c| sub_hs[c] + NODE_VGAP).sum::<f32>() - NODE_VGAP;
         sub_hs[i] = span.max(node_hs[i]);
     }
-    mind_dfs(e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], &mut out);
+    mind_dfs(
+        e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], &mut out,
+    );
     out.h = NODE_VGAP + sub_hs[0] + NODE_VGAP;
     // 缩略图的内容实际右缘（不含按钮占位）：用它换算面板宽度与缩放比例。
     let content_right = out.nodes.iter().map(|n| n.x + n.w).fold(0.0f32, f32::max);
@@ -698,7 +970,14 @@ fn mind_layout(e: &Editor) -> MindOut {
     out.w = out
         .nodes
         .iter()
-        .map(|n| n.x + n.w + if n.has_children { SUBTREE_BTN_EXTENT } else { 0.0 })
+        .map(|n| {
+            n.x + n.w
+                + if n.has_children {
+                    SUBTREE_BTN_EXTENT
+                } else {
+                    0.0
+                }
+        })
         .fold(0.0f32, f32::max)
         + MIND_PAD;
     out.edge_offset = out.w - (content_right + MIND_PAD);
@@ -706,6 +985,77 @@ fn mind_layout(e: &Editor) -> MindOut {
     out.edge_chunks = canvas_edge_chunks(&out.edges);
     out.mini_edge_chunks = mini_edge_chunks(&out.mini_edges);
     out
+}
+
+/// 节点（visit 下标）是否为当前选中分支。
+fn node_is_selected(e: &Editor, visit_idx: usize) -> bool {
+    e.selected.as_deref().is_some_and(|s| {
+        e.scan
+            .as_ref()
+            .and_then(|sc| sc.visits.get(visit_idx))
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.id.as_deref())
+            == Some(s)
+    })
+}
+
+/// 导图布局签名：只覆盖**影响几何**的输入——可见行结构（标题 / 类型 / 展开、
+/// 是否有子分支或内容）、内容展开的节点集合及其可见行数、scan 代次。
+/// 选中、多选集合、条目文案等只影响渲染数据，不参与签名（由缓存命中路径
+/// 原地刷新），故点选分支 / ⌘ 多选不会触发整树重排。
+fn mind_sig(e: &Editor) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    e.scan_gen.hash(&mut h);
+    for r in &e.rows {
+        r.visit.hash(&mut h);
+        r.title.hash(&mut h);
+        r.type_str.hash(&mut h);
+        r.expanded.hash(&mut h);
+        r.has_children.hash(&mut h);
+        r.has_entries.hash(&mut h);
+    }
+    if let Some(scan) = e.scan.as_ref() {
+        let mut expanded_ids: Vec<&str> = e
+            .content_expanded
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|id| scan.resolve(id).is_some())
+            .collect();
+        expanded_ids.sort_unstable();
+        expanded_ids.hash(&mut h);
+        // 内容行数决定节点高度（条目增删、内嵌文件夹展开都会变）。
+        for (i, v) in scan.visits.iter().enumerate() {
+            let show = v
+                .meta
+                .as_ref()
+                .and_then(|m| m.id.as_deref())
+                .is_some_and(|id| e.content_expanded.contains(id));
+            if show {
+                build_entry_rows_for(e, i).len().hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// 把节点内嵌内容面板的可见行写入缓存句柄：行数不变则**原地**更新（节点内
+/// 右键菜单 / 拖拽所在组件不被销毁），行数变化（内容增删、展开文件夹）才换句柄。
+fn apply_node_entry_rows(e: &Editor, visit_idx: usize, rows: Vec<EntryRow>) -> ModelRc<EntryRow> {
+    let mut map = e.node_entry_models.borrow_mut();
+    match map.get(&visit_idx) {
+        Some(handle) if handle.row_count() == rows.len() => {
+            for (i, r) in rows.into_iter().enumerate() {
+                handle.set_row_data(i, r);
+            }
+            ModelRc::from(handle.clone())
+        }
+        _ => {
+            let handle = Rc::new(VecModel::from(rows));
+            map.insert(visit_idx, handle.clone());
+            ModelRc::from(handle)
+        }
+    }
 }
 
 /// 在垂直带 [band_top, band_top + band_h] 内布置节点及其子树，返回节点中心 y。
@@ -731,9 +1081,11 @@ fn mind_dfs(
     };
 
     // 节点内容展开时内嵌完整内容列表面板（与列表视图同一 EntryRow 模型）。
-    let show_entries = id.as_deref().is_some_and(|id| e.content_expanded.contains(id));
+    let show_entries = id
+        .as_deref()
+        .is_some_and(|id| e.content_expanded.contains(id));
     let rows: Vec<EntryRow> = if show_entries {
-        visible_to_rows(&build_entry_rows_for(e, idx))
+        visible_to_rows(&build_entry_rows_for(e, idx), &e.entry_multi)
     } else {
         Vec::new()
     };
@@ -763,12 +1115,17 @@ fn mind_dfs(
         let total: f32 = children.iter().map(|&c| sub_hs[c] + NODE_VGAP).sum::<f32>() - NODE_VGAP;
         let mut cursor = (y - total / 2.0).clamp(band_top, band_top + band_h - total);
         for &c in children {
-            centers.push(mind_dfs(e, node_hs, sub_hs, c, child_x, cursor, sub_hs[c], out));
+            centers.push(mind_dfs(
+                e, node_hs, sub_hs, c, child_x, cursor, sub_hs[c], out,
+            ));
             cursor += sub_hs[c] + NODE_VGAP;
         }
     }
 
-    let is_selected = e.selected.as_deref().is_some_and(|s| id.as_deref() == Some(s));
+    let is_selected = e
+        .selected
+        .as_deref()
+        .is_some_and(|s| id.as_deref() == Some(s));
     let children_expanded = id.as_deref().is_some_and(|id| e.expanded.contains(id));
     out.nodes.push(MindNode {
         visit: idx as i32,
@@ -784,7 +1141,7 @@ fn mind_dfs(
         children_expanded,
         has_children: e.kids.get(idx).is_some_and(|v| !v.is_empty()),
         has_entries: has_any_entries,
-        entry_rows: ModelRc::from(Rc::new(VecModel::from(rows))),
+        entry_rows: apply_node_entry_rows(e, idx, rows),
     });
 
     if !children.is_empty() {
@@ -985,7 +1342,469 @@ fn copy_branch_recursive(
     Ok(new_id)
 }
 
+/// 把文本写入系统剪贴板（「拷贝路径」用；各平台尽力而为）。
+const CLIP_TEXT_KEY: &str = "clipboard-text.applescript";
+const CLIP_TEXT_SCRIPT: &str = r#"on run argv
+	set the clipboard to ((item 1 of argv) as text)
+end run
+"#;
+
+#[cfg(target_os = "macos")]
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let script = clipboard_script_path(CLIP_TEXT_KEY)?;
+    let out = std::process::Command::new("osascript")
+        .arg(&script)
+        .arg(text)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(windows)]
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let ps = format!("Set-Clipboard -Value '{}'", text.replace('\'', "''"));
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    for prog in ["wl-copy", "xclip -selection clipboard"] {
+        let mut parts = prog.split_whitespace();
+        let Some(bin) = parts.next() else { continue };
+        let mut cmd = std::process::Command::new(bin);
+        cmd.args(parts).stdin(std::process::Stdio::piped());
+        if let Ok(mut child) = cmd.spawn() {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return Ok(());
+            }
+        }
+    }
+    Err("未找到可用的剪贴板程序（wl-copy / xclip）".into())
+}
+
+/// macOS 常见终端：`(pgrep 进程名, 应用路径候选)`。进程名用于探测正在运行的
+/// 终端；**路径**用于 `open -a`（比名字可靠 —— iTerm 的包是 `iTerm.app`，
+/// 而进程名是 iTerm2，`open -a iTerm2` 并不保证命中）。
+#[cfg(target_os = "macos")]
+const MAC_TERMINALS: [(&str, &[&str]); 8] = [
+    (
+        "iTerm2",
+        &["/Applications/iTerm.app", "/Applications/iTerm2.app"],
+    ),
+    ("Warp", &["/Applications/Warp.app"]),
+    ("Ghostty", &["/Applications/Ghostty.app"]),
+    ("kitty", &["/Applications/kitty.app"]),
+    ("Alacritty", &["/Applications/Alacritty.app"]),
+    ("WezTerm", &["/Applications/WezTerm.app"]),
+    ("Hyper", &["/Applications/Hyper.app"]),
+    ("Tabby", &["/Applications/Tabby.app"]),
+];
+
+/// `.command` 关联到这些 bundle id 时视为「不是终端」而放弃：「在终端中显示」
+/// 却打开编辑器显然是错的（`open -b` 同样会成功返回，链就断在这里了）。
+#[cfg(target_os = "macos")]
+const NOT_TERMINAL_BUNDLES: [&str; 9] = [
+    "com.apple.dt.Xcode",
+    "com.apple.TextEdit",
+    "com.apple.finder",
+    "com.apple.Preview",
+    "com.microsoft.VSCode",
+    "com.sublimetext.4",
+    "com.sublimetext.3",
+    "com.barebones.bbedit",
+    "com.panic.Nova",
+];
+
+/// `.command` 文件（UTI `com.apple.terminal.shell-script`）的默认处理程序
+/// bundle id —— 即用户在 Finder「显示简介 → 打开方式」里设定的默认终端。
+///
+/// 直接读 LaunchServices 偏好即可拿到，**不需要** Apple Events / Finder /
+/// 探针文件，也就没有 TCC 授权框与超时问题（旧方案用 osascript 问 Finder，
+/// 会被授权框卡住且要维护 /tmp 探针；更早的名字猜测（`open -a iTerm2`）在
+/// iTerm 上根本命中不了 —— 它的包名是 iTerm.app）。
+///
+/// 读不到（用户从未改过、plist 结构异常）时返回 None，由候选链兜底到
+/// Terminal.app —— macOS 上 `.command` 的声明方本来就是 Terminal。
+#[cfg(target_os = "macos")]
+fn macos_command_handler_bundle_id() -> Option<String> {
+    use std::sync::OnceLock;
+    // 会话内缓存：plist 导出约 85KB / 65ms，默认终端不会频繁变。
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let out = std::process::Command::new("defaults")
+                .args([
+                    "export",
+                    "com.apple.LaunchServices/com.apple.launchservices.secure",
+                    "-",
+                ])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            parse_command_handler_from_ls_handlers_xml(&String::from_utf8_lossy(&out.stdout))
+        })
+        .clone()
+}
+
+/// 从 `defaults export` 的 LSHandlers XML 里取 `.command`（UTI
+/// `com.apple.terminal.shell-script`）的角色 bundle id。
+///
+/// LSHandlers 是 dict 数组，每个数组项一层 dict，内部还可能嵌
+/// `LSHandlerPreferredVersions`（其值常为 `-` = 无覆盖）：必须按嵌套层级成块
+/// 扫描，块内优先取非 `-` 的角色值 —— 否则会读到内层占位符或串到相邻条目上。
+#[cfg(target_os = "macos")]
+fn parse_command_handler_from_ls_handlers_xml(xml: &str) -> Option<String> {
+    const UTI: &str = "com.apple.terminal.shell-script";
+    const ROLES: [&str; 4] = [
+        "LSHandlerRoleAll",
+        "LSHandlerRoleViewer",
+        "LSHandlerRoleShell",
+        "LSHandlerRoleEditor",
+    ];
+    /// 在一条 handler 字典里取角色 bundle id。
+    fn role_of(block: &[&str]) -> Option<String> {
+        for role in ROLES {
+            let key = format!("<key>{role}</key>");
+            // 同一角色键在块内可能出现两次：内层 PreferredVersions 的 `-`
+            // 占位在前、外层真实值在后 —— 逐个出现位置找第一个有效值，
+            // 只看首个位置会被占位符挡住。
+            for (i, l) in block.iter().enumerate() {
+                if !l.contains(key.as_str()) {
+                    continue;
+                }
+                let v = block
+                    .get(i + 1)
+                    .map(|s| {
+                        s.trim_start_matches("<string>")
+                            .trim_end_matches("</string>")
+                            .trim()
+                    })
+                    .unwrap_or_default();
+                if !v.is_empty() && v != "-" {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    let mut lines = xml.lines().map(str::trim);
+    // 顶层是 `<dict><key>LSHandlers</key><array>…`：先定位键，再只看 array
+    // 内的条目。**不能**裸扫 `<dict>` 边界 —— 顶层那个 dict 会把整个文件
+    // 包成一块，于是读到文件里第一个非 "-" 的角色值（实测读到无关应用的
+    // bundle id：com.seriflabs.affinitydesigner）。
+    if !lines.by_ref().any(|l| l.contains("<key>LSHandlers</key>")) {
+        return None;
+    }
+    let mut in_array = false;
+    let mut depth = 0usize;
+    let mut block: Vec<&str> = Vec::new();
+    for line in lines {
+        if !in_array {
+            if line.starts_with("<array>") {
+                in_array = true;
+            }
+            continue;
+        }
+        if line.starts_with("</array>") && depth == 0 {
+            break;
+        }
+        if line.starts_with("<dict>") {
+            if depth == 0 {
+                block.clear();
+            }
+            depth += 1;
+        }
+        if depth > 0 {
+            block.push(line);
+        }
+        if line.starts_with("</dict>") {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                if block.iter().any(|l| l.contains(UTI)) {
+                    if let Some(id) = role_of(&block) {
+                        return Some(id);
+                    }
+                }
+                block.clear();
+            }
+        }
+    }
+    None
+}
+
+/// `open -b <bundle id> <目录>`：把目录交给指定应用打开（终端会新开窗口并切到
+/// 该目录）。bundle id 不合法时 `open` 会以非 0 退出，调用方据此回退。
+#[cfg(target_os = "macos")]
+fn try_open_bundle(bundle: &str, dir: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("open")
+        .arg("-b")
+        .arg(bundle)
+        .arg(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// `open -a <应用名或绝对路径> <目录>`：候选链里每个终端都这么打开。
+#[cfg(target_os = "macos")]
+fn try_open_a(app: &str, dir: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("open")
+        .arg("-a")
+        .arg(app)
+        .arg(dir)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// 在终端中打开目录（「在终端中显示」用；各平台尽力而为）。
+fn open_terminal_at(dir: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 无「默认终端」系统 API，选择顺序：
+        //   1. STR_TERMINAL 显式覆盖（名字或路径，`open -a`）；
+        //   2. 系统 `.command` 默认处理程序（读 LaunchServices 偏好得 bundle id，
+        //      `open -b`）——用户可在 Finder 里改，这就是「默认终端」的事实定义；
+        //   3. 终端注入的环境变量 TERM_PROGRAM / LC_TERMINAL（从终端内启动应用
+        //      时会继承，直接指明用户的终端）；
+        //   4. 正在运行的常见终端（pgrep 免权限探测）；
+        //   5. 已安装的常见终端（路径存在即可用）；
+        //   6. Terminal.app 兜底。
+        // 候选统一为**路径或应用名**，逐个 `open -a <候选> <目录>`，失败换下一个。
+        // TERM_PROGRAM / LC_TERMINAL 值 → 应用名映射。
+        const TERM_PROGRAM_MAP: [(&str, &str); 8] = [
+            ("Apple_Terminal", "Terminal"),
+            ("iTerm.app", "iTerm"),
+            ("iTerm2", "iTerm"),
+            ("WarpTerminal", "Warp"),
+            ("ghostty", "Ghostty"),
+            ("Ghostty", "Ghostty"),
+            ("kitty", "kitty"),
+            ("WezTerm", "WezTerm"),
+        ];
+        let mut candidates: Vec<String> = Vec::new();
+        let push = |list: &mut Vec<String>, c: String| {
+            let c = c.trim_end_matches('/').to_string();
+            if !c.is_empty() && !list.iter().any(|x| x.eq_ignore_ascii_case(&c)) {
+                list.push(c);
+            }
+        };
+        // 1) 显式覆盖优先：设置了就先用它，失败再走系统关联
+        if let Ok(t) = std::env::var("STR_TERMINAL") {
+            let t = t.trim().to_string();
+            if !t.is_empty() {
+                push(&mut candidates, t.clone());
+                if let Ok(()) = try_open_a(&t, dir) {
+                    return Ok(());
+                }
+                candidates.clear();
+            }
+        }
+        // 2) 系统 `.command` 默认处理程序：最贴合「默认终端」的定义
+        let handler = macos_command_handler_bundle_id();
+        if let Some(bundle) = handler.as_deref() {
+            let usable = !NOT_TERMINAL_BUNDLES
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(bundle));
+            if !usable && debug_on() {
+                eprintln!("[str-gui] .command 默认处理程序 {bundle} 不是终端，跳过");
+            }
+            if usable && try_open_bundle(bundle, dir).is_ok() {
+                return Ok(());
+            }
+        }
+        // 3) 回退：环境变量 → 运行中 → 已安装 → Terminal.app
+        for var in ["TERM_PROGRAM", "LC_TERMINAL"] {
+            if let Ok(v) = std::env::var(var) {
+                if let Some((_, app)) = TERM_PROGRAM_MAP.iter().find(|(k, _)| *k == v) {
+                    push(&mut candidates, (*app).to_string());
+                }
+            }
+        }
+        // 正在运行的终端：一次 pgrep 搞定全部进程名（`-l` 输出 "pid 名称"，
+        // 逐名 8 次 spawn 纯属浪费 —— 每次都要 fork + exec）。
+        let pattern = MAC_TERMINALS
+            .iter()
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+            .join("|");
+        let running_out = std::process::Command::new("pgrep")
+            .args(["-ilx", &pattern])
+            .output();
+        let running_names: Vec<String> = running_out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.split_whitespace().nth(1).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (proc_name, paths) in MAC_TERMINALS {
+            if !running_names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(proc_name))
+            {
+                continue;
+            }
+            // 优先取实际存在的应用路径（`open -a <路径>` 必命中）
+            match paths.iter().find(|p| Path::new(p).exists()) {
+                Some(p) => push(&mut candidates, (*p).to_string()),
+                None => push(&mut candidates, proc_name.to_string()),
+            }
+        }
+        // 已安装的常见终端（路径存在 = `open -a <路径>` 必命中）
+        for (_, paths) in MAC_TERMINALS {
+            for p in paths {
+                if Path::new(p).exists() {
+                    push(&mut candidates, (*p).to_string());
+                }
+            }
+        }
+        let terminal_path = "/System/Applications/Utilities/Terminal.app";
+        push(
+            &mut candidates,
+            if Path::new(terminal_path).exists() {
+                terminal_path.to_string()
+            } else {
+                "Terminal".to_string()
+            },
+        );
+        let mut last_err = String::from("未找到可用的终端");
+        for t in &candidates {
+            match try_open_a(t, dir) {
+                Ok(()) => return Ok(()),
+                Err(msg) => last_err = msg,
+            }
+        }
+        Err(last_err)
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NoExit",
+                "-Command",
+                &format!("Set-Location -LiteralPath '{}'", dir.display()),
+            ])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for (prog, args) in [
+            ("x-terminal-emulator", vec!["--working-directory"]),
+            ("gnome-terminal", vec!["--working-directory"]),
+            ("konsole", vec!["--workdir"]),
+        ] {
+            let mut cmd = std::process::Command::new(prog);
+            cmd.args(&args).arg(dir);
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("未找到可用的终端程序".into())
+    }
+}
+
 /// 在系统文件管理器中显示（macOS：`open -R`）。
+/// 在 Finder 中显示（可多条）：按父目录分组，每组用 AppleScript `select`
+/// 在**一个窗口内多选**（`open -R` 多路径实测只选中 1 项）。
+/// 注意：`POSIX file … as alias` 对符号链接路径（/tmp）会失败 —— 调用前先
+/// `canonicalize`；个别组失败时兜底 `open -R`（单选降级，不致命）。
+#[cfg(target_os = "macos")]
+const REVEAL_KEY: &str = "reveal.applescript";
+#[cfg(target_os = "macos")]
+const REVEAL_SCRIPT: &str = r#"on run argv
+	set theItems to {}
+	repeat with p in argv
+		set end of theItems to (POSIX file (p as text) as alias)
+	end repeat
+	tell application "Finder"
+		activate
+		select theItems
+	end tell
+end run
+"#;
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager_multi(paths: &[PathBuf]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    // 规范化（解符号链接）+ 按父目录分组（每组一个窗口内多选）。
+    let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+    for p in paths {
+        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        let parent = canon.parent().unwrap_or(Path::new("/")).to_path_buf();
+        match groups.last_mut() {
+            Some(group) if group[0].parent() == Some(&parent) => group.push(canon),
+            _ => groups.push(vec![canon]),
+        }
+    }
+    let script = clipboard_script_path(REVEAL_KEY)?;
+    let mut failed = 0usize;
+    for group in &groups {
+        let arg_refs: Vec<&str> = group
+            .iter()
+            .map(|p| p.to_str().unwrap_or_default())
+            .collect();
+        let out = std::process::Command::new("osascript")
+            .arg(&script)
+            .args(&arg_refs)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            failed += 1;
+        }
+    }
+    if failed < groups.len() {
+        return Ok(());
+    }
+    // 全组失败 → 兜底：open -R（至少定位第一条，不中断流程）。
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg("-R").args(paths);
+    let _ = cmd.spawn();
+    Err("在访达中显示失败".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_in_file_manager_multi(paths: &[PathBuf]) -> Result<(), String> {
+    for p in paths {
+        reveal_in_file_manager(p);
+    }
+    Ok(())
+}
+
 fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "macos")]
     {
@@ -1080,7 +1899,12 @@ fn shortcut_table(mac: bool) -> Vec<Shortcut> {
     push(&mut out, "文件", "新建文件…", format!("{m}N"));
     push(&mut out, "文件", "刷新（重新扫描磁盘）", format!("{m}R"));
 
-    push(&mut out, "编辑", "复制 / 剪切 / 粘贴", format!("{m}C / {m}X / {m}V"));
+    push(
+        &mut out,
+        "编辑",
+        "复制 / 剪切 / 粘贴",
+        format!("{m}C / {m}X / {m}V"),
+    );
     push(&mut out, "编辑", "制作副本", format!("{m}D"));
     push(&mut out, "编辑", "删除条目", format!("{m}{del}"));
     push(&mut out, "编辑", "保存条目修改", format!("{m}S"));
@@ -1089,21 +1913,16 @@ fn shortcut_table(mac: bool) -> Vec<Shortcut> {
     push(&mut out, "分支", "保存分支信息", format!("{s}{m}S"));
     push(&mut out, "分支", "删除分支", format!("{s}{m}{del}"));
 
-    push(
-        &mut out,
-        "工具",
-        "在 Finder 中显示分支",
-        format!("{s}{m}R"),
-    );
-    push(
-        &mut out,
-        "工具",
-        "在 Finder 中显示内容",
-        format!("{a}{m}R"),
-    );
+    push(&mut out, "工具", "在 Finder 中显示分支", format!("{s}{m}R"));
+    push(&mut out, "工具", "在 Finder 中显示内容", format!("{a}{m}R"));
     push(&mut out, "工具", "校验 bundle", format!("{s}{m}V"));
 
-    push(&mut out, "视图", "列表视图 / 导图视图", format!("{m}1 / {m}2"));
+    push(
+        &mut out,
+        "视图",
+        "列表视图 / 导图视图",
+        format!("{m}1 / {m}2"),
+    );
     push(
         &mut out,
         "视图",
@@ -1277,8 +2096,8 @@ fn push_dir_children(
     }
 }
 
-/// 把「内容」页可见行转成 UI 模型行。
-fn visible_to_rows(vis: &[VisibleEntry]) -> Vec<EntryRow> {
+/// 把「内容」页可见行转成 UI 模型行（多选标记按当前集合烧入）。
+fn visible_to_rows(vis: &[VisibleEntry], multi: &HashSet<String>) -> Vec<EntryRow> {
     vis.iter()
         .map(|v| EntryRow {
             path: v.path.clone().into(),
@@ -1292,22 +2111,51 @@ fn visible_to_rows(vis: &[VisibleEntry]) -> Vec<EntryRow> {
             depth: v.depth as i32,
             is_dir: v.is_dir,
             expanded: v.expanded,
+            in_multi: multi.contains(&v.path),
         })
         .collect()
 }
 
 /// 「内容」页可见条目的路径列表（与 UI 行一一对应）。
-fn visible_entry_paths(e: &Editor) -> Vec<String> {
-    e.selected_visit()
-        .and_then(|v| v.meta.as_ref())
-        .map(|m| {
-            m.entries
-                .iter()
-                .filter(|en| !en.is_branch())
-                .map(|en| en.path.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+/// 条目角色：登记条目取 meta；未登记（文件夹子行等）按文件系统推断。
+/// 不存在 → None。
+fn entry_role_for(visit: &Visit, path: &str) -> Option<String> {
+    if let Some(en) = visit
+        .meta
+        .as_ref()
+        .and_then(|m| m.entries.iter().find(|x| x.path == path))
+    {
+        return Some(en.role.clone());
+    }
+    let full = visit.dir.join(path);
+    if !full.exists() {
+        return None;
+    }
+    Some(if full.is_dir() {
+        "dir".to_string()
+    } else {
+        "payload".to_string()
+    })
+}
+
+// 读取当前动作目标（相对路径列表；空 = 无选中）。
+fn menu_targets(app: &AppWindow) -> Vec<String> {
+    app.global::<EntryApi>()
+        .get_menu_targets()
+        .as_str()
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 动作目标所属分支：右键记录（menu-target-visit）优先，回退激活分支。
+fn action_visit<'a>(app: &AppWindow, e: &'a Editor) -> Option<&'a Visit> {
+    let vi = match app.global::<EntryApi>().get_menu_target_visit() {
+        v if v >= 0 => v as usize,
+        _ => e.selected_idx_in_visits()?,
+    };
+    e.scan.as_ref()?.visits.get(vi)
 }
 
 /// 解析拖拽载荷 `"visit|path"`；非法返回 None。
@@ -1319,6 +2167,23 @@ fn parse_entry_transfer(transfer: &str) -> Option<(usize, String)> {
         None
     } else {
         Some((visit, path))
+    }
+}
+
+/// 解析**批量**拖拽载荷 `"visit|path1\npath2…"`（多选拖拽；兼容单目标旧格式）。
+fn parse_entry_transfer_multi(transfer: &str) -> Option<(usize, Vec<String>)> {
+    let (visit, rest) = transfer.split_once('|')?;
+    let visit = visit.parse::<usize>().ok()?;
+    let paths: Vec<String> = rest
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        None
+    } else {
+        Some((visit, paths))
     }
 }
 
@@ -1342,9 +2207,208 @@ fn basename(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
+/// 当前打开 bundle 的根目录（未打开 → None）。
+fn e_bundle_root(editor: &Rc<RefCell<Editor>>) -> Option<PathBuf> {
+    editor.borrow().bundle.as_ref().map(|b| b.root.clone())
+}
+
+/// 从系统剪贴板的文件路径反推应用内条目：角色取自源分支 `._meta` 的登记
+/// （系统剪贴板是唯一事实来源，内部剪贴板只服务非 macOS 平台）。
+/// 路径不在 bundle 内 → None（外部文件走导入分支）。
+fn derive_clip(scan: &Scan, src: &Path, is_cut: bool) -> Option<ClipItem> {
+    // 找包含 src 的**最深** visit 目录（visit.dir 之间存在嵌套）。
+    let mut visit: Option<&Visit> = None;
+    for v in &scan.visits {
+        if src.starts_with(&v.dir) {
+            let deeper = match visit {
+                Some(p) => v.dir.as_os_str().len() > p.dir.as_os_str().len(),
+                None => true,
+            };
+            if deeper {
+                visit = Some(v);
+            }
+        }
+    }
+    let visit = visit?;
+    let rel = src
+        .strip_prefix(&visit.dir)
+        .ok()?
+        .to_string_lossy()
+        .to_string();
+    let name = basename(&rel);
+    let entry = visit
+        .meta
+        .as_ref()
+        .and_then(|m| m.entries.iter().find(|x| x.path == rel));
+    let role = match entry {
+        Some(en) => en.role.clone(),
+        None => {
+            if src.is_dir() {
+                "dir".to_string()
+            } else {
+                "payload".to_string()
+            }
+        }
+    };
+    Some(ClipItem {
+        src_path: src.to_path_buf(),
+        name,
+        role,
+        is_cut,
+    })
+}
+
 /// Finder / 系统噪声文件：隐藏文件（`.DS_Store`、`._*`）、`__MACOSX`、`Thumbs.db`。
 fn is_noise_name(name: &str) -> bool {
     name.starts_with('.') || name == "__MACOSX" || name.eq_ignore_ascii_case("Thumbs.db")
+}
+
+/// 跨分支整组移动（拖到树分支 / 行级跨分支落点共用）：逐项移动 payload/asset
+/// 文件（fs 重命名 + 源登记移除 + 目标登记 upsert，含重名去重与角色保全）；
+/// 未登记的磁盘项按文件系统移动并登记；文件夹子行无登记，按文件系统移动。
+/// 最后一次性重扫，返回汇总文案（含失败明细）。
+fn move_group_to_branch(
+    e: &mut Editor,
+    bundle: &Bundle,
+    src_visit: usize,
+    paths: &[String],
+    to_visit: usize,
+) -> Result<String, String> {
+    let scan = e.scan.as_ref().ok_or("未打开 bundle")?;
+    if src_visit == to_visit {
+        return Err("源与目标是同一分支".into());
+    }
+    if src_visit >= scan.visits.len() || to_visit >= scan.visits.len() {
+        return Err("分支无效".into());
+    }
+    let (src_dir, dst_dir) = {
+        let scan = e.scan.as_ref().unwrap();
+        (
+            scan.visits[src_visit].dir.clone(),
+            scan.visits[to_visit].dir.clone(),
+        )
+    };
+    let mut sm = read_meta(bundle, &src_dir)?;
+    let mut dst_meta = read_meta(bundle, &dst_dir)?;
+    let mut existing: HashSet<String> = dst_meta.entries.iter().map(|x| x.path.clone()).collect();
+    let mut moved: Vec<String> = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+    for path in paths {
+        // 文件夹子行没有 meta 条目：直接按文件系统移动到目标分支根目录。
+        let entry = sm.entries.iter().find(|x| x.path == *path).cloned();
+        match entry {
+            Some(entry) if !entry.is_file_like() => {
+                errs.push(format!("{path}：仅支持移动 payload/asset 文件"));
+                continue;
+            }
+            Some(entry) => {
+                let name = dedup_name(&existing, path);
+                if move_file(&src_dir.join(path), &dst_dir.join(&name)).is_err() {
+                    errs.push(format!("{path}：移动失败"));
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(dst_dir.join(&name)) else {
+                    errs.push(format!("{path}：读取失败"));
+                    continue;
+                };
+                existing.insert(name.clone());
+                sm.remove_entry_path(path);
+                dst_meta.upsert_entry(&Entry {
+                    path: name.clone(),
+                    role: entry.role.clone(),
+                    title: entry.title.clone(),
+                    note: entry.note.clone(),
+                    size: Some(bytes.len() as i64),
+                    sha256: Some(util::sha256_bytes(&bytes)),
+                    ..Default::default()
+                });
+                moved.push(name);
+            }
+            None => {
+                let src_fs = src_dir.join(path);
+                if !src_fs.exists() {
+                    errs.push(format!("{path}：源文件不存在"));
+                    continue;
+                }
+                let fs_names: HashSet<String> = std::fs::read_dir(&dst_dir)
+                    .map(|rd| {
+                        rd.filter_map(|x| x.ok())
+                            .map(|x| x.file_name().to_string_lossy().to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut merged = existing.clone();
+                merged.extend(fs_names);
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                let name = dedup_name(&merged, &name);
+                if move_file(&src_fs, &dst_dir.join(&name)).is_err() {
+                    errs.push(format!("{path}：移动失败"));
+                    continue;
+                }
+                existing.insert(name.clone());
+                if src_fs.is_dir() {
+                    let count = std::fs::read_dir(dst_dir.join(&name))
+                        .map(|rd| rd.count())
+                        .unwrap_or(0);
+                    dst_meta.upsert_entry(&Entry {
+                        path: name.clone(),
+                        role: "dir".to_string(),
+                        count: Some(count as i64),
+                        ..Default::default()
+                    });
+                } else {
+                    let bytes = match std::fs::read(dst_dir.join(&name)) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            errs.push(format!("{path}：读取失败"));
+                            continue;
+                        }
+                    };
+                    dst_meta.upsert_entry(&Entry {
+                        path: name.clone(),
+                        role: "payload".to_string(),
+                        size: Some(bytes.len() as i64),
+                        sha256: Some(util::sha256_bytes(&bytes)),
+                        ..Default::default()
+                    });
+                }
+                moved.push(name);
+            }
+        }
+    }
+    if !moved.is_empty() {
+        sm.touch();
+        sm.save(&bundle.meta_path(&src_dir))
+            .map_err(|err| err.to_string())?;
+        dst_meta.touch();
+        dst_meta
+            .save(&bundle.meta_path(&dst_dir))
+            .map_err(|err| err.to_string())?;
+    }
+    e.rescan()?;
+    if moved.is_empty() {
+        return Err(errs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "无条目被移动".into()));
+    }
+    let err_note = if errs.is_empty() {
+        String::new()
+    } else {
+        format!("（{} 项失败：{}）", errs.len(), errs.join("；"))
+    };
+    if moved.len() == 1 && errs.is_empty() {
+        return Ok(format!("已移动 {} → {}", paths[0], moved[0]));
+    }
+    Ok(format!(
+        "已移动 {} 项 → 目标分支：{}{}",
+        moved.len(),
+        moved.join("、"),
+        err_note
+    ))
 }
 
 /// 磁盘移动（rename 失败退化为 copy + delete，跨卷兜底）。
@@ -1359,19 +2423,16 @@ fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
     }
 }
 
-/// 把剪贴板条目落到当前选中分支：`is_cut` = 移动（剪切），否则复制。
-/// 返回给状态栏显示的消息。
-fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
-    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
-    let scan = e.scan.as_ref().ok_or("未选择分支")?;
-    let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
-    let visit = &scan.visits[visit_idx];
-    let id_version = scan
-        .visits
-        .first()
-        .and_then(|v| v.meta.as_ref())
-        .map(|m| m.policies.id_version)
-        .unwrap_or(7);
+/// 粘贴 / 制作副本单项落地（**不含重扫**）：返回（提示文案，登记路径）。
+/// 登记路径用于粘贴后**激活**被粘贴条目（Finder 语义：粘贴完选中新条目）。
+/// 批量粘贴（后台线程，重扫由批量完成回调统一做）与单条粘贴共用。
+fn apply_clip_at(
+    bundle: &Bundle,
+    visit_dir: &Path,
+    depth: usize,
+    id_version: usize,
+    clip: &ClipItem,
+) -> Result<(String, String), String> {
     if !clip.src_path.exists() {
         return Err("剪贴板中的源条目已不存在".into());
     }
@@ -1379,17 +2440,18 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
     // 剪切时源、目标不能是同一目录。
     if cut {
         let src_parent = clip.src_path.parent().unwrap_or(Path::new(""));
-        if src_parent == visit.dir {
+        if src_parent == visit_dir {
             return Err("源与目标是同一分支".into());
         }
     }
-    let mut meta = read_meta(bundle, &visit.dir)?;
+    let mut meta = read_meta(bundle, visit_dir)?;
     let existing: HashSet<String> = meta.entries.iter().map(|x| x.path.clone()).collect();
     let msg;
+    let registered;
     match clip.role.as_str() {
         "payload" | "asset" => {
             let name = dedup_name(&existing, &clip.name);
-            let dst = visit.dir.join(&name);
+            let dst = visit_dir.join(&name);
             if cut {
                 move_file(&clip.src_path, &dst)?;
             } else {
@@ -1403,11 +2465,12 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
                 sha256: Some(util::sha256_bytes(&bytes)),
                 ..Default::default()
             });
+            registered = name.clone();
             msg = format!("已{} {name}", if cut { "移动" } else { "粘贴" });
         }
         "dir" => {
             let name = dedup_name(&existing, &clip.name);
-            let dst = visit.dir.join(&name);
+            let dst = visit_dir.join(&name);
             if cut {
                 std::fs::rename(&clip.src_path, &dst).map_err(|err| err.to_string())?;
             } else {
@@ -1420,6 +2483,7 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
                 count: Some(count as i64),
                 ..Default::default()
             });
+            registered = name.clone();
             msg = format!("已{} {name}/", if cut { "移动" } else { "粘贴" });
         }
         "node" | "branch" => {
@@ -1427,9 +2491,9 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
                 // 同 bundle 内移动分支：保持 id，仅目录换位 + 父级登记转移。
                 let src_meta = read_meta(bundle, &clip.src_path)?;
                 let name = clip.name.clone();
-                std::fs::rename(&clip.src_path, visit.dir.join(&name))
+                std::fs::rename(&clip.src_path, visit_dir.join(&name))
                     .map_err(|err| err.to_string())?;
-                let role = if visit.depth == 0 { "node" } else { "branch" };
+                let role = if depth == 0 { "node" } else { "branch" };
                 meta.upsert_entry(&Entry {
                     path: name.clone(),
                     role: role.to_string(),
@@ -1438,19 +2502,20 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
                     title: src_meta.title.clone(),
                     ..Default::default()
                 });
+                registered = name.clone();
                 msg = format!("已移动分支 {name}");
             } else {
                 let mut mapping = std::collections::HashMap::new();
                 let new_id = copy_branch_recursive(
                     bundle,
                     &clip.src_path,
-                    &visit.dir,
-                    visit.depth,
+                    visit_dir,
+                    depth,
                     id_version,
                     &mut mapping,
                 )?;
-                let new_meta = read_meta(bundle, &visit.dir.join(&new_id))?;
-                let role = if visit.depth == 0 { "node" } else { "branch" };
+                let new_meta = read_meta(bundle, &visit_dir.join(&new_id))?;
+                let role = if depth == 0 { "node" } else { "branch" };
                 meta.upsert_entry(&Entry {
                     path: new_id.clone(),
                     role: role.to_string(),
@@ -1459,7 +2524,8 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
                     title: new_meta.title.clone(),
                     ..Default::default()
                 });
-                msg = format!("已粘贴分支 {}（新 id {new_id}）", clip.name);
+                registered = new_id;
+                msg = format!("已粘贴分支 {}（新 id {}）", clip.name, registered);
             }
         }
         other => return Err(format!("暂不支持 role = {other} 的条目")),
@@ -1476,10 +2542,32 @@ fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<String, String> {
         }
     }
     meta.touch();
-    meta.save(&bundle.meta_path(&visit.dir))
+    meta.save(&bundle.meta_path(visit_dir))
         .map_err(|err| err.to_string())?;
+    Ok((msg, registered))
+}
+
+/// 把剪贴板条目落到当前选中分支（含重扫）：单条粘贴 / 制作副本使用。
+/// 批量粘贴走 `ContentOp::Paste`（重扫由批量完成回调统一做）。
+fn apply_clip(e: &mut Editor, clip: &ClipItem) -> Result<(String, String), String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+    let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+    let (visit_dir, depth, id_version) = {
+        let scan = e.scan.as_ref().ok_or("未选择分支")?;
+        let v = &scan.visits[visit_idx];
+        (
+            v.dir.clone(),
+            v.depth,
+            scan.visits
+                .first()
+                .and_then(|v| v.meta.as_ref())
+                .map(|m| m.policies.id_version)
+                .unwrap_or(7),
+        )
+    };
+    let r = apply_clip_at(&bundle, &visit_dir, depth, id_version, clip)?;
     e.rescan()?;
-    Ok(msg)
+    Ok(r)
 }
 
 /// 把外部文件/目录复制进分支并登记条目，返回导入名列表。
@@ -1654,8 +2742,9 @@ fn move_entry_across(
         (Some(entry), None) => {
             // 登记到目标顶层序列的插入位。
             let ne = if entry.role == "dir" {
-                let count =
-                    std::fs::read_dir(dest_dir.join(&name)).map(|rd| rd.count()).unwrap_or(0);
+                let count = std::fs::read_dir(dest_dir.join(&name))
+                    .map(|rd| rd.count())
+                    .unwrap_or(0);
                 Entry {
                     path: name.clone(),
                     role: "dir".to_string(),
@@ -1715,8 +2804,9 @@ fn move_entry_across(
         (None, None) => {
             // 文件夹子行移到目标根目录：按类型登记。
             if src_fs.is_dir() {
-                let count =
-                    std::fs::read_dir(dest_dir.join(&name)).map(|rd| rd.count()).unwrap_or(0);
+                let count = std::fs::read_dir(dest_dir.join(&name))
+                    .map(|rd| rd.count())
+                    .unwrap_or(0);
                 dm.upsert_entry(&Entry {
                     path: name.clone(),
                     role: "dir".to_string(),
@@ -1744,79 +2834,196 @@ fn move_entry_across(
     Ok(format!("已移动 {path} → 目标分支"))
 }
 
-/// 运行多行 AppleScript（每行一个 `-e`），返回 stdout。
+/// 剪贴板 AppleScript 的落盘与执行：脚本按 key 缓存到临时目录（每进程一份），
+/// 之后每次调用只起 osascript 进程。
+///
+/// **必须用脚本文件，不能用多段 `-e`**：实测 `osascript -e … -e … -- args`
+/// 会不可靠地丢弃尾部参数——3 个路径只写进剪贴板 2 个（正是「复制数量正确、
+/// 粘贴数量不对」的根源：粘贴优先读系统剪贴板）。文件形式
+/// （`osascript /path/to/script arg…`）经对照实验往返完全一致。
 #[cfg(target_os = "macos")]
-fn run_applescript(lines: &[&str], args: &[&str]) -> Result<String, String> {
+fn clipboard_script_path(key: &'static str) -> Result<PathBuf, String> {
+    static CACHE: std::sync::OnceLock<
+        Result<std::collections::HashMap<&'static str, PathBuf>, String>,
+    > = std::sync::OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("str-gui-osascript-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut map = std::collections::HashMap::new();
+        for (k, s) in [
+            (CLIP_WRITE_KEY, CLIP_WRITE_SCRIPT),
+            (CLIP_READ_KEY, CLIP_READ_SCRIPT),
+            (CLIP_CLEAR_KEY, CLIP_CLEAR_SCRIPT),
+            (CLIP_CUT_READ_KEY, CLIP_CUT_READ_SCRIPT),
+            (REVEAL_KEY, REVEAL_SCRIPT),
+            (CLIP_TEXT_KEY, CLIP_TEXT_SCRIPT),
+        ] {
+            let p = dir.join(k);
+            std::fs::write(&p, s).map_err(|e| e.to_string())?;
+            map.insert(k, p);
+        }
+        Ok(map)
+    });
+    map.as_ref()
+        .map(|m| m.get(key).cloned().unwrap_or_default())
+        .map_err(|e| e.clone())
+}
+
+const CLIP_WRITE_KEY: &str = "clipboard-write.applescript";
+const CLIP_READ_KEY: &str = "clipboard-read.applescript";
+
+const CLIP_WRITE_SCRIPT: &str = r#"use framework "Foundation"
+use scripting additions
+-- argv[0] = 剪切标记（"0" 拷贝 / "1" 剪切），argv[1..] = 源文件路径。
+-- 剪切标记作为**首个 item 的附加表示**写入：单独 setString:forType: 会失败。
+on run argv
+    set cutFlag to (item 1 of argv) as text
+    set itemsList to current application's NSMutableArray's array()
+    set firstItem to true
+    repeat with i from 2 to (count of argv)
+        set p to (item i of argv)
+        set fileUrl to (current application's NSURL's fileURLWithPath:p)
+        set rep to (fileUrl's dataRepresentation)
+        set oneItem to (current application's NSPasteboardItem's alloc()'s init())
+        (oneItem's setData:rep forType:(current application's NSPasteboardTypeFileURL))
+        if firstItem then
+            (oneItem's setString:cutFlag forType:"com.str.str-gui.cut")
+            set firstItem to false
+        end if
+        (itemsList's addObject:oneItem)
+    end repeat
+    set pb to current application's NSPasteboard's generalPasteboard()
+    pb's clearContents()
+    pb's writeObjects:itemsList
+    delay 0.5
+end run
+"#;
+
+const CLIP_READ_SCRIPT: &str = r#"use framework "Foundation"
+use scripting additions
+on run
+    set pb to current application's NSPasteboard's generalPasteboard()
+    set pbItems to pb's pasteboardItems()
+    set out to ""
+    repeat with i from 1 to (count of pbItems)
+        set oneItem to (pbItems's objectAtIndex:(i - 1))
+        set rep to (oneItem's dataForType:(current application's NSPasteboardTypeFileURL))
+        if rep is not missing value then
+            set fileUrl to (current application's NSURL's alloc()'s initWithDataRepresentation:rep relativeToURL:(missing value))
+            set out to out & ((fileUrl's |path|()) as text) & linefeed
+        end if
+    end repeat
+    return out
+end run
+"#;
+
+/// 剪切标记（自定义 pasteboard 类型）：macOS 文件没有系统级「剪切」，
+/// 应用内剪切用该标记携带（作为**首个粘贴板 item 的附加表示**随 URL 一起写入——
+/// 单独在 writeObjects 之后 setString:forType: 会返回 false 且标记丢失）；
+/// 跨应用粘贴时其它程序会忽略它。读取见 CLIP_CUT_READ_*。
+
+/// 清空系统剪贴板（剪切粘贴成功后调用，Finder 语义：剪切的条目粘贴一次即失效）。
+const CLIP_CLEAR_KEY: &str = "clipboard-clear.applescript";
+const CLIP_CLEAR_SCRIPT: &str = r#"use framework "Foundation"
+use scripting additions
+on run
+    current application's NSPasteboard's generalPasteboard()'s clearContents()
+end run
+"#;
+
+/// 读取剪切标记：无标记返回 "0"，有标记返回 "1"。
+const CLIP_CUT_READ_KEY: &str = "clipboard-cut-read.applescript";
+const CLIP_CUT_READ_SCRIPT: &str = r#"use framework "Foundation"
+use scripting additions
+on run
+    set pb to current application's NSPasteboard's generalPasteboard()
+    set m to (pb's stringForType:"com.str.str-gui.cut")
+    if m is missing value then return "0"
+    return m as text
+end run
+"#;
+
+/// 把文件/目录写入 macOS 系统剪贴板（与 Finder 拷贝同格式）。
+/// `cut` = 是否打剪切标记（应用内剪切：粘贴时据此执行移动）。
+#[cfg(target_os = "macos")]
+fn mac_write_clipboard_files(paths: &[PathBuf], cut: bool) -> Result<(), String> {
+    let script = clipboard_script_path(CLIP_WRITE_KEY)?;
+    let mut args: Vec<String> = vec![if cut { "1".into() } else { "0".into() }];
+    args.extend(
+        paths
+            .iter()
+            .map(|p| p.to_str().unwrap_or_default().to_string()),
+    );
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let mut cmd = std::process::Command::new("osascript");
-    for line in lines {
-        cmd.arg("-e").arg(line);
-    }
-    if !args.is_empty() {
-        cmd.arg("--").args(args);
-    }
+    cmd.arg(&script).args(&arg_refs);
     let out = cmd.output().map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        if debug_on() {
+            eprintln!("[str-gui] mac clipboard write {} 项", paths.len());
+        }
+        Ok(())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
-/// 把文件/目录写入 macOS 系统剪贴板（NSPasteboard writeObjects:，与 Finder 拷贝同格式）。
-#[cfg(target_os = "macos")]
-fn mac_write_clipboard_files(paths: &[PathBuf]) -> Result<(), String> {
-    let args: Vec<&str> = paths
-        .iter()
-        .map(|p| p.to_str().unwrap_or_default())
-        .collect();
-    run_applescript(
-        &[
-            "use framework \"Foundation\"",
-            "use scripting additions",
-            "on run argv",
-            "    set pathList to current application's NSMutableArray's array()",
-            "    repeat with p in argv",
-            "        (pathList's addObject:(current application's NSURL's fileURLWithPath:p))",
-            "    end repeat",
-            "    set pb to current application's NSPasteboard's generalPasteboard()",
-            "    pb's clearContents()",
-            "    pb's writeObjects:pathList",
-            "end run",
-        ],
-        &args,
-    )
-    .map(|_| ())
-}
-
 /// 读取 macOS 系统剪贴板中的文件路径（NSURL 对象），无文件类内容时返回空。
 #[cfg(target_os = "macos")]
 fn mac_read_clipboard_files() -> Result<Vec<PathBuf>, String> {
-    let out = run_applescript(
-        &[
-            "use framework \"Foundation\"",
-            "use scripting additions",
-            "on run",
-            "    set pb to current application's NSPasteboard's generalPasteboard()",
-            "    set objs to pb's readObjectsForClasses:{current application's NSURL} options:(missing value)",
-            "    set out to \"\"",
-            "    if objs is not missing value then",
-            "        repeat with u in objs",
-            "            if (u's isFileURL() as boolean) then",
-            "                set out to out & ((u's |path|()) as text) & linefeed",
-            "            end if",
-            "        end repeat",
-            "    end if",
-            "    return out",
-            "end run",
-        ],
-        &[],
-    )?;
-    Ok(out
+    let script = clipboard_script_path(CLIP_READ_KEY)?;
+    let out = {
+        let mut cmd = std::process::Command::new("osascript");
+        cmd.arg(&script);
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        if out.status.success() {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        } else {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    };
+    let paths: Vec<PathBuf> = out
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(PathBuf::from)
-        .collect())
+        .collect();
+    if debug_on() {
+        eprintln!("[str-gui] mac clipboard read {} 项", paths.len());
+    }
+    Ok(paths)
+}
+
+/// 清空系统剪贴板（剪切条目粘贴成功后调用，Finder 语义：粘贴一次即失效）。
+#[cfg(target_os = "macos")]
+fn mac_clear_clipboard() -> Result<(), String> {
+    let script = clipboard_script_path(CLIP_CLEAR_KEY)?;
+    let out = std::process::Command::new("osascript")
+        .arg(&script)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// 读取系统剪贴板上的「剪切」标记（无标记 = 拷贝）。
+#[cfg(target_os = "macos")]
+fn mac_read_clipboard_cut() -> bool {
+    let script = match clipboard_script_path(CLIP_CUT_READ_KEY) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let out = match std::process::Command::new("osascript")
+        .arg(&script)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return false,
+    };
+    out == "1"
 }
 
 // ── 外观：进程级配色 + 向 OS 上报原生外观 ───────────────────────────────────
@@ -1859,8 +3066,8 @@ fn apply_appearance(app: &AppWindow, mode: i32) {
 fn report_app_appearance_native(mode: i32) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{
-        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-        NSAppearanceCustomization,
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+        NSApplication,
     };
 
     // 只设置**窗口级** `NSWindow.appearance`，不碰 `NSApp.appearance`：
@@ -1922,6 +3129,23 @@ fn system_prefers_dark() -> bool {
 fn debug_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("STR_DEBUG").is_some())
+}
+
+/// macOS：实时读取物理修饰键（系统级真值，不依赖 Slint 的键盘事件跟踪）。
+/// 返回（切换键 = ⌘，范围键 = Shift）。
+///
+/// Slint 的 `PointerEvent.modifiers` 来自内核对修饰键 KeyboardInput 的登记，
+/// ⌘+点击场景下时序/合成事件会导致读到 false——⌘ 点击因此退化为单选替换
+/// （选区永远单条，复制/粘贴/删除/拖拽的数量全部错误）。NSEvent 类方法是
+/// AppKit 当前的实际按键状态，无此依赖；回调本身就在主线程执行，直接可用。
+#[cfg(target_os = "macos")]
+fn native_toggle_shift() -> (bool, bool) {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+    let flags = NSEvent::modifierFlags_class();
+    (
+        flags.contains(NSEventModifierFlags::Command),
+        flags.contains(NSEventModifierFlags::Shift),
+    )
 }
 
 // ── 应用配置：最近打开的 bundle + 欢迎引导标记 ──
@@ -2011,11 +3235,19 @@ fn main() -> Result<(), slint::PlatformError> {
         std::env::set_var("STR_ABOUT_NAME", "STR 编辑器");
         std::env::set_var(
             "STR_ABOUT_VERSION",
-            format!("v{}（规范 v{}）", env!("CARGO_PKG_VERSION"), str_format::SPEC_VERSION),
+            format!(
+                "v{}（规范 v{}）",
+                env!("CARGO_PKG_VERSION"),
+                str_format::SPEC_VERSION
+            ),
         );
         std::env::set_var(
             "STR_ABOUT_COPYRIGHT",
-            format!("{} License · {}", env!("CARGO_PKG_LICENSE"), env!("CARGO_PKG_REPOSITORY")),
+            format!(
+                "{} License · {}",
+                env!("CARGO_PKG_LICENSE"),
+                env!("CARGO_PKG_REPOSITORY")
+            ),
         );
     }
 
@@ -2069,12 +3301,49 @@ fn main() -> Result<(), slint::PlatformError> {
     );
 
     let editor = Rc::new(RefCell::new(Editor::new()));
-    let clipboard: Rc<RefCell<Option<ClipItem>>> = Rc::new(RefCell::new(None));
+    let clipboard: Rc<RefCell<Vec<ClipItem>>> = Rc::new(RefCell::new(Vec::new()));
+    // 内容条目批量操作的共享槽：当前操作 + 最近一轮逐项结果（供「重试失败项」）。
+    let batch_results: std::sync::Arc<std::sync::Mutex<(ContentOp, Vec<BatchOutcome>)>> =
+        std::sync::Arc::new(std::sync::Mutex::new((
+            ContentOp::Trash {
+                branch_dir: PathBuf::new(),
+            },
+            Vec::new(),
+        )));
 
     // ── 拖拽载荷编解码（data-transfer 在 Slint 侧不透明）──
     {
+        let ed_multi = editor.clone();
         let dnd = app.global::<DndApi>();
-        dnd.on_entry_to_transfer(slint::DataTransfer::from);
+        // 拖拽行在多选集合内 → 载荷携带整组多选（Finder 语义：拖一个选中项 = 拖全部）。
+        // 多目标载荷格式："visit|path1\npath2…"（单目标保持旧格式 "visit|path"）。
+        dnd.on_entry_to_transfer(move |s: SharedString| {
+            let expanded = match s.split_once('|') {
+                Some((visit, path)) => {
+                    let e = ed_multi.borrow();
+                    if e.entry_multi.contains(path) {
+                        // 多路径载荷格式必须与 parse_entry_transfer_multi 一致：
+                        // "visit|p1\np2\n…"——visit 与首个路径之间的 '|' 不能丢，
+                        // 否则解析第一步 split_once('|') 即失败，整组载荷作废，
+                        // 落点回退到单路径 payload → 永远只移动一个条目。
+                        let mut out = String::from(visit);
+                        out.push('|');
+                        for p in &e.entry_multi {
+                            out.push('\n');
+                            out.push_str(p);
+                        }
+                        out
+                    } else {
+                        s.to_string()
+                    }
+                }
+                None => s.to_string(),
+            };
+            if debug_on() {
+                eprintln!("[str-gui] entry-to-transfer {s:?} -> {expanded:?}");
+            }
+            slint::DataTransfer::from(SharedString::from(expanded))
+        });
         dnd.on_transfer_to_entry(|d| d.plain_text().unwrap_or_default());
         dnd.on_transfer_has_files(|d| d.has_file_paths());
         dnd.on_transfer_to_files(|d| {
@@ -2240,39 +3509,116 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         // 思维导图不依赖选中状态：无选中时仍渲染完整布局（仅无高亮），
         // 否则点击空白取消选中会把整个画布清空。
-        let mind = mind_layout(e);
-        // 内容尺寸与节点数必须**先**写回：小地图的映射参数（比例 / 盒尺寸 / 密度
-        // 判据）都是 Slint 侧按这几个值算的绑定，晚写就会读到上一轮布局的旧值。
-        // 缩略图内容宽度需扣掉子树按钮占位（面板宽度与缩略比例都用它），否则右侧
-        // 会多出一段空白——或反过来，比例基准不扣时内容会溢出面板。
-        app.set_mind_edge_offset(mind.edge_offset);
-        app.set_mind_w(mind.w);
-        app.set_mind_h(mind.h);
-        app.set_mind_node_count(mind.nodes.len() as i32);
+        //
+        // 布局缓存：几何只取决于「可见行结构 + 展开集合 + 内容展开节点的行数」，
+        // 与选中 / 多选集合**无关**。选中变化（点行、⌘ 多选、右键换节点）以前每次
+        // 都整树重排并重建连线 / 小地图位图，大 bundle 下每次点击都是数十毫秒的
+        // 白算；签名一致时只刷新选中标记与节点内容行数据。
+        let sig = mind_sig(e);
+        let fresh = {
+            let mut slot = e.mind_cache.borrow_mut();
+            match slot.as_ref() {
+                Some((s, _)) if *s == sig => false,
+                _ => {
+                    *slot = Some((sig, mind_layout(e)));
+                    true
+                }
+            }
+        };
+        let guard = e.mind_cache.borrow();
+        let Some((_, mind)) = guard.as_ref() else {
+            drop(guard);
+            return;
+        };
+        if fresh {
+            // 内容尺寸与节点数必须**先**写回：小地图的映射参数（比例 / 盒尺寸 / 密度
+            // 判据）都是 Slint 侧按这几个值算的绑定，晚写就会读到上一轮布局的旧值。
+            // 缩略图内容宽度需扣掉子树按钮占位（面板宽度与缩略比例都用它），否则右侧
+            // 会多出一段空白——或反过来，比例基准不扣时内容会溢出面板。
+            app.set_mind_edge_offset(mind.edge_offset);
+            app.set_mind_w(mind.w);
+            app.set_mind_h(mind.h);
+            app.set_mind_node_count(mind.nodes.len() as i32);
+            // 连线以「分块 Path」渲染（逐条矩形的 item 数在超大导图下不可接受）。
+            // 几何未变时连线形状也不变，无需重建。
+            app.set_mind_edge_chunks(ModelRc::from(Rc::new(VecModel::from(
+                mind.edge_chunks.clone(),
+            ))));
+            app.set_mind_mini_edge_chunks(ModelRc::from(Rc::new(VecModel::from(
+                mind.mini_edge_chunks.clone(),
+            ))));
+        }
         // 小地图密度形态：映射参数（盒尺寸 / 两轴比例 / 判据 / 用色）都由 Slint 侧
         // 计算，这里回读后烘焙位图 —— 两边用同一组数值，不会各算一套。
         if app.get_mini_dense() {
             // Slint 在窗口显示前只报 1.0，密度图固定按 2x 生成：位图很小（184×116
             // 量级），Retina 下不糊，1x 屏上略缩也看不出差别。
             let dpr = app.window().scale_factor().clamp(2.0, 3.0);
-            let spine = selection_spine(&mind, e.scan.as_ref().expect("已打开 bundle"));
-            let raster = mini_density_raster(
-                &mind,
-                (app.get_mini_box_w(), app.get_mini_box_h()),
-                (app.get_mini_sx(), app.get_mini_sy()),
-                dpr,
-                &spine,
-                rgb_of(app.get_mini_ink()),
-                rgb_of(app.get_mini_accent()),
+            let (bw, bh) = (app.get_mini_box_w(), app.get_mini_box_h());
+            let (sx, sy) = (app.get_mini_sx(), app.get_mini_sy());
+            let ink = rgb_of(app.get_mini_ink());
+            let accent = rgb_of(app.get_mini_accent());
+            let selected = e.selected.clone().unwrap_or_default();
+            // 键含布局签名 / 映射参数 / 用色 / 选中路径：只有这些变化才需要重烘焙。
+            let key = format!(
+                "{sig}|{dpr:.2}|{bw:.2}x{bh:.2}|{sx:.4}x{sy:.4}|{ink:?}{accent:?}|{selected}"
             );
-            app.set_mind_mini_image(mini_density_image(&raster));
+            if e.mini_raster_key.borrow().as_deref() != Some(key.as_str()) {
+                // 无 scan（未打开 bundle）时布局为空，跳过光栅即可：过去这里 expect 会 panic。
+                if let Some(scan) = e.scan.as_ref() {
+                    let spine = selection_spine(mind, scan);
+                    let raster =
+                        mini_density_raster(mind, (bw, bh), (sx, sy), dpr, &spine, ink, accent);
+                    app.set_mind_mini_image(mini_density_image(&raster));
+                }
+                *e.mini_raster_key.borrow_mut() = Some(key);
+            }
         }
-        // 连线以「分块 Path」渲染（逐条矩形的 item 数在超大导图下不可接受）。
-        app.set_mind_edge_chunks(ModelRc::from(Rc::new(VecModel::from(mind.edge_chunks))));
-        app.set_mind_mini_edge_chunks(ModelRc::from(Rc::new(VecModel::from(
-            mind.mini_edge_chunks,
-        ))));
-        app.set_mind_nodes(ModelRc::from(Rc::new(VecModel::from(mind.nodes))));
+        // 节点模型尽量原地更新：整体替换会重建所有节点组件，正在显示右键
+        // 菜单的那个节点被销毁 → 菜单项点击失效（首次右键选中分支即触发，
+        // 与结构树 rows_model 同款问题）。节点数变化时（展开/收起等）才整体替换。
+        let existing_nodes = e.mind_nodes_model.borrow().clone();
+        match existing_nodes {
+            Some(handle) if handle.row_count() == mind.nodes.len() => {
+                if fresh {
+                    for (i, n) in mind.nodes.iter().enumerate() {
+                        handle.set_row_data(i, n.clone());
+                    }
+                } else {
+                    // 缓存命中：几何不变，只把选中标记与节点内容行数据刷新到位。
+                    // 行模型句柄保持不动（内容行原地更新 → 节点内右键菜单 / 拖拽
+                    // 所在组件不会被销毁）。
+                    for (i, n) in mind.nodes.iter().enumerate() {
+                        let mut patch: Option<MindNode> = None;
+                        let sel = node_is_selected(e, n.visit as usize);
+                        if n.is_selected != sel {
+                            let x = patch.get_or_insert_with(|| n.clone());
+                            x.is_selected = sel;
+                        }
+                        if n.expanded && n.has_entries {
+                            let rows = visible_to_rows(
+                                &build_entry_rows_for(e, n.visit as usize),
+                                &e.entry_multi,
+                            );
+                            let h = apply_node_entry_rows(e, n.visit as usize, rows);
+                            if h != n.entry_rows {
+                                let x = patch.get_or_insert_with(|| n.clone());
+                                x.entry_rows = h;
+                            }
+                        }
+                        if let Some(x) = patch {
+                            handle.set_row_data(i, x);
+                        }
+                    }
+                }
+            }
+            _ => {
+                let handle = Rc::new(VecModel::from(mind.nodes.clone()));
+                app.set_mind_nodes(ModelRc::from(handle.clone()));
+                *e.mind_nodes_model.borrow_mut() = Some(handle);
+            }
+        }
+        drop(guard);
 
         // 内容尺寸变化时 slint 侧会经 flick 的 changed width 触发 center-canvas 居中。
         sync_selected_detail(app, e);
@@ -2294,6 +3640,12 @@ fn main() -> Result<(), slint::PlatformError> {
             app.set_entries(ModelRc::default());
             app.set_refs(ModelRc::default());
             app.set_entry_selected(-1);
+            // 动作目标必须随选中一起清空：否则无选中时触发条目动作（快捷键 /
+            // 菜单未灰化路径）会读到上一个分支与上一批路径，操作落到错误位置。
+            app.global::<EntryApi>().set_menu_target_visit(-1);
+            app.global::<EntryApi>().set_menu_targets("".into());
+            app.global::<EntryApi>().set_multi_count(0);
+            *e.entries_model.borrow_mut() = None;
             app.global::<DndApi>().set_src_visit(-1);
             return;
         };
@@ -2324,8 +3676,25 @@ fn main() -> Result<(), slint::PlatformError> {
 
         // 内容 entries[]：只显示内容条目（node/branch 在结构树中呈现），
         // 已展开的内容文件夹列出磁盘子项。
-        let entry_model: Vec<EntryRow> = visible_to_rows(&build_entry_rows(e));
-        app.set_entries(ModelRc::from(Rc::new(VecModel::from(entry_model))));
+        // 内容行只构建一次：条目模型与右侧编辑区（fill_entry_fields）共用，
+        // 避免同一次同步里重复 read_dir 遍历同一分支。
+        let vis = build_entry_rows(e);
+        let entry_model: Vec<EntryRow> = visible_to_rows(&vis, &e.entry_multi);
+        // 行数不变则原地更新（同 rows_model）：整体替换会重建所有条目行组件，
+        // 右键落点行被销毁 → 菜单项点击失效（多选存在时右键未选中行即触发）。
+        let existing_entries = e.entries_model.borrow().clone();
+        match existing_entries {
+            Some(handle) if handle.row_count() == entry_model.len() => {
+                for (i, r) in entry_model.into_iter().enumerate() {
+                    handle.set_row_data(i, r);
+                }
+            }
+            _ => {
+                let handle = Rc::new(VecModel::from(entry_model));
+                app.set_entries(ModelRc::from(handle.clone()));
+                *e.entries_model.borrow_mut() = Some(handle);
+            }
+        }
 
         // 关联 refs[]（目标标题经 id 解析）
         let ref_model: Vec<RefRow> = meta
@@ -2352,16 +3721,15 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_default();
         app.set_refs(ModelRc::from(Rc::new(VecModel::from(ref_model))));
 
-        // 条目编辑区
-        fill_entry_fields(app, e);
+        // 条目编辑区（复用上面已构建的可见行，不再重复遍历磁盘）
+        fill_entry_fields(app, e, &vis);
 
         // 拖拽源分支（当前选中分支）。
         app.global::<DndApi>().set_src_visit(drag_source_visit(e));
     }
 
-    fn fill_entry_fields(app: &AppWindow, e: &Editor) {
+    fn fill_entry_fields(app: &AppWindow, e: &Editor, vis: &[VisibleEntry]) {
         // 选中条目按路径定位（跨 rescan 稳定）；文件夹子行不可编辑。
-        let vis = build_entry_rows(e);
         let position = e
             .selected_entry_path
             .as_ref()
@@ -2403,6 +3771,40 @@ fn main() -> Result<(), slint::PlatformError> {
         let vrow = position.and_then(|pos| vis.get(pos));
         app.set_e_kind(vrow.map(|v| v.role.as_str()).unwrap_or("—").into());
         app.set_e_path(vrow.map(|v| v.path.as_str()).unwrap_or("").into());
+        // 多选摘要：右侧栏在「多选无主选中」时显示（⌘A / 整组反选后不再空白），
+        // 「多选有主选中」时作为编辑范围提示（编辑仅作用于当前条目）。
+        if e.entry_multi.len() > 1 {
+            let items = collect_entry_multi(e);
+            let names: Vec<String> = items.iter().map(|(_, n)| n.clone()).take(5).collect();
+            let mut s = format!("已选中 {} 个条目", items.len());
+            if !names.is_empty() {
+                s.push_str("：");
+                s.push_str(&names.join("、"));
+            }
+            if items.len() > names.len() {
+                s.push_str(" 等");
+            }
+            app.global::<EntryApi>().set_multi_summary(s.into());
+        } else {
+            app.global::<EntryApi>().set_multi_summary("".into());
+        }
+        // 选区计数以本次构建的可见行为准：批量移动 / 删除后 rescan 会剪除已消失
+        // 的路径，处理器各自 set 的计数可能比集合大，这里统一回写保证一致。
+        app.global::<EntryApi>()
+            .set_multi_count(e.entry_multi.len() as i32);
+        // 动作目标：与右侧栏视图同步的「当前生效选区」解析结果（相对路径，
+        // \n 分隔）。所有条目动作回调（打开/显示/拷贝/剪切/制作副本/重命名…）
+        // 都从这里取目标、**不接收行号**——行号空间错位与右键时序问题由此根除。
+        app.global::<EntryApi>()
+            .set_menu_target_visit(e.selected_idx_in_visits().map(|i| i as i32).unwrap_or(-1));
+        if e.entry_multi.len() > 1 {
+            let targets: Vec<String> = collect_entry_multi(e).into_iter().map(|(p, _)| p).collect();
+            app.global::<EntryApi>()
+                .set_menu_targets(targets.join("\n").into());
+        } else {
+            let t = e.selected_entry_path.clone().unwrap_or_default();
+            app.global::<EntryApi>().set_menu_targets(t.into());
+        }
     }
 
     // ── 列表 / 导图 / 选中 → UI ──
@@ -2947,6 +4349,50 @@ fn main() -> Result<(), slint::PlatformError> {
             app.set_status(format!("已在 Finder 中定位：{}", visit.dir.display()).into());
         });
     }
+    {
+        // 分支「拷贝路径」：当前选中分支目录的绝对路径写入剪贴板。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_branch_copy_path(move || {
+            let app = app_weak.upgrade().unwrap();
+            let text = {
+                let e = editor.borrow();
+                let Some(visit) = e.selected_visit() else {
+                    app.set_status("未选择分支".into());
+                    return;
+                };
+                visit.dir.to_string_lossy().to_string()
+            };
+            match copy_text_to_clipboard(&text) {
+                Ok(()) => app.set_status(format!("已拷贝路径：{text}").into()),
+                Err(msg) => app.set_status(format!("拷贝路径失败：{msg}").into()),
+            }
+        });
+    }
+    {
+        // 分支「在终端中显示」：在当前选中分支目录打开终端。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_branch_reveal_terminal(move || {
+            let app = app_weak.upgrade().unwrap();
+            let dir = {
+                let e = editor.borrow();
+                let Some(visit) = e.selected_visit() else {
+                    app.set_status("未选择分支".into());
+                    return;
+                };
+                visit.dir.clone()
+            };
+            if !dir.exists() {
+                app.set_status(format!("目录不存在：{}", dir.display()).into());
+                return;
+            }
+            match open_terminal_at(&dir) {
+                Ok(()) => app.set_status(format!("已在终端中打开：{}", dir.display()).into()),
+                Err(msg) => app.set_status(format!("打开终端失败：{msg}").into()),
+            }
+        });
+    }
 
     // ── 新建子分支 ──
     {
@@ -3083,10 +4529,20 @@ fn main() -> Result<(), slint::PlatformError> {
         app.global::<EntryApi>().on_select_entry(move |index| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            e.selected_entry_path = build_entry_rows(&e)
+            // 单选 = 单元素选区（Finder 语义）：与多选同一集合、同一高亮。
+            e.entry_multi.clear();
+            e.entry_anchor = Some(index as usize);
+            let path = build_entry_rows(&e)
                 .get(index as usize)
                 .map(|v| v.path.clone());
-            fill_entry_fields(&app, &e);
+            if let Some(p) = &path {
+                e.entry_multi.insert(p.clone());
+            }
+            app.global::<EntryApi>()
+                .set_multi_count(e.entry_multi.len() as i32);
+            e.selected_entry_path = path;
+            // 重建条目模型：让 in-multi 高亮（单元素选区）与选中态一致。
+            sync_detail(&app, &e);
             app.set_info_tab(1);
         });
     }
@@ -3193,14 +4649,90 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
+        let slot = std::sync::Arc::clone(&batch_results);
         app.global::<EntryApi>().on_delete_entry(move || {
             let app = app_weak.upgrade().unwrap();
+            // 多选（≥2）→ 批量删除：Finder 的「移到废纸篓」作用于整个选区；
+            // 批量属破坏性场景，按用户要求先确认（单项保持免确认，与 Finder 一致）。
+            let (multi, visit_idx): (Vec<(String, String)>, Option<usize>) = {
+                let e = editor.borrow();
+                let targets = menu_targets(&app);
+                let vi = match app.global::<EntryApi>().get_menu_target_visit() {
+                    v if v >= 0 => Some(v as usize),
+                    _ => e.selected_idx_in_visits(),
+                };
+                if debug_on() {
+                    eprintln!(
+                        "[str-gui] delete-entry visit={vi:?} targets={}",
+                        targets.len()
+                    );
+                }
+                (
+                    targets
+                        .into_iter()
+                        .map(|p| (p.clone(), basename(&p)))
+                        .collect(),
+                    vi,
+                )
+            };
+            if multi.len() >= 2 {
+                if app.get_batch_busy() || app.get_summary_visible() {
+                    return;
+                }
+                let n = multi.len();
+                let confirmed = rfd::MessageDialog::new()
+                    .set_title("批量删除")
+                    .set_description(format!("确定把选中的 {n} 个条目移到废纸篓？"))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+                if confirmed != rfd::MessageDialogResult::Yes {
+                    return;
+                }
+                let branch_dir = {
+                    let e = editor.borrow();
+                    match visit_idx {
+                        Some(vi) => e.scan.as_ref().unwrap().visits[vi].dir.clone(),
+                        None => return,
+                    }
+                };
+                app.set_summary_visible(false);
+                app.set_progress_total(n as i32);
+                app.set_progress_done(0);
+                app.set_progress_text("".into());
+                app.set_batch_busy(true);
+                if let Ok(mut s) = slot.lock() {
+                    s.0 = ContentOp::Trash { branch_dir };
+                    s.1.clear();
+                }
+                spawn_gui_batch(
+                    app.as_weak(),
+                    std::sync::Arc::clone(&slot),
+                    &format!("批量删除 · {n} 项"),
+                    multi,
+                );
+                return;
+            }
             // 移到废纸篓可找回，无需确认。
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
-                let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                // 目标分支 = 右键记录（跨节点删除）或激活分支。
+                let visit_idx = match visit_idx {
+                    Some(vi) => vi,
+                    None => e.selected_idx_in_visits().ok_or("未选择分支")?,
+                };
                 let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
-                let path = e.selected_entry_path.clone().ok_or("未选择条目")?;
+                // 右键目标优先；否则主选中 / 单元素选区（统一选择模型）。
+                let targets = menu_targets(&app);
+                let path = match targets.first().cloned() {
+                    Some(p) => p,
+                    None => match e.selected_entry_path.clone() {
+                        Some(p) => p,
+                        None if e.entry_multi.len() == 1 => {
+                            e.entry_multi.iter().next().cloned().unwrap()
+                        }
+                        _ => return Err("未选择条目".into()),
+                    },
+                };
                 let file = visit.dir.join(&path);
                 if file.exists() {
                     trash::delete(&file).map_err(|err| err.to_string())?;
@@ -3221,6 +4753,369 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 Err(msg) => app.set_status(format!("删除条目失败：{msg}").into()),
             }
+        });
+    }
+
+    // ── 内容条目批量操作（Finder 语义）：多选 / 全选 / 批量重命名 / 汇总 ──
+    {
+        let editor = editor.clone();
+        // 覆盖外层的 app_weak（早前已被 move 进别的闭包），本块内统一用它克隆。
+        let app_weak = app.as_weak();
+        // 条目行左键点击（统一入口）：修饰键决策在 Rust 侧。Slint 传入的
+        // ctrl/shift 是其内部键盘状态推出的**提示值**（非 macOS 平台直接采用）；
+        // macOS 上改用 NSEvent 实时查询系统真值 —— vendor 的修饰符跟踪依赖
+        // ⌘ 键盘事件登记，⌘+点击场景下不可靠，曾使 ⌘ 点击退化为单选替换
+        // （选区永远单条 → 复制/粘贴/删除/拖拽的数量全部错误）。
+        {
+            let ed = editor.clone();
+            let aw = app_weak.clone();
+            app.global::<EntryApi>().on_entry_click(
+                move |src_visit, index, ctrl_hint, shift_hint| {
+                    let app = aw.upgrade().unwrap();
+                    let (toggle, range) = {
+                        #[cfg(target_os = "macos")]
+                        {
+                            native_toggle_shift()
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            (ctrl_hint, shift_hint)
+                        }
+                    };
+                    if debug_on() {
+                        let e = ed.borrow();
+                        eprintln!(
+                            "[str-gui] entry-click visit={src_visit} index={index} \
+                             toggle={toggle} range={range} (hint ctrl={ctrl_hint} \
+                             shift={shift_hint}) multi={} primary={:?}",
+                            e.entry_multi.len(),
+                            e.selected_entry_path
+                        );
+                    }
+                    let mut e = ed.borrow_mut();
+                    if e.selected_idx_in_visits() != Some(src_visit as usize) {
+                        return;
+                    }
+                    let vis = build_entry_rows(&e);
+                    let Some(vr) = vis.get(index as usize) else {
+                        return;
+                    };
+                    let path = vr.path.clone();
+                    let eligible = entry_multi_eligible(&vr);
+                    if range {
+                        // Finder 语义：Shift 点击 = 用「锚点…当前行」**替换**整个选区
+                        // （不是并入——此前多次 Shift 点击只会越选越多）。锚点保持
+                        // 不变：继续 Shift 点击别处，仍以同一锚点重新划范围。
+                        let anchor = e.entry_anchor.unwrap_or(index as usize);
+                        let (lo, hi) = (anchor.min(index as usize), anchor.max(index as usize));
+                        e.entry_multi.clear();
+                        for v in vis.iter().take(hi + 1).skip(lo) {
+                            if entry_multi_eligible(v) {
+                                e.entry_multi.insert(v.path.clone());
+                            }
+                        }
+                        // 主选中跟随最后点击的条目（详情面板联动）；锚点不动。
+                        e.selected_entry_path = Some(path);
+                    } else if toggle {
+                        // ⌘ 点击文件夹子行等不可批量行：不改变选区。
+                        if !eligible {
+                            return;
+                        }
+                        // Finder 语义：把当前主选中并入选区（若尚未在），再切换点击行。
+                        if e.entry_multi.is_empty() {
+                            if let Some(p) = e.selected_entry_path.clone() {
+                                if p != path
+                                    && vis.iter().any(|v| v.path == p && entry_multi_eligible(&v))
+                                {
+                                    e.entry_multi.insert(p);
+                                }
+                            }
+                        }
+                        if !e.entry_multi.remove(&path) {
+                            // 加入：主选中跟随最新加入的条目。
+                            e.entry_multi.insert(path.clone());
+                            e.selected_entry_path = Some(path);
+                        } else {
+                            // 切换移除：主选中必须退出（否则 col-sel 高亮残留，
+                            // 表现为「反选无效果」）。若选区因此只剩 1 条，
+                            // 让它成为主选中——否则切回单选视图时右侧栏空白。
+                            e.selected_entry_path = None;
+                            if e.entry_multi.len() == 1 {
+                                e.selected_entry_path = e.entry_multi.iter().next().cloned();
+                            }
+                        }
+                        // Finder 语义：⌘ 点击（加入或移除）都重设 Shift 锚点。
+                        e.entry_anchor = Some(index as usize);
+                    } else {
+                        // 无修饰键 = 单选：选区 = {该条目}。单选即单元素选区，
+                        // 与多选使用**同一高亮**（条目行的 in-multi 渲染）。
+                        e.entry_multi.clear();
+                        if eligible {
+                            e.entry_multi.insert(path.clone());
+                        }
+                        e.entry_anchor = Some(index as usize);
+                        e.selected_entry_path = Some(path);
+                    }
+                    // 单选 / 多选都激活「条目」tab（多选时展示多选视图）。
+                    app.set_info_tab(1);
+                    app.global::<EntryApi>()
+                        .set_multi_count(e.entry_multi.len() as i32);
+                    sync_detail(&app, &e);
+                },
+            );
+        }
+
+        // ⌘A 全选：仅选中分支的**顶层登记条目**（文件夹子行 / 分支行不参与批量）。
+        let ed = editor.clone();
+        let aw = app_weak.clone();
+        app.global::<EntryApi>().on_entries_select_all(move || {
+            let app = aw.upgrade().unwrap();
+            let mut e = ed.borrow_mut();
+            for v in build_entry_rows(&e)
+                .iter()
+                .filter(|v| entry_multi_eligible(v))
+            {
+                e.entry_multi.insert(v.path.clone());
+            }
+            // 全选即退出主选中（详情面板回到未选条目态）。
+            e.selected_entry_path = None;
+            if debug_on() {
+                eprintln!("[str-gui] select-all: {} 项", e.entry_multi.len());
+            }
+            app.set_info_tab(1);
+            app.global::<EntryApi>()
+                .set_multi_count(e.entry_multi.len() as i32);
+            sync_detail(&app, &e);
+        });
+
+        // 批量重新命名：打开对话框（Finder「批量重新命名…」）。
+        let aw = app_weak.clone();
+        app.global::<EntryApi>().on_entries_batch_rename(move || {
+            let app = aw.upgrade().unwrap();
+            if app.get_batch_busy() || app.get_summary_visible() {
+                return;
+            }
+            app.set_br_mode(0);
+            app.set_br_find("".into());
+            app.set_br_replace("".into());
+            app.set_br_prefix("".into());
+            app.set_br_suffix("".into());
+            app.set_br_visible(true);
+        });
+        let aw = app_weak.clone();
+        app.on_br_cancel(move || {
+            aw.upgrade().unwrap().set_br_visible(false);
+        });
+        // 应用：按模式计算新名并校验（非法名 / 冲突即整体拒绝），交后台线程执行。
+        let ed = editor.clone();
+        let aw = app_weak.clone();
+        let slot = std::sync::Arc::clone(&batch_results);
+        app.on_br_apply(move || {
+            let app = aw.upgrade().unwrap();
+            if app.get_batch_busy() {
+                return;
+            }
+            app.set_br_visible(false);
+            let (branch_dir, items, renames) = {
+                let e = ed.borrow();
+                if e.bundle.is_none() {
+                    return;
+                }
+                let Some(vi) = e.selected_idx_in_visits() else {
+                    return;
+                };
+                let visit = &e.scan.as_ref().unwrap().visits[vi];
+                let mode = app.get_br_mode();
+                let find = app.get_br_find().trim().to_string();
+                let replace = app.get_br_replace().to_string();
+                let prefix = app.get_br_prefix().to_string();
+                let suffix = app.get_br_suffix().to_string();
+                if mode == 0 && find.is_empty() {
+                    app.set_status("「查找」不能为空。".into());
+                    return;
+                }
+                if mode == 1 && prefix.is_empty() && suffix.is_empty() {
+                    app.set_status("前缀与后缀不能同时为空。".into());
+                    return;
+                }
+                let items = collect_entry_multi(&e);
+                if items.len() < 2 {
+                    app.set_status("批量重新命名需要选中至少 2 个条目。".into());
+                    return;
+                }
+                // 目标名集合 = 全部登记条目名 - 旧名 + 新名（逐个校验冲突）。
+                let mut taken: HashSet<String> = visit
+                    .meta
+                    .as_ref()
+                    .map(|m| m.entries.iter().map(|x| x.path.clone()).collect())
+                    .unwrap_or_default();
+                let mut renames: Vec<(String, String)> = Vec::with_capacity(items.len());
+                for (path, _) in &items {
+                    let name = basename(path);
+                    let stem_ext = name.rsplit_once('.');
+                    let new_name = if mode == 0 {
+                        name.replace(&find, &replace)
+                    } else {
+                        match stem_ext {
+                            // 后缀加在扩展名前：`a.txt` + 后缀 `-草案` → `a-草案.txt`
+                            Some((stem, ext)) if !ext.is_empty() => {
+                                format!("{prefix}{stem}{suffix}.{ext}")
+                            }
+                            _ => format!("{prefix}{name}{suffix}"),
+                        }
+                    };
+                    if new_name.is_empty()
+                        || new_name.contains('/')
+                        || new_name.starts_with('.')
+                        || new_name == "._meta"
+                    {
+                        app.set_status(format!("无效名称：{new_name}（{path}）").into());
+                        return;
+                    }
+                    if new_name == *path {
+                        renames.push((path.clone(), new_name));
+                        continue;
+                    }
+                    taken.remove(path);
+                    if taken.contains(&new_name) {
+                        app.set_status(format!("名称冲突：{new_name}").into());
+                        return;
+                    }
+                    taken.insert(new_name.clone());
+                    renames.push((path.clone(), new_name));
+                }
+                let renames: Vec<(String, String)> =
+                    renames.into_iter().filter(|(o, n)| o != n).collect();
+                if renames.is_empty() {
+                    app.set_status("没有需要重命名的条目。".into());
+                    return;
+                }
+                (visit.dir.clone(), items, renames)
+            };
+            let n = renames.len();
+            app.set_summary_visible(false);
+            app.set_progress_total(n as i32);
+            app.set_progress_done(0);
+            app.set_progress_text("".into());
+            app.set_batch_busy(true);
+            if let Ok(mut s) = slot.lock() {
+                s.0 = ContentOp::Rename {
+                    branch_dir,
+                    renames,
+                };
+                s.1.clear();
+            }
+            spawn_gui_batch(
+                app.as_weak(),
+                std::sync::Arc::clone(&slot),
+                &format!("批量重新命名 · {n} 项"),
+                items,
+            );
+        });
+
+        // 汇总对话框：关闭 / 重试失败项（按上一轮的**操作类型**重跑 ✗ 的那些）。
+        let aw = app_weak.clone();
+        app.on_summary_close(move || {
+            aw.upgrade().unwrap().set_summary_visible(false);
+        });
+        let aw = app_weak.clone();
+        let retry_slot = std::sync::Arc::clone(&batch_results);
+        app.on_summary_retry(move || {
+            let app = aw.upgrade().unwrap();
+            if app.get_batch_busy() {
+                return;
+            }
+            let failed: Vec<(String, String)> = match retry_slot.lock() {
+                Ok(slot) => slot
+                    .1
+                    .iter()
+                    .filter(|r| r.status == "✗")
+                    .map(|r| (r.id.clone(), r.title.clone()))
+                    .collect(),
+                Err(_) => return,
+            };
+            if failed.is_empty() {
+                app.set_summary_visible(false);
+                return;
+            }
+            let n = failed.len();
+            app.set_summary_visible(false);
+            app.set_progress_total(n as i32);
+            app.set_progress_done(0);
+            app.set_progress_text("".into());
+            app.set_batch_busy(true);
+            if let Ok(mut s) = retry_slot.lock() {
+                s.1.clear();
+            }
+            spawn_gui_batch(
+                app.as_weak(),
+                std::sync::Arc::clone(&retry_slot),
+                &format!("重试失败项 · {n}"),
+                failed,
+            );
+        });
+
+        // 批量完成（主线程）：重扫磁盘、刷新多选集合与计数。
+        let ed = editor.clone();
+        let aw = app_weak.clone();
+        // macOS 的剪切失效走系统剪贴板清空，内部剪贴板仅非 macOS 需要。
+        #[cfg(not(target_os = "macos"))]
+        let clipboard = clipboard.clone();
+        let slot = std::sync::Arc::clone(&batch_results);
+        app.on_batch_finished(move || {
+            let app = aw.upgrade().unwrap();
+            // 批量重命名：先把选区 / 主选中里的旧路径映射为新路径，
+            // 否则随后的 rescan 会按「磁盘已不存在」把整个选区剪空。
+            if let Ok(s) = slot.lock() {
+                if let ContentOp::Rename { renames, .. } = &s.0 {
+                    let mut e = ed.borrow_mut();
+                    for (old, new) in renames {
+                        if e.entry_multi.remove(old) {
+                            e.entry_multi.insert(new.clone());
+                        }
+                        if e.selected_entry_path.as_deref() == Some(old.as_str()) {
+                            e.selected_entry_path = Some(new.clone());
+                        }
+                    }
+                }
+            }
+            if let Err(msg) = with_editor(&ed, |e| e.rescan()) {
+                app.set_status(format!("刷新失败：{msg}").into());
+            }
+            // 批量粘贴：激活被粘贴条目（选区 = 落地成功的新路径，主选中 = 第一个）。
+            // 必须在 rescan 之后做，否则新路径会被「磁盘不存在」剪除。
+            if let Ok(s) = slot.lock() {
+                let paste_clips: Option<&Vec<ClipItem>> = match &s.0 {
+                    ContentOp::Paste { clips, .. } => Some(clips),
+                    _ => None,
+                };
+                if let Some(clips) = paste_clips {
+                    let pasted: Vec<String> =
+                        s.1.iter()
+                            .filter(|r| r.status == "✓" && !r.new_path.is_empty())
+                            .map(|r| r.new_path.clone())
+                            .collect();
+                    if !pasted.is_empty() {
+                        let mut e = ed.borrow_mut();
+                        e.entry_multi = pasted.iter().cloned().collect();
+                        e.entry_anchor = None;
+                        e.selected_entry_path = pasted.first().cloned();
+                    }
+                    // 全部成功且来自剪切 → 剪贴板失效（Finder 语义：剪切粘贴
+                    // 一次后剪贴板清空，避免二次粘贴移动已移走的文件）。
+                    let all_ok = s.1.iter().all(|r| r.status == "✓");
+                    if all_ok && clips.iter().any(|c| c.is_cut) {
+                        #[cfg(target_os = "macos")]
+                        let _ = mac_clear_clipboard();
+                        #[cfg(not(target_os = "macos"))]
+                        clipboard.borrow_mut().clear();
+                    }
+                }
+            }
+            let e = ed.borrow();
+            app.global::<EntryApi>()
+                .set_multi_count(e.entry_multi.len() as i32);
+            sync_ui(&app, &e);
         });
     }
 
@@ -3316,84 +5211,188 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_clear_selection(move || {
             let app = app_weak.upgrade().unwrap();
-            editor.borrow_mut().selected_entry_path = None;
-            fill_entry_fields(&app, &editor.borrow());
+            {
+                let mut e = editor.borrow_mut();
+                e.selected_entry_path = None;
+                // 点空白 = 取消选中（Finder 语义）：清空整个选区（含多选）。
+                e.entry_multi.clear();
+                e.entry_anchor = None;
+            }
+            app.global::<EntryApi>().set_multi_count(0);
+            // 必须重建条目模型：in-multi 高亮烧在模型行里，仅改状态不会刷新高亮。
+            sync_detail(&app, &editor.borrow());
             app.set_info_tab(0);
         });
     }
     // 由行号解析条目路径（行号对应过滤后的内容条目列表）。
-    fn row_entry_path(e: &Editor, index: i32) -> Option<String> {
-        visible_entry_paths(e).get(index as usize).cloned()
-    }
+    // （选区解析已收敛到 menu-targets：fill_entry_fields 随每次选中状态变化刷新。）
     {
         let editor = editor.clone();
-        app.global::<EntryApi>().on_entry_reveal(move |index| {
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_reveal(move || {
+            let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
-            let Some(visit) = e.selected_visit() else {
+            let Some(visit) = action_visit(&app, &e) else {
                 return;
             };
-            let Some(path) = row_entry_path(&e, index).map(|p| visit.dir.join(p)) else {
+            let targets = menu_targets(&app);
+            if targets.is_empty() {
                 return;
+            }
+            let full: Vec<PathBuf> = targets.iter().map(|p| visit.dir.join(p)).collect();
+            let n = full.len();
+            let reveal_ok = reveal_in_file_manager_multi(&full).is_ok();
+            if n > 1 || !reveal_ok {
+                drop(e);
+                if reveal_ok {
+                    app.set_status(format!("已在访达中显示 {} 项。", n).into());
+                } else {
+                    app.set_status("在访达中显示失败".into());
+                }
+            }
+        });
+    }
+    {
+        // 拷贝路径：整个选区的绝对路径（\n 分隔）写入系统剪贴板。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_copy_path(move || {
+            let app = app_weak.upgrade().unwrap();
+            let text = {
+                let e = editor.borrow();
+                let Some(visit) = action_visit(&app, &e) else {
+                    return;
+                };
+                menu_targets(&app)
+                    .iter()
+                    .map(|p| visit.dir.join(p).to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
             };
-            reveal_in_file_manager(&path);
+            if text.is_empty() {
+                return;
+            }
+            match copy_text_to_clipboard(&text) {
+                Ok(()) => {
+                    let n = text.lines().count();
+                    app.set_status(format!("已拷贝 {n} 条路径。").into());
+                }
+                Err(msg) => app.set_status(format!("拷贝路径失败：{msg}").into()),
+            }
+        });
+    }
+    {
+        // 在终端中显示：目录条目 → 该目录；文件 → 所在文件夹；多选去重后逐个打开。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_reveal_terminal(move || {
+            let app = app_weak.upgrade().unwrap();
+            let dirs: Vec<PathBuf> = {
+                let e = editor.borrow();
+                let Some(visit) = action_visit(&app, &e) else {
+                    return;
+                };
+                let mut dirs: Vec<PathBuf> = Vec::new();
+                for p in menu_targets(&app) {
+                    let full = visit.dir.join(&p);
+                    let dir = if full.is_dir() {
+                        full
+                    } else {
+                        full.parent().unwrap_or(&visit.dir).to_path_buf()
+                    };
+                    if !dirs.contains(&dir) {
+                        dirs.push(dir);
+                    }
+                }
+                dirs
+            };
+            let mut ok = 0usize;
+            for d in &dirs {
+                if open_terminal_at(d).is_ok() {
+                    ok += 1;
+                }
+            }
+            app.set_status(if ok > 0 {
+                format!("已在终端中打开 {ok} 个目录。").into()
+            } else {
+                "打开终端失败".into()
+            });
         });
     }
     {
         let editor = editor.clone();
-        app.global::<EntryApi>().on_entry_open(move |index| {
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_open(move || {
+            let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
-            let Some(path) = e
-                .selected_visit()
-                .zip(row_entry_path(&e, index))
-                .map(|(v, p)| v.dir.join(p))
-            else {
+            let Some(visit) = action_visit(&app, &e) else {
                 return;
             };
-            #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open").arg(&path).spawn();
-            #[cfg(windows)]
-            let _ = std::process::Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
-                .spawn();
-            #[cfg(all(unix, not(target_os = "macos")))]
-            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+            for p in menu_targets(&app) {
+                let full = visit.dir.join(&p);
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&full).spawn();
+                #[cfg(windows)]
+                let _ = std::process::Command::new("explorer")
+                    .arg(format!("/select,{}", full.display()))
+                    .spawn();
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdg-open").arg(&full).spawn();
+            }
         });
     }
     {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.global::<EntryApi>().on_entry_copy(move |index| {
+        app.global::<EntryApi>().on_entry_copy(move || {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
-            let Some(visit) = e.selected_visit() else {
+            let Some(visit) = action_visit(&app, &e) else {
                 return;
             };
-            let Some(en) = row_entry_path(&e, index).and_then(|p| {
-                visit
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.entries.iter().find(|x| x.path == p).cloned())
-            }) else {
+            let paths = menu_targets(&app);
+            if paths.is_empty() {
                 return;
-            };
-            let src_path = visit.dir.join(&en.path);
-            *clipboard.borrow_mut() = Some(ClipItem {
-                src_path: src_path.clone(),
-                name: en.path.clone(),
-                role: en.role.clone(),
-                is_cut: false,
-            });
-            // 同步到系统剪贴板：Finder 中 ⌘V 即可粘贴。
+            }
+            // 未登记的子行按文件系统推断角色（payload / dir）。
+            let items: Vec<ClipItem> = paths
+                .iter()
+                .filter_map(|p| {
+                    entry_role_for(visit, p).map(|role| ClipItem {
+                        src_path: visit.dir.join(p),
+                        name: p.clone(),
+                        role,
+                        is_cut: false,
+                    })
+                })
+                .collect();
+            let n = items.len();
+            let names: Vec<String> = items.iter().map(|c| c.name.clone()).collect();
+            *clipboard.borrow_mut() = items;
+            // 同步到系统剪贴板（无剪切标记）：Finder 中 ⌘V 即可粘贴。
             #[cfg(target_os = "macos")]
-            let sys_ok = mac_write_clipboard_files(&[src_path]).is_ok();
+            let sys_ok = mac_write_clipboard_files(
+                &clipboard
+                    .borrow()
+                    .iter()
+                    .map(|c| c.src_path.clone())
+                    .collect::<Vec<_>>(),
+                false,
+            )
+            .is_ok();
             #[cfg(not(target_os = "macos"))]
             let sys_ok = false;
             app.set_status(
                 if sys_ok {
-                    format!("已复制 {}（已同步系统剪贴板）。", en.path)
+                    format!("已拷贝 {} 项（已同步系统剪贴板）。", n)
+                } else if n > 1 {
+                    format!("已拷贝 {} 项：{}（内部剪贴板）。", n, names.join("、"))
                 } else {
-                    format!("已复制 {}（内部剪贴板）。", en.path)
+                    format!(
+                        "已拷贝 {}（内部剪贴板）。",
+                        names.first().map(String::as_str).unwrap_or("")
+                    )
                 }
                 .into(),
             );
@@ -3404,65 +5403,140 @@ fn main() -> Result<(), slint::PlatformError> {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.global::<EntryApi>().on_entry_cut(move |index| {
+        app.global::<EntryApi>().on_entry_cut(move || {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
-            let Some(visit) = e.selected_visit() else {
+            let Some(visit) = action_visit(&app, &e) else {
                 return;
             };
-            let Some(en) = row_entry_path(&e, index).and_then(|p| {
-                visit
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.entries.iter().find(|x| x.path == p).cloned())
-            }) else {
+            let paths = menu_targets(&app);
+            if paths.is_empty() {
                 return;
-            };
-            *clipboard.borrow_mut() = Some(ClipItem {
-                src_path: visit.dir.join(&en.path),
-                name: en.path.clone(),
-                role: en.role.clone(),
-                is_cut: true,
+            }
+            let items: Vec<ClipItem> = paths
+                .iter()
+                .filter_map(|p| {
+                    entry_role_for(visit, p).map(|role| ClipItem {
+                        src_path: visit.dir.join(p),
+                        name: p.clone(),
+                        role,
+                        is_cut: true,
+                    })
+                })
+                .collect();
+            let n = items.len();
+            let single_name = items.first().map(|c| c.name.clone()).unwrap_or_default();
+            // macOS：系统剪贴板是粘贴的唯一事实来源——剪切也要写入源文件 URL，
+            // 并随写入打上剪切标记（粘贴时据此执行移动而非复制）。
+            #[cfg(target_os = "macos")]
+            {
+                let src_paths: Vec<PathBuf> = items.iter().map(|c| c.src_path.clone()).collect();
+                let _ = mac_write_clipboard_files(&src_paths, true);
+            }
+            *clipboard.borrow_mut() = items;
+            app.set_status(if n > 1 {
+                format!("已剪切 {} 项（粘贴时移动到目标分支）。", n).into()
+            } else {
+                format!("已剪切 {}（粘贴时移动到目标分支）。", single_name).into()
             });
-            app.set_status(format!("已剪切 {}（粘贴时移动到目标分支）。", en.path).into());
         });
     }
     {
         // 制作副本：在当前分支内复制一份（重名自动「副本」后缀）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.global::<EntryApi>().on_entry_duplicate(move |index| {
+        let slot_dupe = std::sync::Arc::clone(&batch_results);
+        app.global::<EntryApi>().on_entry_duplicate(move || {
             let app = app_weak.upgrade().unwrap();
-            let result = with_editor(&editor, |e| {
-                let clip = {
-                    let Some(visit) = e.selected_visit() else {
-                        return Err("未选择分支".into());
-                    };
-                    let Some(path) = row_entry_path(e, index) else {
-                        return Err("未选择条目".into());
-                    };
-                    let role = e
-                        .selected_visit()
-                        .and_then(|v| v.meta.as_ref())
-                        .and_then(|m| m.entries.iter().find(|x| x.path == path))
-                        .map(|en| en.role.clone())
-                        .ok_or("未找到条目")?;
-                    ClipItem {
-                        src_path: visit.dir.join(&path),
-                        name: path,
-                        role,
-                        is_cut: false,
-                    }
+            // 制作副本 = 同分支拷贝（is_cut=false）。
+            let (clips, visit_dir, depth, id_version, bundle_root) = {
+                let e = editor.borrow();
+                let Some(visit) = action_visit(&app, &e) else {
+                    app.set_status("未选择分支".into());
+                    return;
                 };
-                apply_clip(e, &clip)
-            });
-            match result {
-                Ok(msg) => {
-                    sync_ui(&app, &editor.borrow());
-                    app.set_status(msg.into());
+                let paths = menu_targets(&app);
+                if paths.is_empty() {
+                    app.set_status("未选择条目".into());
+                    return;
                 }
-                Err(msg) => app.set_status(format!("制作副本失败：{msg}").into()),
+                let clips: Vec<ClipItem> = paths
+                    .iter()
+                    .filter_map(|p| {
+                        entry_role_for(visit, p).map(|role| ClipItem {
+                            src_path: visit.dir.join(p),
+                            name: p.clone(),
+                            role,
+                            is_cut: false,
+                        })
+                    })
+                    .collect();
+                let idv = e
+                    .scan
+                    .as_ref()
+                    .unwrap()
+                    .visits
+                    .first()
+                    .and_then(|v| v.meta.as_ref())
+                    .map(|m| m.policies.id_version)
+                    .unwrap_or(7);
+                let root = e
+                    .bundle
+                    .as_ref()
+                    .map(|b| b.root.clone())
+                    .unwrap_or_default();
+                (clips, visit.dir.clone(), visit.depth, idv, root)
+            };
+            if clips.is_empty() {
+                app.set_status("未选择条目".into());
+                return;
             }
+            if clips.len() == 1 {
+                // 单条：同步执行。
+                let result = with_editor(&editor, |e| {
+                    apply_clip(e, &clips[0]).map(|(m, pasted)| {
+                        e.entry_multi = [pasted.clone()].into_iter().collect();
+                        e.entry_anchor = None;
+                        e.selected_entry_path = Some(pasted);
+                        m
+                    })
+                });
+                match result {
+                    Ok(msg) => {
+                        sync_ui(&app, &editor.borrow());
+                        app.set_status(msg.into());
+                    }
+                    Err(msg) => app.set_status(format!("制作副本失败：{msg}").into()),
+                }
+                return;
+            }
+            // 多条：批量管线（进度 + 汇总 + 重试）；激活在 batch_finished 完成。
+            app.set_summary_visible(false);
+            app.set_progress_total(clips.len() as i32);
+            app.set_progress_done(0);
+            app.set_progress_text("".into());
+            app.set_batch_busy(true);
+            if let Ok(mut s) = slot_dupe.lock() {
+                s.0 = ContentOp::Paste {
+                    clips: clips.clone(),
+                    bundle_root,
+                    visit_dir,
+                    depth,
+                    id_version,
+                };
+                s.1.clear();
+            }
+            let items: Vec<(String, String)> = clips
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i.to_string(), c.name.clone()))
+                .collect();
+            spawn_gui_batch(
+                app.as_weak(),
+                std::sync::Arc::clone(&slot_dupe),
+                &format!("批量制作副本 · {} 项", clips.len()),
+                items,
+            );
         });
     }
     {
@@ -3472,13 +5546,24 @@ fn main() -> Result<(), slint::PlatformError> {
             let editor = editor.clone();
             let pending = pending.clone();
             let app_weak = app.as_weak();
-            app.global::<EntryApi>().on_entry_rename_open(move |index| {
+            app.global::<EntryApi>().on_entry_rename_open(move || {
                 let app = app_weak.upgrade().unwrap();
                 let e = editor.borrow();
-                let Some(visit) = e.selected_visit() else {
+                let Some(visit) = action_visit(&app, &e) else {
                     return;
                 };
-                let Some(path) = row_entry_path(&e, index) else {
+                // 多选（≥2）→ 一律批量重命名（无论有无主选中）：菜单与右键的
+                // 「重命名条目…」在整组选区上等价于 Finder 的批量重新命名。
+                if collect_entry_multi(&e).len() >= 2 {
+                    app.set_br_mode(0);
+                    app.set_br_find("".into());
+                    app.set_br_replace("".into());
+                    app.set_br_prefix("".into());
+                    app.set_br_suffix("".into());
+                    app.set_br_visible(true);
+                    return;
+                }
+                let Some(path) = menu_targets(&app).into_iter().next() else {
                     return;
                 };
                 *pending.borrow_mut() = Some((visit.dir.clone(), path.clone()));
@@ -3595,114 +5680,450 @@ fn main() -> Result<(), slint::PlatformError> {
         let editor = editor.clone();
         let clipboard = clipboard.clone();
         let app_weak = app.as_weak();
-        app.global::<EntryApi>().on_paste(move || {
-            let app = app_weak.upgrade().unwrap();
-            let result = with_editor(&editor, |e| {
-                // 优先读系统剪贴板（Finder 复制的文件 / 本应用复制的内容）。
-                #[cfg(target_os = "macos")]
-                let sys_paths = mac_read_clipboard_files().unwrap_or_default();
-                #[cfg(not(target_os = "macos"))]
-                let sys_paths: Vec<PathBuf> = Vec::new();
-                if !sys_paths.is_empty() {
+        let slot_paste = std::sync::Arc::clone(&batch_results);
+        // macOS 粘贴主流程（嵌套函数：需调用 main 内的 with_editor / sync_ui）。
+        /// macOS 粘贴主流程：**始终**读系统剪贴板（唯一事实来源——应用内拷贝/剪切
+        /// 与 Finder 拷贝都经过它；若读内部剪贴板，Finder 里的新拷贝会被应用内的
+        /// 旧内容遮蔽）。bundle 内的路径携带登记信息走应用内粘贴；bundle 外的
+        /// （Finder 文件）走导入。返回 true = 已处理（含「剪贴板为空」提示）。
+        #[cfg(target_os = "macos")]
+        fn paste_from_system(
+            app: &AppWindow,
+            editor: &Rc<RefCell<Editor>>,
+            slot: &std::sync::Arc<std::sync::Mutex<(ContentOp, Vec<BatchOutcome>)>>,
+        ) -> bool {
+            let sys_paths = mac_read_clipboard_files().unwrap_or_default();
+            if sys_paths.is_empty() {
+                app.set_status("剪贴板为空：请先拷贝或剪切条目".into());
+                return true;
+            }
+            let is_cut = mac_read_clipboard_cut();
+            // 反推条目：bundle 内的路径携带登记信息；bundle 外（Finder 文件）走导入。
+            let (in_bundle, external): (Vec<ClipItem>, Vec<PathBuf>) = {
+                let e = editor.borrow();
+                match (e.bundle.as_ref(), e.scan.as_ref()) {
+                    (Some(_bundle), Some(scan)) => {
+                        let mut inb = Vec::new();
+                        let mut ext = Vec::new();
+                        for p in &sys_paths {
+                            match derive_clip(scan, p, is_cut) {
+                                Some(c) => inb.push(c),
+                                None => ext.push(p.clone()),
+                            }
+                        }
+                        (inb, ext)
+                    }
+                    _ => (Vec::new(), sys_paths.clone()),
+                }
+            };
+            if !external.is_empty() {
+                // 外部文件（Finder 拷贝）→ 导入当前分支（一次导入完成，无进度）。
+                let result = with_editor(editor, |e| {
                     let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                     let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
                     let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
-                    let names =
-                        import_paths_into(bundle, &visit.dir, &visit.dir, true, &sys_paths)?;
+                    let names = import_paths_into(bundle, &visit.dir, &visit.dir, true, &external)?;
                     e.rescan()?;
-                    return Ok(format!(
+                    Ok(format!(
                         "已从系统剪贴板粘贴 {} 项：{}",
                         names.len(),
                         names.join("、")
-                    ));
+                    ))
+                });
+                match result {
+                    Ok(msg) => {
+                        sync_ui(app, &editor.borrow());
+                        app.set_status(msg.into());
+                    }
+                    Err(msg) => app.set_status(format!("粘贴失败：{msg}").into()),
                 }
-                let clip = clipboard
-                    .borrow()
-                    .as_ref()
-                    .cloned()
-                    .ok_or("剪贴板为空：请先复制或剪切一个条目")?;
-                apply_clip(e, &clip)
-            });
-            match result {
-                Ok(msg) => {
-                    sync_ui(&app, &editor.borrow());
-                    app.set_status(msg.into());
-                }
-                Err(msg) => app.set_status(format!("粘贴失败：{msg}").into()),
+                return true;
             }
+            // 目标 = 当前选中分支。
+            let (visit_dir, depth, id_version) = {
+                let e = editor.borrow();
+                let Some(visit_idx) = e.selected_idx_in_visits() else {
+                    app.set_status("未选择分支".into());
+                    return true;
+                };
+                let scan = e.scan.as_ref().unwrap();
+                let v = &scan.visits[visit_idx];
+                let idv = scan
+                    .visits
+                    .first()
+                    .and_then(|v| v.meta.as_ref())
+                    .map(|m| m.policies.id_version)
+                    .unwrap_or(7);
+                (v.dir.clone(), v.depth, idv)
+            };
+            let bundle_root = {
+                let e = editor.borrow();
+                match e.bundle.as_ref() {
+                    Some(b) => b.root.clone(),
+                    None => {
+                        app.set_status("未打开 bundle".into());
+                        return true;
+                    }
+                }
+            };
+            if in_bundle.len() == 1 {
+                // 单条：同步执行（与单条删除免进度一致）。apply_clip_at 不含重扫，
+                // 这里必须补 —— 否则磁盘已变而界面不刷新，表现为「粘贴无效」。
+                let clip = &in_bundle[0];
+                let result = with_editor(editor, |e| {
+                    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
+                    let r = apply_clip_at(bundle, &visit_dir, depth, id_version, clip);
+                    if r.is_ok() {
+                        e.rescan()?;
+                    }
+                    r
+                });
+                match result {
+                    Ok((msg, pasted)) => {
+                        if is_cut {
+                            let _ = mac_clear_clipboard();
+                        }
+                        {
+                            let mut e = editor.borrow_mut();
+                            e.entry_multi = [pasted.clone()].into_iter().collect();
+                            e.entry_anchor = None;
+                            e.selected_entry_path = Some(pasted);
+                        }
+                        sync_ui(app, &editor.borrow());
+                        app.set_status(msg.into());
+                    }
+                    Err(msg) => app.set_status(format!("粘贴失败：{msg}").into()),
+                }
+                return true;
+            }
+            // 多条：批量管线（进度 + 汇总 + 重试）；激活在 batch_finished 完成。
+            app.set_summary_visible(false);
+            app.set_progress_total(in_bundle.len() as i32);
+            app.set_progress_done(0);
+            app.set_progress_text("".into());
+            app.set_batch_busy(true);
+            if let Ok(mut s) = slot.lock() {
+                s.0 = ContentOp::Paste {
+                    clips: in_bundle.clone(),
+                    bundle_root: bundle_root.clone(),
+                    visit_dir,
+                    depth,
+                    id_version,
+                };
+                s.1.clear();
+            }
+            let items: Vec<(String, String)> = in_bundle
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i.to_string(), c.name.clone()))
+                .collect();
+            spawn_gui_batch(
+                app.as_weak(),
+                std::sync::Arc::clone(slot),
+                &format!("批量粘贴 · {} 项", in_bundle.len()),
+                items,
+            );
+            true
+        }
+
+        app.global::<EntryApi>().on_paste(move || {
+            let app = app_weak.upgrade().unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                // macOS：**始终**走系统剪贴板（唯一事实来源——应用内拷贝/剪切与
+                // Finder 拷贝都经过它；读内部剪贴板会让 Finder 里的新拷贝被
+                // 应用内的旧内容遮蔽，导致跨来源粘贴全部错乱）。
+                if paste_from_system(&app, &editor, &slot_paste) {
+                    return;
+                }
+            }
+            // 非 macOS：无系统文件剪贴板实现 → 内部剪贴板（单条同步 / 多条批量管线）。
+            let clips = clipboard.borrow().clone();
+            if clips.is_empty() {
+                app.set_status("剪贴板为空：请先拷贝或剪切条目".into());
+                return;
+            }
+            if clips.len() == 1 {
+                // 单条粘贴：保持同步执行（与单条删除免确认/免进度一致）。
+                let result = with_editor(&editor, |e| apply_clip(e, &clips[0]));
+                match result {
+                    Ok((msg, pasted)) => {
+                        if clips[0].is_cut {
+                            clipboard.borrow_mut().clear();
+                        }
+                        {
+                            let mut e = editor.borrow_mut();
+                            e.entry_multi = [pasted.clone()].into_iter().collect();
+                            e.entry_anchor = None;
+                            e.selected_entry_path = Some(pasted);
+                        }
+                        sync_ui(&app, &editor.borrow());
+                        app.set_status(msg.into());
+                    }
+                    Err(msg) => app.set_status(format!("粘贴失败：{msg}").into()),
+                }
+                return;
+            }
+            // 多条目粘贴：与批量删除同一管线——进度对话框 + 汇总 + 失败项重试。
+            // 粘贴后激活被粘贴条目：在 batch_finished（主线程）按落地路径恢复选区。
+            let (visit_dir, depth, id_version) = {
+                let e = editor.borrow();
+                let Some(visit_idx) = e.selected_idx_in_visits() else {
+                    app.set_status("未选择分支".into());
+                    return;
+                };
+                let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
+                (
+                    visit.dir.clone(),
+                    visit.depth,
+                    e.scan
+                        .as_ref()
+                        .unwrap()
+                        .visits
+                        .first()
+                        .and_then(|v| v.meta.as_ref())
+                        .map(|m| m.policies.id_version)
+                        .unwrap_or(7),
+                )
+            };
+            app.set_summary_visible(false);
+            app.set_progress_total(clips.len() as i32);
+            app.set_progress_done(0);
+            app.set_progress_text("".into());
+            app.set_batch_busy(true);
+            if let Ok(mut s) = slot_paste.lock() {
+                s.0 = ContentOp::Paste {
+                    clips: clips.clone(),
+                    bundle_root: e_bundle_root(&editor).unwrap_or_default(),
+                    visit_dir,
+                    depth,
+                    id_version,
+                };
+                s.1.clear();
+            }
+            let items: Vec<(String, String)> = clips
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i.to_string(), c.name.clone()))
+                .collect();
+            spawn_gui_batch(
+                app.as_weak(),
+                std::sync::Arc::clone(&slot_paste),
+                &format!("批量粘贴 · {} 项", clips.len()),
+                items,
+            );
         });
     }
     {
         // 拖到列表某行 = 在本分支内重排（写入显式 order）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.global::<EntryApi>().on_drop_row(move |transfer, files, row_index, into_dir, after| {
-            let app = app_weak.upgrade().unwrap();
-            // 行级落点：打印入参与悬停状态，判断落点行号是否与指针一致。
-            if debug_on() {
-                let d = app.global::<DndApi>();
-                eprintln!(
-                    "[str-gui] drop-row row={row_index} into_dir={into_dir} after={after} \
+        app.global::<EntryApi>()
+            .on_drop_row(move |transfer, files, row_index, into_dir, after| {
+                let app = app_weak.upgrade().unwrap();
+                // 行级落点：打印入参与悬停状态，判断落点行号是否与指针一致。
+                if debug_on() {
+                    let d = app.global::<DndApi>();
+                    eprintln!(
+                        "[str-gui] drop-row row={row_index} into_dir={into_dir} after={after} \
                      files={files:?} transfer={transfer:?} hover-row={} half={} panel={} \
                      hover-files={} hover-into-dir={}",
-                    d.get_hover_row(),
-                    d.get_hover_half(),
-                    d.get_hover_panel(),
-                    d.get_hover_files(),
-                    d.get_hover_into_dir()
-                );
-            }
-            // data-transfer 文本不可靠时回退到拖拽开始时记录的全局载荷。
-            let transfer = if parse_entry_transfer(&transfer).is_some() {
-                transfer
-            } else {
-                app.global::<DndApi>().get_payload()
-            };
-            let result = with_editor(&editor, |e| {
-                let vis = build_entry_rows(e);
-                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
-                let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
-                let visit_dir = e.scan.as_ref().ok_or("未选择分支")?.visits[visit_idx]
-                    .dir
-                    .clone();
-                // row_index = 悬停行（-1 = 列表末尾）；into_dir = 手势指向文件夹内部；
-                // after = 插到该行之后（否则之前）。不再用 index+1 表达"插到行后"，
-                // 避免"下一行是文件夹"被误判成移入文件夹。
-                let at_end = row_index < 0;
-                let to_index = if at_end {
-                    vis.len()
+                        d.get_hover_row(),
+                        d.get_hover_half(),
+                        d.get_hover_panel(),
+                        d.get_hover_files(),
+                        d.get_hover_into_dir()
+                    );
+                }
+                // data-transfer 文本不可靠时回退到拖拽开始时记录的全局载荷。
+                let transfer = if parse_entry_transfer(&transfer).is_some() {
+                    transfer
                 } else {
-                    (row_index as usize).min(vis.len().saturating_sub(1))
+                    app.global::<DndApi>().get_payload()
                 };
-                // 目标行解析：文件夹行 → 其内部（不逐文件登记）；文件行 → 分支目录（登记）。
-                // target_dir 仅用于外部文件导入；内部拖拽改用 internal_target_dir。
-                let (target_dir, register, _target_is_dir) = match vis.get(to_index) {
-                    Some(row) => (
-                        row.drop_dir.clone(),
-                        row.entries_idx.is_some() && !row.is_dir,
-                        into_dir && row.is_dir,
-                    ),
-                    None => (visit_dir.clone(), true, false),
-                };
-                // 外部文件拖到行上 → 导入对应目录（文件夹行 = 拖进文件夹）。
-                if !files.is_empty() {
-                    let paths: Vec<PathBuf> = files.lines().map(PathBuf::from).collect();
-                    let names =
-                        import_paths_into(&bundle, &visit_dir, &target_dir, register, &paths)?;
-                    // 落到根路径的根层级插入位：按该位置排序插入（与应用内重排表现一致）。
-                    if register && !at_end && vis.get(to_index).map(|v| v.depth).unwrap_or(0) == 0 {
-                        let top_positions: Vec<usize> = vis
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, v)| v.entries_idx.is_some())
-                            .map(|(i, _)| i)
-                            .collect();
-                        let to_row = (to_index + usize::from(after)).min(vis.len());
-                        let insert_at = if to_row >= vis.len() {
-                            top_positions.len()
-                        } else {
-                            top_positions.iter().take_while(|&&i| i < to_row).count()
-                        };
+                let result = with_editor(&editor, |e| {
+                    let vis = build_entry_rows(e);
+                    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+                    let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                    let visit_dir = e.scan.as_ref().ok_or("未选择分支")?.visits[visit_idx]
+                        .dir
+                        .clone();
+                    // row_index = 悬停行（-1 = 列表末尾）；into_dir = 手势指向文件夹内部；
+                    // after = 插到该行之后（否则之前）。不再用 index+1 表达"插到行后"，
+                    // 避免"下一行是文件夹"被误判成移入文件夹。
+                    let at_end = row_index < 0;
+                    let to_index = if at_end {
+                        vis.len()
+                    } else {
+                        (row_index as usize).min(vis.len().saturating_sub(1))
+                    };
+                    // 目标行解析：文件夹行 → 其内部（不逐文件登记）；文件行 → 分支目录（登记）。
+                    // target_dir 仅用于外部文件导入；内部拖拽改用 internal_target_dir。
+                    let (target_dir, register, _target_is_dir) = match vis.get(to_index) {
+                        Some(row) => (
+                            row.drop_dir.clone(),
+                            row.entries_idx.is_some() && !row.is_dir,
+                            into_dir && row.is_dir,
+                        ),
+                        None => (visit_dir.clone(), true, false),
+                    };
+                    // 外部文件拖到行上 → 导入对应目录（文件夹行 = 拖进文件夹）。
+                    if !files.is_empty() {
+                        let paths: Vec<PathBuf> = files.lines().map(PathBuf::from).collect();
+                        let names =
+                            import_paths_into(&bundle, &visit_dir, &target_dir, register, &paths)?;
+                        // 落到根路径的根层级插入位：按该位置排序插入（与应用内重排表现一致）。
+                        if register
+                            && !at_end
+                            && vis.get(to_index).map(|v| v.depth).unwrap_or(0) == 0
+                        {
+                            let top_positions: Vec<usize> = vis
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, v)| v.entries_idx.is_some())
+                                .map(|(i, _)| i)
+                                .collect();
+                            let to_row = (to_index + usize::from(after)).min(vis.len());
+                            let insert_at = if to_row >= vis.len() {
+                                top_positions.len()
+                            } else {
+                                top_positions.iter().take_while(|&&i| i < to_row).count()
+                            };
+                            let mut meta = read_meta(&bundle, &visit_dir)?;
+                            let mut seq: Vec<Entry> = meta
+                                .entries
+                                .iter()
+                                .filter(|en| !en.is_branch())
+                                .cloned()
+                                .collect();
+                            let mut news: Vec<Entry> = Vec::new();
+                            for n in &names {
+                                if let Some(p) = seq.iter().position(|en| en.path == *n) {
+                                    news.push(seq.remove(p));
+                                }
+                            }
+                            if !news.is_empty() {
+                                // 逆序插在同一位置，最终顺序与 names 一致。
+                                let idx = insert_at.min(seq.len());
+                                while let Some(en) = news.pop() {
+                                    seq.insert(idx, en);
+                                }
+                                let snapshot = meta.entries.clone();
+                                for en in snapshot.iter().filter(|en| !en.is_branch()) {
+                                    meta.remove_entry_path(&en.path);
+                                }
+                                for (i, mut en) in seq.into_iter().enumerate() {
+                                    en.order = Some(i as i64);
+                                    meta.upsert_entry(&en);
+                                }
+                                meta.touch();
+                                meta.save(&bundle.meta_path(&visit_dir))
+                                    .map_err(|err| err.to_string())?;
+                            }
+                        }
+                        e.rescan()?;
+                        let where_ = if register { "分支" } else { "文件夹" };
+                        // 导入到文件夹时自动展开，保证新条目可见。
+                        if !register {
+                            e.expanded_dirs
+                                .insert(target_dir.to_string_lossy().to_string());
+                        }
+                        // 高亮新导入的第一项（子路径 = "所在目录/文件名"）。
+                        if let Some(first) = names.first() {
+                            e.selected_entry_path =
+                                Some(in_dir_child_path(&visit_dir, &target_dir, first));
+                        }
+                        return Ok(format!(
+                            "已导入到{where_}（{} 项）：{}",
+                            names.len(),
+                            names.join("、")
+                        ));
+                    }
+                    // 多选拖拽（Finder 语义：拖一个选中项 = 拖全部）。行级落点的
+                    // 整组行为：跨分支 = 整组移到目标分支根；同分支拖入文件夹 =
+                    // 整组移入；同分支根层级行间 = 整组重排（保持组内相对顺序）。
+                    // 单条载荷（拖非选中行）仍走下方既有单条逻辑。
+                    if let Some((g_visit, g_paths)) =
+                        parse_entry_transfer_multi(&transfer).filter(|(_, ps)| ps.len() > 1)
+                    {
+                        if g_visit != visit_idx {
+                            return move_group_to_branch(e, &bundle, g_visit, &g_paths, visit_idx);
+                        }
+                        let into_folder = !at_end && (into_dir || vis[to_index].depth > 0);
+                        if into_folder {
+                            // 整组移入目标文件夹（仅 payload/asset；dir 逐项报错跳过）。
+                            let target = if vis[to_index].is_dir {
+                                vis[to_index].drop_dir.clone()
+                            } else {
+                                vis[to_index]
+                                    .fs_path
+                                    .parent()
+                                    .unwrap_or(&visit_dir)
+                                    .to_path_buf()
+                            };
+                            let mut meta = read_meta(&bundle, &visit_dir)?;
+                            let mut moved: Vec<String> = Vec::new();
+                            let mut errs: Vec<String> = Vec::new();
+                            for p in &g_paths {
+                                let file_like = meta
+                                    .entries
+                                    .iter()
+                                    .find(|x| x.path == *p)
+                                    .map(|en| en.is_file_like());
+                                match file_like {
+                                    Some(true) => {}
+                                    Some(false) => {
+                                        errs.push(format!("{p}：仅文件可移入文件夹"));
+                                        continue;
+                                    }
+                                    None => {
+                                        errs.push(format!("{p}：未登记条目"));
+                                        continue;
+                                    }
+                                }
+                                let name = basename(p);
+                                let dst = target.join(&name);
+                                if dst.exists() {
+                                    errs.push(format!("{p}：目标已存在同名项"));
+                                    continue;
+                                }
+                                move_file(&visit_dir.join(p), &dst)?;
+                                meta.remove_entry_path(p);
+                                moved.push(name);
+                            }
+                            if moved.is_empty() {
+                                return Err(errs.join("；"));
+                            }
+                            // 同步目标文件夹条目的 count。
+                            let dir_rel = target
+                                .strip_prefix(&visit_dir)
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            if let Some(den) =
+                                meta.entries.iter().find(|x| x.path == dir_rel).cloned()
+                            {
+                                let count =
+                                    std::fs::read_dir(&target).map(|rd| rd.count()).unwrap_or(0);
+                                let mut ne = den;
+                                ne.count = Some(count as i64);
+                                meta.upsert_entry(&ne);
+                            }
+                            meta.touch();
+                            meta.save(&bundle.meta_path(&visit_dir))
+                                .map_err(|err| err.to_string())?;
+                            if target != visit_dir {
+                                e.expanded_dirs.insert(target.to_string_lossy().to_string());
+                            }
+                            e.rescan()?;
+                            let err_note = if errs.is_empty() {
+                                String::new()
+                            } else {
+                                format!("（{} 项失败：{}）", errs.len(), errs.join("；"))
+                            };
+                            return Ok(format!("已移动 {} 项 → {dir_rel}/{err_note}", moved.len()));
+                        }
+                        // 整组重排：根层级行之间；组成员按原相对顺序插到落点位
+                        // （先扣除落在插入位之前的组成员数，再移除-回插）。
                         let mut meta = read_meta(&bundle, &visit_dir)?;
                         let mut seq: Vec<Entry> = meta
                             .entries
@@ -3710,334 +6131,341 @@ fn main() -> Result<(), slint::PlatformError> {
                             .filter(|en| !en.is_branch())
                             .cloned()
                             .collect();
-                        let mut news: Vec<Entry> = Vec::new();
-                        for n in &names {
-                            if let Some(p) = seq.iter().position(|en| en.path == *n) {
-                                news.push(seq.remove(p));
-                            }
-                        }
-                        if !news.is_empty() {
-                            // 逆序插在同一位置，最终顺序与 names 一致。
-                            let idx = insert_at.min(seq.len());
-                            while let Some(en) = news.pop() {
-                                seq.insert(idx, en);
-                            }
-                            let snapshot = meta.entries.clone();
-                            for en in snapshot.iter().filter(|en| !en.is_branch()) {
-                                meta.remove_entry_path(&en.path);
-                            }
-                            for (i, mut en) in seq.into_iter().enumerate() {
-                                en.order = Some(i as i64);
-                                meta.upsert_entry(&en);
-                            }
-                            meta.touch();
-                            meta.save(&bundle.meta_path(&visit_dir))
-                                .map_err(|err| err.to_string())?;
-                        }
-                    }
-                    e.rescan()?;
-                    let where_ = if register { "分支" } else { "文件夹" };
-                    // 导入到文件夹时自动展开，保证新条目可见。
-                    if !register {
-                        e.expanded_dirs
-                            .insert(target_dir.to_string_lossy().to_string());
-                    }
-                    // 高亮新导入的第一项（子路径 = "所在目录/文件名"）。
-                    if let Some(first) = names.first() {
-                        e.selected_entry_path =
-                            Some(in_dir_child_path(&visit_dir, &target_dir, first));
-                    }
-                    return Ok(format!(
-                        "已导入到{where_}（{} 项）：{}",
-                        names.len(),
-                        names.join("、")
-                    ));
-                }
-                let (src_visit, path) = parse_entry_transfer(&transfer)
-                    .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
-                if src_visit != visit_idx {
-                    // 跨节点拖放 = 移动到目标节点，并按悬停位置插入目标序列。
-                    return move_entry_across(
-                        e,
-                        src_visit,
-                        &path,
-                        visit_idx,
-                        &vis,
-                        at_end,
-                        to_index,
-                        after,
-                    );
-                }
-                let src_row = vis
-                    .iter()
-                    .position(|v| v.path == path)
-                    .ok_or("未找到源条目")?;
-                // 落点解析（内部拖拽）：**排序只发生在根层级行之间**；
-                // 落在非根层级行 = 移入该行所在的文件夹（文件夹行 = 移入其内部）。
-                let into_folder = !at_end && (into_dir || vis[to_index].depth > 0);
-                let internal_target_dir = if at_end {
-                    visit_dir.clone()
-                } else if into_folder {
-                    if vis[to_index].is_dir {
-                        vis[to_index].drop_dir.clone()
-                    } else {
-                        vis[to_index]
-                            .fs_path
-                            .parent()
-                            .unwrap_or(&visit_dir)
-                            .to_path_buf()
-                    }
-                } else {
-                    visit_dir.clone()
-                };
-                // 文件夹子行拖拽：无 entries 顺序概念，一律按文件系统移动。
-                // 拖到文件夹行 = 移入其内部；拖到文件行 = 移到该文件所在文件夹；末尾 = 移回分支根。
-                if vis[src_row].entries_idx.is_none() {
-                    let src = &vis[src_row];
-                    // into_dir = 移入文件夹内部；否则插到该行所在的目录（根列表）。
-                    let dst_dir = if at_end {
-                        visit_dir.clone()
-                    } else if into_dir {
-                        vis[to_index].drop_dir.clone()
-                    } else {
-                        vis[to_index]
-                            .fs_path
-                            .parent()
-                            .unwrap_or(&visit_dir)
-                            .to_path_buf()
-                    };
-                    if dst_dir.starts_with(&src.fs_path) {
-                        return Err("不能把文件夹移入其自身内部".into());
-                    }
-                    let parents = src.fs_path.parent().unwrap_or(Path::new(""));
-                    if dst_dir == parents {
-                        return Ok(String::new());
-                    }
-                    // 落点在根路径时计算插入顺序位（拖到根层级行列之间 = 可排序）。
-                    let root_insert_pos = if dst_dir == visit_dir {
-                        let top_positions: Vec<usize> = vis
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, v)| v.entries_idx.is_some())
-                            .map(|(i, _)| i)
+                        let group_set: HashSet<&String> = g_paths.iter().collect();
+                        let group_pos: Vec<usize> = (0..seq.len())
+                            .filter(|i| group_set.contains(&seq[*i].path))
                             .collect();
-                        let to_row = if at_end {
-                            vis.len()
+                        if group_pos.len() != g_paths.len() {
+                            return Err("组内含未登记条目，无法重排".into());
+                        }
+                        let insert_at_raw = if at_end {
+                            seq.len()
                         } else {
-                            (to_index + usize::from(after)).min(vis.len())
+                            let target_path = &vis[to_index].path;
+                            seq.iter()
+                                .position(|en| en.path == *target_path)
+                                .map(|i| i + usize::from(after))
+                                .unwrap_or(seq.len())
                         };
-                        Some(if to_row >= vis.len() {
-                            top_positions.len()
-                        } else {
-                            top_positions.iter().take_while(|&&i| i < to_row).count()
-                        })
-                    } else {
-                        None
-                    };
-                    let existing: HashSet<String> = std::fs::read_dir(&dst_dir)
-                        .map(|rd| {
-                            rd.filter_map(|x| x.ok())
-                                .map(|x| x.file_name().to_string_lossy().to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
-                    let name = dedup_name(&existing, &name);
-                    move_file(&src.fs_path, &dst_dir.join(&name))?;
-                    let mut meta = read_meta(&bundle, &visit_dir)?;
-                    // 移回分支根 = 顶层清单来自 meta.entries，必须登记。
-                    if dst_dir == visit_dir {
-                        if src.is_dir {
-                            let count = std::fs::read_dir(dst_dir.join(&name))
-                                .map(|rd| rd.count())
-                                .unwrap_or(0);
-                            meta.upsert_entry(&Entry {
-                                path: name.clone(),
-                                role: "dir".to_string(),
-                                count: Some(count as i64),
-                                ..Default::default()
-                            });
-                        } else {
-                            let bytes = std::fs::read(dst_dir.join(&name))
-                                .map_err(|err| err.to_string())?;
-                            meta.upsert_entry(&Entry {
-                                path: name.clone(),
-                                role: "payload".to_string(),
-                                size: Some(bytes.len() as i64),
-                                sha256: Some(util::sha256_bytes(&bytes)),
-                                ..Default::default()
-                            });
+                        let members_before =
+                            group_pos.iter().filter(|&&i| i < insert_at_raw).count();
+                        let insert_at =
+                            (insert_at_raw - members_before).min(seq.len() - g_paths.len());
+                        // 落点 == 组原位置 → 顺序未变。
+                        if group_pos.first() == Some(&insert_at)
+                            && group_pos
+                                .iter()
+                                .enumerate()
+                                .all(|(k, &i)| i == insert_at + k)
+                        {
+                            return Ok("顺序未变化。".into());
                         }
-                    }
-                    // 根路径落点：把新登记的条目插到指定顺序位。
-                    if let Some(pos) = root_insert_pos {
-                        let mut seq: Vec<Entry> = meta
-                            .entries
+                        let members: Vec<Entry> = g_paths
                             .iter()
-                            .filter(|en| !en.is_branch())
-                            .cloned()
+                            .filter_map(|p| {
+                                seq.iter()
+                                    .position(|en| en.path == *p)
+                                    .map(|i| seq.remove(i))
+                            })
                             .collect();
-                        if let Some(old) = seq.iter().position(|en| en.path == name) {
-                            let item = seq.remove(old);
-                            seq.insert(pos.min(seq.len()), item);
-                            let snapshot = meta.entries.clone();
-                            for en in snapshot.iter().filter(|en| !en.is_branch()) {
-                                meta.remove_entry_path(&en.path);
-                            }
-                            for (i, mut en) in seq.into_iter().enumerate() {
-                                en.order = Some(i as i64);
-                                meta.upsert_entry(&en);
-                            }
+                        for (offset, item) in members.into_iter().enumerate() {
+                            seq.insert(insert_at + offset, item);
                         }
+                        let snapshot = meta.entries.clone();
+                        for en in snapshot.iter().filter(|en| !en.is_branch()) {
+                            meta.remove_entry_path(&en.path);
+                        }
+                        for (i, mut en) in seq.into_iter().enumerate() {
+                            en.order = Some(i as i64);
+                            meta.upsert_entry(&en);
+                        }
+                        meta.touch();
+                        meta.save(&bundle.meta_path(&visit_dir))
+                            .map_err(|err| err.to_string())?;
+                        e.rescan()?;
+                        return Ok(format!("已调整 {} 项的顺序。", g_paths.len()));
                     }
-                    // 源/目标若是 meta 文件夹条目（role=dir），同步 count。
-                    for dir_fs in [
-                        src.fs_path.parent().unwrap_or(Path::new("")).to_path_buf(),
-                        dst_dir.clone(),
-                    ] {
-                        if dir_fs == visit_dir {
-                            continue;
+                    let (src_visit, path) = parse_entry_transfer(&transfer)
+                        .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
+                    if src_visit != visit_idx {
+                        // 跨节点拖放 = 移动到目标节点，并按悬停位置插入目标序列。
+                        return move_entry_across(
+                            e, src_visit, &path, visit_idx, &vis, at_end, to_index, after,
+                        );
+                    }
+                    let src_row = vis
+                        .iter()
+                        .position(|v| v.path == path)
+                        .ok_or("未找到源条目")?;
+                    // 落点解析（内部拖拽）：**排序只发生在根层级行之间**；
+                    // 落在非根层级行 = 移入该行所在的文件夹（文件夹行 = 移入其内部）。
+                    let into_folder = !at_end && (into_dir || vis[to_index].depth > 0);
+                    let internal_target_dir = if at_end {
+                        visit_dir.clone()
+                    } else if into_folder {
+                        if vis[to_index].is_dir {
+                            vis[to_index].drop_dir.clone()
+                        } else {
+                            vis[to_index]
+                                .fs_path
+                                .parent()
+                                .unwrap_or(&visit_dir)
+                                .to_path_buf()
                         }
-                        if let Ok(rel) = dir_fs.strip_prefix(&visit_dir) {
-                            let rel = rel.to_string_lossy().to_string();
-                            if let Some(den) = meta
+                    } else {
+                        visit_dir.clone()
+                    };
+                    // 文件夹子行拖拽：无 entries 顺序概念，一律按文件系统移动。
+                    // 拖到文件夹行 = 移入其内部；拖到文件行 = 移到该文件所在文件夹；末尾 = 移回分支根。
+                    if vis[src_row].entries_idx.is_none() {
+                        let src = &vis[src_row];
+                        // into_dir = 移入文件夹内部；否则插到该行所在的目录（根列表）。
+                        let dst_dir = if at_end {
+                            visit_dir.clone()
+                        } else if into_dir {
+                            vis[to_index].drop_dir.clone()
+                        } else {
+                            vis[to_index]
+                                .fs_path
+                                .parent()
+                                .unwrap_or(&visit_dir)
+                                .to_path_buf()
+                        };
+                        if dst_dir.starts_with(&src.fs_path) {
+                            return Err("不能把文件夹移入其自身内部".into());
+                        }
+                        let parents = src.fs_path.parent().unwrap_or(Path::new(""));
+                        if dst_dir == parents {
+                            return Ok(String::new());
+                        }
+                        // 落点在根路径时计算插入顺序位（拖到根层级行列之间 = 可排序）。
+                        let root_insert_pos = if dst_dir == visit_dir {
+                            let top_positions: Vec<usize> = vis
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, v)| v.entries_idx.is_some())
+                                .map(|(i, _)| i)
+                                .collect();
+                            let to_row = if at_end {
+                                vis.len()
+                            } else {
+                                (to_index + usize::from(after)).min(vis.len())
+                            };
+                            Some(if to_row >= vis.len() {
+                                top_positions.len()
+                            } else {
+                                top_positions.iter().take_while(|&&i| i < to_row).count()
+                            })
+                        } else {
+                            None
+                        };
+                        let existing: HashSet<String> = std::fs::read_dir(&dst_dir)
+                            .map(|rd| {
+                                rd.filter_map(|x| x.ok())
+                                    .map(|x| x.file_name().to_string_lossy().to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone());
+                        let name = dedup_name(&existing, &name);
+                        move_file(&src.fs_path, &dst_dir.join(&name))?;
+                        let mut meta = read_meta(&bundle, &visit_dir)?;
+                        // 移回分支根 = 顶层清单来自 meta.entries，必须登记。
+                        if dst_dir == visit_dir {
+                            if src.is_dir {
+                                let count = std::fs::read_dir(dst_dir.join(&name))
+                                    .map(|rd| rd.count())
+                                    .unwrap_or(0);
+                                meta.upsert_entry(&Entry {
+                                    path: name.clone(),
+                                    role: "dir".to_string(),
+                                    count: Some(count as i64),
+                                    ..Default::default()
+                                });
+                            } else {
+                                let bytes = std::fs::read(dst_dir.join(&name))
+                                    .map_err(|err| err.to_string())?;
+                                meta.upsert_entry(&Entry {
+                                    path: name.clone(),
+                                    role: "payload".to_string(),
+                                    size: Some(bytes.len() as i64),
+                                    sha256: Some(util::sha256_bytes(&bytes)),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                        // 根路径落点：把新登记的条目插到指定顺序位。
+                        if let Some(pos) = root_insert_pos {
+                            let mut seq: Vec<Entry> = meta
                                 .entries
                                 .iter()
-                                .find(|x| x.path == rel && x.role == "dir")
+                                .filter(|en| !en.is_branch())
                                 .cloned()
-                            {
-                                let count =
-                                    std::fs::read_dir(&dir_fs).map(|rd| rd.count()).unwrap_or(0);
-                                let mut ne = den;
-                                ne.count = Some(count as i64);
-                                meta.upsert_entry(&ne);
+                                .collect();
+                            if let Some(old) = seq.iter().position(|en| en.path == name) {
+                                let item = seq.remove(old);
+                                seq.insert(pos.min(seq.len()), item);
+                                let snapshot = meta.entries.clone();
+                                for en in snapshot.iter().filter(|en| !en.is_branch()) {
+                                    meta.remove_entry_path(&en.path);
+                                }
+                                for (i, mut en) in seq.into_iter().enumerate() {
+                                    en.order = Some(i as i64);
+                                    meta.upsert_entry(&en);
+                                }
                             }
                         }
+                        // 源/目标若是 meta 文件夹条目（role=dir），同步 count。
+                        for dir_fs in [
+                            src.fs_path.parent().unwrap_or(Path::new("")).to_path_buf(),
+                            dst_dir.clone(),
+                        ] {
+                            if dir_fs == visit_dir {
+                                continue;
+                            }
+                            if let Ok(rel) = dir_fs.strip_prefix(&visit_dir) {
+                                let rel = rel.to_string_lossy().to_string();
+                                if let Some(den) = meta
+                                    .entries
+                                    .iter()
+                                    .find(|x| x.path == rel && x.role == "dir")
+                                    .cloned()
+                                {
+                                    let count = std::fs::read_dir(&dir_fs)
+                                        .map(|rd| rd.count())
+                                        .unwrap_or(0);
+                                    let mut ne = den;
+                                    ne.count = Some(count as i64);
+                                    meta.upsert_entry(&ne);
+                                }
+                            }
+                        }
+                        meta.touch();
+                        meta.save(&bundle.meta_path(&visit_dir))
+                            .map_err(|err| err.to_string())?;
+                        e.rescan()?;
+                        let rel = dst_dir
+                            .strip_prefix(&visit_dir)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let where_ = if rel.is_empty() {
+                            "分支根目录".to_string()
+                        } else {
+                            format!("{rel}/")
+                        };
+                        // 高亮移动后的新位置。
+                        e.selected_entry_path =
+                            Some(in_dir_child_path(&visit_dir, &dst_dir, &name));
+                        return Ok(format!("已移动 {path} → {where_}"));
                     }
-                    meta.touch();
-                    meta.save(&bundle.meta_path(&visit_dir))
-                        .map_err(|err| err.to_string())?;
-                    e.rescan()?;
-                    let rel = dst_dir
-                        .strip_prefix(&visit_dir)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let where_ = if rel.is_empty() {
-                        "分支根目录".to_string()
+                    let mut meta = read_meta(&bundle, &visit_dir)?;
+                    // 落到文件夹（含拖到子行 = 移入其所在文件夹）= 把条目移入该文件夹。
+                    if into_folder {
+                        let entry = meta
+                            .entries
+                            .iter()
+                            .find(|x| x.path == path)
+                            .cloned()
+                            .ok_or("未找到源条目")?;
+                        if !entry.is_file_like() {
+                            return Err("仅 payload/asset 文件可移入文件夹".into());
+                        }
+                        let name = std::path::Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone());
+                        let dst_dir = internal_target_dir.join(&name);
+                        move_file(&visit_dir.join(&path), &dst_dir)?;
+                        meta.remove_entry_path(&path);
+                        let dir_rel = internal_target_dir
+                            .strip_prefix(&visit_dir)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if let Some(den) = meta.entries.iter().find(|x| x.path == dir_rel).cloned()
+                        {
+                            let count = std::fs::read_dir(&internal_target_dir)
+                                .map(|rd| rd.count())
+                                .unwrap_or(0);
+                            let mut ne = den;
+                            ne.count = Some(count as i64);
+                            meta.upsert_entry(&ne);
+                        }
+                        meta.touch();
+                        meta.save(&bundle.meta_path(&visit_dir))
+                            .map_err(|err| err.to_string())?;
+                        let msg = format!("已移动 {path} → {dir_rel}/");
+                        // 自动展开目标文件夹，保证新条目可见并被高亮。
+                        if internal_target_dir != visit_dir {
+                            e.expanded_dirs
+                                .insert(internal_target_dir.to_string_lossy().to_string());
+                        }
+                        e.rescan()?;
+                        // 高亮移动后的新位置（文件夹子行路径 = "目录/文件名"）。
+                        e.selected_entry_path =
+                            Some(in_dir_child_path(&visit_dir, &internal_target_dir, &name));
+                        return Ok(msg);
+                    }
+                    // 重排：仅在顶层内容条目之间进行；分支与文件夹子行顺序不动。
+                    let top_positions: Vec<usize> = vis
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| v.entries_idx.is_some())
+                        .map(|(i, _)| i)
+                        .collect();
+                    let from_row = src_row;
+                    let from_pos = top_positions.iter().take_while(|&&i| i < from_row).count();
+                    let to_row = (to_index + usize::from(after)).min(vis.len());
+                    let to_pos = if to_row >= vis.len() {
+                        top_positions.len()
                     } else {
-                        format!("{rel}/")
+                        top_positions.iter().take_while(|&&i| i < to_row).count()
                     };
-                    // 高亮移动后的新位置。
-                    e.selected_entry_path = Some(in_dir_child_path(&visit_dir, &dst_dir, &name));
-                    return Ok(format!("已移动 {path} → {where_}"));
-                }
-                let mut meta = read_meta(&bundle, &visit_dir)?;
-                // 落到文件夹（含拖到子行 = 移入其所在文件夹）= 把条目移入该文件夹。
-                if into_folder {
-                    let entry = meta
+                    if from_pos == to_pos || from_pos + 1 == to_pos {
+                        return Ok("顺序未变化。".into());
+                    }
+                    let mut meta = read_meta(&bundle, &visit_dir)?;
+                    let mut seq: Vec<Entry> = meta
                         .entries
                         .iter()
-                        .find(|x| x.path == path)
+                        .filter(|en| !en.is_branch())
                         .cloned()
-                        .ok_or("未找到源条目")?;
-                    if !entry.is_file_like() {
-                        return Err("仅 payload/asset 文件可移入文件夹".into());
+                        .collect();
+                    let item = seq.remove(from_pos.min(seq.len()));
+                    let insert_at = if from_pos < to_pos {
+                        to_pos - 1
+                    } else {
+                        to_pos
+                    };
+                    seq.insert(insert_at.min(seq.len()), item);
+                    let snapshot = meta.entries.clone();
+                    for en in snapshot.iter().filter(|en| !en.is_branch()) {
+                        meta.remove_entry_path(&en.path);
                     }
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
-                    let dst_dir = internal_target_dir.join(&name);
-                    move_file(&visit_dir.join(&path), &dst_dir)?;
-                    meta.remove_entry_path(&path);
-                    let dir_rel = internal_target_dir
-                        .strip_prefix(&visit_dir)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if let Some(den) = meta.entries.iter().find(|x| x.path == dir_rel).cloned() {
-                        let count = std::fs::read_dir(&internal_target_dir)
-                            .map(|rd| rd.count())
-                            .unwrap_or(0);
-                        let mut ne = den;
-                        ne.count = Some(count as i64);
-                        meta.upsert_entry(&ne);
+                    for (i, mut en) in seq.into_iter().enumerate() {
+                        en.order = Some(i as i64);
+                        meta.upsert_entry(&en);
                     }
                     meta.touch();
                     meta.save(&bundle.meta_path(&visit_dir))
                         .map_err(|err| err.to_string())?;
-                    let msg = format!("已移动 {path} → {dir_rel}/");
-                    // 自动展开目标文件夹，保证新条目可见并被高亮。
-                    if internal_target_dir != visit_dir {
-                        e.expanded_dirs
-                            .insert(internal_target_dir.to_string_lossy().to_string());
-                    }
                     e.rescan()?;
-                    // 高亮移动后的新位置（文件夹子行路径 = "目录/文件名"）。
-                    e.selected_entry_path =
-                        Some(in_dir_child_path(&visit_dir, &internal_target_dir, &name));
-                    return Ok(msg);
-                }
-                // 重排：仅在顶层内容条目之间进行；分支与文件夹子行顺序不动。
-                let top_positions: Vec<usize> = vis
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, v)| v.entries_idx.is_some())
-                    .map(|(i, _)| i)
-                    .collect();
-                let from_row = src_row;
-                let from_pos = top_positions.iter().take_while(|&&i| i < from_row).count();
-                let to_row = (to_index + usize::from(after)).min(vis.len());
-                let to_pos = if to_row >= vis.len() {
-                    top_positions.len()
-                } else {
-                    top_positions.iter().take_while(|&&i| i < to_row).count()
-                };
-                if from_pos == to_pos || from_pos + 1 == to_pos {
-                    return Ok("顺序未变化。".into());
-                }
-                let mut meta = read_meta(&bundle, &visit_dir)?;
-                let mut seq: Vec<Entry> = meta
-                    .entries
-                    .iter()
-                    .filter(|en| !en.is_branch())
-                    .cloned()
-                    .collect();
-                let item = seq.remove(from_pos.min(seq.len()));
-                let insert_at = if from_pos < to_pos {
-                    to_pos - 1
-                } else {
-                    to_pos
-                };
-                seq.insert(insert_at.min(seq.len()), item);
-                let snapshot = meta.entries.clone();
-                for en in snapshot.iter().filter(|en| !en.is_branch()) {
-                    meta.remove_entry_path(&en.path);
-                }
-                for (i, mut en) in seq.into_iter().enumerate() {
-                    en.order = Some(i as i64);
-                    meta.upsert_entry(&en);
-                }
-                meta.touch();
-                meta.save(&bundle.meta_path(&visit_dir))
-                    .map_err(|err| err.to_string())?;
-                e.rescan()?;
-                // 高亮被重排的条目。
-                e.selected_entry_path = Some(path.clone());
-                Ok("条目顺序已更新。".into())
-            });
-            match result {
-                Ok(msg) => {
-                    sync_ui(&app, &editor.borrow());
-                    if !msg.is_empty() {
-                        app.set_status(msg.into());
+                    // 高亮被重排的条目。
+                    e.selected_entry_path = Some(path.clone());
+                    Ok("条目顺序已更新。".into())
+                });
+                match result {
+                    Ok(msg) => {
+                        sync_ui(&app, &editor.borrow());
+                        if !msg.is_empty() {
+                            app.set_status(msg.into());
+                        }
                     }
+                    Err(msg) => app.set_status(format!("重排失败：{msg}").into()),
                 }
-                Err(msg) => app.set_status(format!("重排失败：{msg}").into()),
-            }
-        });
+            });
     }
     {
         // 拖到左侧树某分支 = 移动 payload/asset 文件过去。
@@ -4072,106 +6500,20 @@ fn main() -> Result<(), slint::PlatformError> {
                         names.join("、")
                     ));
                 }
-                let (src_visit, path) = parse_entry_transfer(&transfer)
-                    .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
-                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
-                let scan = e.scan.as_ref().ok_or("未打开 bundle")?;
-                if src_visit == to_visit {
-                    return Err("源与目标是同一分支".into());
-                }
-                if src_visit >= scan.visits.len() {
-                    return Err("源分支无效".into());
-                }
-                let (src_dir, dst_dir) = {
-                    let src = &scan.visits[src_visit];
-                    let dst = &scan.visits[to_visit];
-                    (src.dir.clone(), dst.dir.clone())
-                };
-                let src_meta = read_meta(bundle, &src_dir)?;
-                // 文件夹子行没有 meta 条目：直接按文件系统移动到目标分支根目录。
-                if !src_meta.entries.iter().any(|x| x.path == path) {
-                    let src_fs = src_dir.join(&path);
-                    if !src_fs.exists() {
-                        return Err("源文件不存在".into());
-                    }
-                    let existing: HashSet<String> = std::fs::read_dir(&dst_dir)
-                        .map(|rd| {
-                            rd.filter_map(|x| x.ok())
-                                .map(|x| x.file_name().to_string_lossy().to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
-                    let name = dedup_name(&existing, &name);
-                    move_file(&src_fs, &dst_dir.join(&name))?;
-                    // 目标分支顶层清单来自 meta.entries，必须登记。
-                    let mut dst_meta = read_meta(bundle, &dst_dir)?;
-                    if src_fs.is_dir() {
-                        let count = std::fs::read_dir(dst_dir.join(&name))
-                            .map(|rd| rd.count())
-                            .unwrap_or(0);
-                        dst_meta.upsert_entry(&Entry {
-                            path: name.clone(),
-                            role: "dir".to_string(),
-                            count: Some(count as i64),
-                            ..Default::default()
-                        });
-                    } else {
-                        let bytes =
-                            std::fs::read(dst_dir.join(&name)).map_err(|err| err.to_string())?;
-                        dst_meta.upsert_entry(&Entry {
-                            path: name.clone(),
-                            role: "payload".to_string(),
-                            size: Some(bytes.len() as i64),
-                            sha256: Some(util::sha256_bytes(&bytes)),
-                            ..Default::default()
-                        });
-                    }
-                    dst_meta.touch();
-                    dst_meta
-                        .save(&bundle.meta_path(&dst_dir))
-                        .map_err(|err| err.to_string())?;
-                    e.rescan()?;
-                    return Ok(format!("已移动 {path} → 目标分支"));
-                }
-                let entry = src_meta
-                    .entries
-                    .iter()
-                    .find(|x| x.path == path)
-                    .cloned()
-                    .ok_or("未找到源条目")?;
-                if !entry.is_file_like() {
-                    return Err("仅支持移动 payload/asset 文件；分支请用「复制 + 粘贴」".into());
-                }
-                let dst_meta = read_meta(bundle, &dst_dir)?;
-                let existing: HashSet<String> =
-                    dst_meta.entries.iter().map(|x| x.path.clone()).collect();
-                let name = dedup_name(&existing, &path);
-                move_file(&src_dir.join(&path), &dst_dir.join(&name))?;
-                let bytes = std::fs::read(dst_dir.join(&name)).map_err(|err| err.to_string())?;
-                let mut sm = src_meta;
-                sm.remove_entry_path(&path);
-                sm.touch();
-                sm.save(&bundle.meta_path(&src_dir))
-                    .map_err(|err| err.to_string())?;
-                let mut dm = dst_meta;
-                dm.upsert_entry(&Entry {
-                    path: name.clone(),
-                    role: entry.role.clone(),
-                    title: entry.title.clone(),
-                    note: entry.note.clone(),
-                    size: Some(bytes.len() as i64),
-                    sha256: Some(util::sha256_bytes(&bytes)),
-                    ..Default::default()
-                });
-                dm.touch();
-                dm.save(&bundle.meta_path(&dst_dir))
-                    .map_err(|err| err.to_string())?;
-                e.rescan()?;
-                Ok(format!("已移动 {path} → {name}"))
+                // 多选拖拽（Finder 语义：拖一个选中项 = 拖全部）→ 逐项移动；
+                // 单目标保持既有行为与文案不变。
+                let (src_visit, paths): (usize, Vec<String>) =
+                    match parse_entry_transfer_multi(&transfer) {
+                        Some((v, paths)) if paths.len() > 1 => (v, paths),
+                        _ => {
+                            let (v, p) = parse_entry_transfer(&transfer)
+                                .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
+                            (v, vec![p])
+                        }
+                    };
+                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+                // 逐项移动 + 重扫 + 汇总文案（拖到树分支与行级跨分支落点共用）。
+                move_group_to_branch(e, &bundle, src_visit, &paths, to_visit)
             });
             match result {
                 Ok(msg) => {
@@ -4379,8 +6721,8 @@ mod collapse_tests {
 
     fn demo_editor() -> Editor {
         let mut e = Editor::new();
-        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/客户运营.str");
+        let demo =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/客户运营.str");
         e.open(&demo).expect("打开示例 bundle");
         e
     }
@@ -4434,9 +6776,7 @@ mod collapse_tests {
         let canvas_right = out
             .edges
             .iter()
-            .find(|s| {
-                (s.x - (canvas_start + NODE_HGAP / 2.0)).abs() < eps && s.w > EDGE_W + eps
-            })
+            .find(|s| (s.x - (canvas_start + NODE_HGAP / 2.0)).abs() < eps && s.w > EDGE_W + eps)
             .expect("找到画布右段");
         let child_left = canvas_right.x + canvas_right.w;
         let mini_right_end = right.x + right.w;
@@ -4466,9 +6806,7 @@ mod collapse_tests {
             .unwrap()
             .visits
             .iter()
-            .position(|v| {
-                v.rel.contains("客户") || v.dir.to_string_lossy().contains("客户")
-            })
+            .position(|v| v.rel.contains("客户") || v.dir.to_string_lossy().contains("客户"))
             .expect("找到客户档案分支");
         let scan = e.scan.as_ref().unwrap();
         let kids = e.kids.get(idx).cloned().unwrap_or_default();
@@ -4489,7 +6827,7 @@ mod collapse_tests {
             })
             .collect();
         // 展开客户档案与全部子分支，并激活第一个子分支。
-        e.expanded.insert(root_id);
+        e.expanded.insert(root_id.clone());
         for id in &kid_ids {
             e.expanded.insert(id.clone());
         }
@@ -4517,11 +6855,22 @@ mod collapse_tests {
             assert!(!e.expanded.contains(id), "子分支展开态应被移除");
             assert!(!e.content_expanded.contains(id), "子分支内容展开态应被移除");
         }
-        assert_eq!(e.selected, None, "子树内的激活分支应被移除");
+        // 收回包含选中分支的子树：选中转移到**收回的分支本身**（保持可见焦点，
+        // Finder/VSCode 同语义），而不是凭空消失；内容选区随之清空。
+        assert_eq!(
+            e.selected.as_deref(),
+            Some(root_id.as_str()),
+            "焦点应落到被收回的分支上"
+        );
         assert_eq!(e.selected_entry_path, None);
+        assert!(e.entry_multi.is_empty(), "内容多选区应随焦点转移清空");
         assert!(
             e.rows.iter().all(|r| r.visit != kids[0]),
             "收缩后子分支行不应可见"
+        );
+        assert!(
+            e.rows.iter().any(|r| r.visit == idx),
+            "被收回的分支行本身应可见且持有焦点"
         );
     }
 }
@@ -4533,8 +6882,8 @@ mod test_support {
     /// 展开全树的示例 bundle（连线几何最完整：肘形三段 + 缩略图 1:2 划分）。
     pub fn expanded_demo() -> Editor {
         let mut e = Editor::new();
-        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples/客户运营.str");
+        let demo =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/客户运营.str");
         e.open(&demo).expect("打开示例 bundle");
         let ids: Vec<String> = e
             .scan
@@ -4637,7 +6986,9 @@ mod edge_chunk_tests {
         );
         for (x, y) in &p {
             assert!(
-                *x >= c.x - 0.01 && *y >= c.y - 0.01 && *x <= c.x + c.w + 0.01
+                *x >= c.x - 0.01
+                    && *y >= c.y - 0.01
+                    && *x <= c.x + c.w + 0.01
                     && *y <= c.y + c.h + 0.01,
                 "端点须落在包络盒内：({x}, {y})"
             );
@@ -4742,9 +7093,15 @@ mod help_tests {
                 .collect::<Vec<_>>()
                 .join(" ");
             if mac {
-                assert!(all.contains('⌘') && !all.contains("Ctrl+"), "macOS 用 ⌘ 字形");
+                assert!(
+                    all.contains('⌘') && !all.contains("Ctrl+"),
+                    "macOS 用 ⌘ 字形"
+                );
             } else {
-                assert!(all.contains("Ctrl+") && !all.contains('⌘'), "其它平台用 Ctrl+");
+                assert!(
+                    all.contains("Ctrl+") && !all.contains('⌘'),
+                    "其它平台用 Ctrl+"
+                );
             }
         }
     }
@@ -4758,10 +7115,7 @@ mod help_tests {
             "https://github.com/frowhy/str.str/blob/main/SPEC.md"
         );
         assert_eq!(doc_url(repo, 1), "https://github.com/frowhy/str.str");
-        assert_eq!(
-            doc_url(repo, 2),
-            "https://github.com/frowhy/str.str/issues"
-        );
+        assert_eq!(doc_url(repo, 2), "https://github.com/frowhy/str.str/issues");
         // 未预期的下标也落到「问题反馈」，不会 panic。
         assert_eq!(doc_url(repo, 9), doc_url(repo, 2));
     }
@@ -4892,5 +7246,151 @@ mod mini_density_tests {
             out.nodes[*spine.last().unwrap()].is_root,
             "链尾（回溯终点）应是根节点"
         );
+    }
+
+    /// 布局缓存签名：只随**几何输入**变化。选中分支 / 改多选集合都必须保持
+    /// 同一签名（否则每次点选都会整树重排 —— 这正是性能问题的根源）。
+    #[test]
+    fn mind_sig_ignores_selection_only_changes() {
+        let mut e = expanded_demo();
+        let base = mind_sig(&e);
+        let ids: Vec<String> = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .filter_map(|v| v.meta.as_ref().and_then(|m| m.id.clone()))
+            .collect();
+        // 换选中分支 + 改主选中条目 + 加多选条目：纯渲染数据
+        e.selected = ids.get(1).cloned();
+        e.selected_entry_path = Some("a.md".into());
+        e.entry_multi.insert("a.md".into());
+        assert_eq!(base, mind_sig(&e), "选中 / 多选变化不得使布局缓存失效");
+
+        // 缓存命中路径仍要能把选中标记落到正确节点上
+        let target = e.visit_idx(ids.get(1).unwrap()).unwrap();
+        assert!(node_is_selected(&e, target), "新选中节点应判为选中");
+        assert!(
+            !e.scan
+                .as_ref()
+                .unwrap()
+                .visits
+                .iter()
+                .enumerate()
+                .any(|(i, _)| i != target && node_is_selected(&e, i)),
+            "其余节点不应判为选中"
+        );
+    }
+
+    /// 几何输入变化必须使签名失效：展开集合、内容展开集合、可见行结构、scan 代次。
+    #[test]
+    fn mind_sig_tracks_geometry_inputs() {
+        let mut e = expanded_demo();
+        let base = mind_sig(&e);
+        let some_id = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .filter_map(|v| v.meta.as_ref().and_then(|m| m.id.clone()))
+            .nth(1)
+            .expect("示例 bundle 有多个分支");
+
+        e.expanded.remove(&some_id);
+        e.rebuild();
+        assert_ne!(base, mind_sig(&e), "收起子树必须使缓存失效");
+        e.expanded.insert(some_id.clone());
+        e.rebuild();
+        assert_eq!(base, mind_sig(&e), "恢复展开后签名应回到原值");
+
+        e.content_expanded.insert(some_id);
+        assert_ne!(base, mind_sig(&e), "内容展开必须使缓存失效");
+
+        e.scan_gen += 1;
+        assert_ne!(base, mind_sig(&e), "scan 代次变化必须使缓存失效");
+    }
+
+    /// 节点内嵌内容行的句柄复用：行数不变时二次写入必须复用同一句柄
+    /// （句柄被换掉 = 节点内 ListView 重建 = 正在弹出的右键菜单失效）。
+    #[test]
+    fn node_entry_rows_handle_reused_when_count_matches() {
+        let e = expanded_demo();
+        let rows = visible_to_rows(&build_entry_rows_for(&e, 0), &HashSet::new());
+        let first = apply_node_entry_rows(&e, 0, rows.clone());
+        let second = apply_node_entry_rows(&e, 0, rows.clone());
+        // ModelRc 的相等即底层模型指针相等（vendor/slint model.rs）。
+        assert!(first == second, "行数不变时必须复用同一行模型句柄");
+        if !rows.is_empty() {
+            let mut shorter = rows;
+            shorter.pop();
+            let third = apply_node_entry_rows(&e, 0, shorter);
+            assert!(first != third, "行数变化时应换句柄（内嵌列表结构变了）");
+        }
+    }
+}
+
+/// `.command` 默认处理程序解析：LSHandlers XML 的块扫描（含嵌套
+/// PreferredVersions 的 `-` 占位与相邻条目干扰）。
+#[cfg(all(test, target_os = "macos"))]
+mod command_handler_tests {
+    use super::*;
+
+    /// 真实 plist 的缩进 / 嵌套形状：顶层 dict 包住 LSHandlers 数组，数组里
+    /// 若干条目（前面的条目同样带 `LSHandlerRoleShell`，用于验证不会串档），
+    /// `.command` 条目的角色值在内层 `-` 占位之后。
+    const XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>LSHandlers</key>
+	<array>
+		<dict>
+			<key>LSHandlerContentType</key>
+			<string>public.unix-executable</string>
+			<key>LSHandlerPreferredVersions</key>
+			<dict>
+				<key>LSHandlerRoleShell</key>
+				<string>-</string>
+			</dict>
+			<key>LSHandlerRoleShell</key>
+			<string>com.apple.dt.xcode</string>
+		</dict>
+		<dict>
+			<key>LSHandlerContentType</key>
+			<string>com.apple.terminal.shell-script</string>
+			<key>LSHandlerPreferredVersions</key>
+			<dict>
+				<key>LSHandlerRoleAll</key>
+				<string>-</string>
+			</dict>
+			<key>LSHandlerRoleAll</key>
+			<string>com.googlecode.iterm2</string>
+		</dict>
+		<dict>
+			<key>LSHandlerContentTag</key>
+			<string>torrent</string>
+			<key>LSHandlerRoleAll</key>
+			<string>com.aone.keka</string>
+		</dict>
+	</array>
+</dict>
+</plist>
+"#;
+
+    #[test]
+    fn picks_command_handler_and_skips_placeholders() {
+        assert_eq!(
+            parse_command_handler_from_ls_handlers_xml(XML).as_deref(),
+            Some("com.googlecode.iterm2"),
+            "应取 .command 条目里非 \"-\" 的角色值，且不串到相邻条目"
+        );
+    }
+
+    /// 没有 `.command` 覆盖项时返回 None（由候选链兜底 Terminal）。
+    #[test]
+    fn missing_entry_yields_none() {
+        let xml = XML.replace("com.apple.terminal.shell-script", "com.apple.terminal.nope");
+        assert_eq!(parse_command_handler_from_ls_handlers_xml(&xml), None);
     }
 }
