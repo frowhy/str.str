@@ -17,7 +17,8 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 | GUI |
 | --- | --- | --- | --- | --- | --- |
-| 工作区（未发布） | — | 1.13.0 | 0.7.0 | 0.3.5 | 0.3.0 |
+| [`v0.7.1`](https://github.com/frowhy/str.str/releases/tag/v0.7.1) | 2026-09-22 | 1.13.0 | 0.7.1 | 0.4.1 | 0.3.0 |
+| [`v0.7.0`](https://github.com/frowhy/str.str/releases/tag/v0.7.0) | 2026-09-20 | 1.13.0 | 0.7.0 | 0.4.0 | 0.2.0 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 | —（未纳入） |
 | [`v0.2.0`](https://github.com/frowhy/str.str/releases/tag/v0.2.0) | 2026-09-14 | 1.8.0 | 0.2.0 | 0.2.0 | —（未纳入） |
 | [`v0.1.1`](https://github.com/frowhy/str.str/releases/tag/v0.1.1) | 2026-09-14 | 1.7.0 | 0.1.0（未变更） | 0.1.1 | —（未纳入） |
@@ -26,7 +27,9 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
-## [未发布]
+## [`v0.7.1`](https://github.com/frowhy/str.str/releases/tag/v0.7.1) — 2026-09-22
+
+规范 1.13.0 · CLI 0.7.1 · 技能包 0.4.1 · GUI 0.3.0
 
 ### 新增
 
@@ -38,11 +41,24 @@
   - 全程进度反馈 + 完成汇总（逐项 ✓/✗，失败项一键重试）；批量仅作用于内容条目，
     分支组织结构不在批量范围内；CLI 不提供批量命令。
 
+### 变更
+
+- **GUI 视觉与交互打磨**（gui 0.3.0）：列表行对齐 Finder（行高 20pt、交替底色、实心 accent
+  选中态、副文本中性灰与同字号、矢量折线箭头、全拉丁行光学居中）；导图激活与多选串台修复
+  （点空白必定取消激活、同名分支与条目按唯一标识隔离、画布高亮刷新）；拖拽与文件操作修正
+  （落点与插入指示同源、整组快照为落点依据、移入文件夹 / 分支根的登记改按目录比较、
+  重命名与复制 / 粘贴的子目录路径修正、移动后展开并高亮落点）。
+- **CLI 0.7.0 → 0.7.1**：仅版本号随发行前进（`str --version` 现在输出 `str 0.7.1`），无命令面
+  变更。详见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.4.0 → 0.4.1**：`str --version` 示例与 `ensure-str.sh` 的 `DEFAULT_VERSION` 同步为
+  `str 0.7.1` / `v0.7.1`。详见 [`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
+- `release.yml` 的 `workflow_dispatch` 默认 tag 更新为 `v0.7.1`。
+
 ---
 
-## 工作区（未发布）
+## [`v0.7.0`](https://github.com/frowhy/str.str/releases/tag/v0.7.0) — 2026-09-20
 
-规范 1.13.0 · CLI 0.7.0 · 技能包 0.3.5 · GUI 0.1.0
+规范 1.13.0 · CLI 0.7.0 · 技能包 0.4.0 · GUI 0.2.0
 
 ### 变更
 

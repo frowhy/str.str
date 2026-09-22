@@ -59,12 +59,12 @@ assert_eq!(report.error_count(), 0);
 
 ## 版本
 
-本 crate 的版本（当前 **0.7.0**）是**独立于格式规范版本**的一条轴：规范定义磁盘上的数据契约，
+本 crate 的版本（当前 **0.7.1**）是**独立于格式规范版本**的一条轴：规范定义磁盘上的数据契约，
 crate 定义代码 / 命令契约，两者可各自演进。当前实现对应规范 **v1.13.0**（`str` 主版本 = `1`）；
 各条轴与发行 tag 的对应关系登记在仓库根 `VERSIONS.toml`。逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ```sh
-str --version     # str 0.7.0
+str --version     # str 0.7.1
 ```
 
 ## 贡献
