@@ -82,7 +82,7 @@ cat > "$BLOCK" <<'RULE_EOF'
 
 ```sh
 STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1   # <skill-dir> = 本技能安装目录
-"$STR" --version                                           # 期望输出：str 0.7.1
+"$STR" --version                                           # 期望输出：str 0.7.2
 ```
 
 ### 参数格式（关键约定）

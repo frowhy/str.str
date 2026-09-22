@@ -14,6 +14,16 @@
 
 ---
 
+## [0.4.2] — 2026-09-23
+
+### 变更
+
+- `SKILL.md` 的 `str --version` 示例、`references/cli-reference.md` 的实测版本、
+  `scripts/ensure-str.sh` 的 `DEFAULT_VERSION`、`scripts/bootstrap-rule.sh` 的期望输出
+  同步为 `str 0.7.2` / `v0.7.2`（随发行 `v0.7.2` 前进）。
+
+---
+
 ## [0.4.1] — 2026-09-22
 
 ### 变更

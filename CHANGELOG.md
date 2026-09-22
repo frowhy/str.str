@@ -17,6 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 | GUI |
 | --- | --- | --- | --- | --- | --- |
+| [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) | 2026-09-23 | 1.13.0 | 0.7.2 | 0.4.2 | 0.3.2 |
 | [`v0.7.1`](https://github.com/frowhy/str.str/releases/tag/v0.7.1) | 2026-09-22 | 1.13.0 | 0.7.1 | 0.4.1 | 0.3.0 |
 | [`v0.7.0`](https://github.com/frowhy/str.str/releases/tag/v0.7.0) | 2026-09-20 | 1.13.0 | 0.7.0 | 0.4.0 | 0.2.0 |
 | [`v0.3.0`](https://github.com/frowhy/str.str/releases/tag/v0.3.0) | 2026-09-14 | 1.9.0 | 0.3.0 | 0.3.0 | —（未纳入） |
@@ -27,9 +28,9 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
-## 工作区（未发布）
+## [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) — 2026-09-23
 
-规范 1.13.0 · CLI 0.7.1 · 技能包 0.4.1 · GUI 0.3.2
+规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.3.2
 
 ### 修复
 
@@ -97,6 +98,14 @@
 - **状态栏分支名回退修复**（gui 0.3.2）：`title_of_dir` 此前在分支**没有 `title`** 时原样返回
   `visit_title` 的「（无标题）」，于是状态栏出现 `已删除 5 项 → 分支「（无标题）」（可在废纸篓
   找回）。`（真机验收实测；`str init` 未带 `--title` 的 bundle 根分支即如此）——现回退到**目录名**。
+- **CLI 0.7.1 → 0.7.2**：仅版本号随发行前进（`str --version` 现在输出 `str 0.7.2`），无命令面
+  变更。详见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)。
+- **技能包 0.4.1 → 0.4.2**：`str --version` 示例、`references/cli-reference.md` 的实测版本、
+  `ensure-str.sh` 的 `DEFAULT_VERSION`、`bootstrap-rule.sh` 的期望输出同步为 `str 0.7.2` /
+  `v0.7.2`。详见 [`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
+- `release.yml` 的 `workflow_dispatch` 默认 tag 更新为 `v0.7.2`。
+
+---
 
 ## [`v0.7.1`](https://github.com/frowhy/str.str/releases/tag/v0.7.1) — 2026-09-22
 
