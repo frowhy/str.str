@@ -2430,8 +2430,9 @@ fn is_noise_name(name: &str) -> bool {
 }
 
 /// 跨分支整组移动（拖到树分支 / 行级跨分支落点共用）：逐项移动 payload/asset
-/// 文件（fs 重命名 + 源登记移除 + 目标登记 upsert，含重名去重与角色保全）；
-/// 未登记的磁盘项按文件系统移动并登记；文件夹子行无登记，按文件系统移动。
+/// 文件与 `role = "dir"` 的内容文件夹（fs 重命名 + 源登记移除 + 目标登记 upsert，
+/// 含重名去重与角色保全；目录登记为 dir + count，子项不逐项登记）；
+/// 未登记的磁盘项（含文件夹子行）按文件系统移动后按类型登记。
 /// 最后一次性重扫，返回汇总文案（含失败明细）。
 /// 落点参数（与单条 `move_entry_across` 同规则）：`dst_vis/at_end/to_index/after`
 /// 描述目标面板里的悬停行 —— 文件夹行 = 移入该文件夹；顶层条目行 = 登记到顶层
@@ -2501,36 +2502,71 @@ fn move_group_to_branch(
     for path in paths {
         // 文件夹子行没有 meta 条目：直接按文件系统移动到目标分支根目录。
         let entry = sm.entries.iter().find(|x| x.path == *path).cloned();
+        let src_fs = src_dir.join(path);
         match entry {
-            Some(entry) if !entry.is_file_like() => {
-                errs.push(format!("{path}：仅支持移动 payload/asset 文件"));
+            // 分支条目（node/branch）只在结构树里呈现，不参与内容迁移。
+            Some(entry) if entry.is_branch() => {
+                errs.push(format!("{path}：分支条目不能作为内容移动"));
                 continue;
             }
             Some(entry) => {
+                // 已登记条目：payload/asset 文件，或 `role = "dir"` 的内容文件夹。
+                // **文件夹同样可整体移动** —— 与单条 `move_entry_across`、同分支拖拽
+                // 同规则（此前这里只放行 payload/asset，用户报告「无法拖拽移动文件夹」）：
+                // 目录登记为 dir（带 count），子项不逐项登记。
                 let name = dedup_name(&existing, path);
-                if move_file(&src_dir.join(path), &dst_dir.join(&name)).is_err() {
+                let dst_fs = dst_dir.join(&name);
+                // **必须在移动之前**判定「是不是目录」：`move_file` 之后源路径已不存在，
+                // `src_fs.is_dir()` 恒为 false ⇒ 文件夹会被当文件读（「读取失败」）。
+                let src_is_dir = src_fs.is_dir();
+                if src_is_dir {
+                    // 防自吞：目标目录位于源文件夹内部 = 把整棵子树搬进自己。
+                    if dst_dir.starts_with(&src_fs) {
+                        errs.push(format!("{path}：不能把文件夹移入其自身内部"));
+                        continue;
+                    }
+                    // 已在目标目录内（嵌套分支等极端落点）= 位置未变，不移动文件。
+                    if src_fs.parent() == Some(dst_dir.as_path()) {
+                        continue;
+                    }
+                }
+                if move_file(&src_fs, &dst_fs).is_err() {
                     errs.push(format!("{path}：移动失败"));
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(dst_dir.join(&name)) else {
-                    errs.push(format!("{path}：读取失败"));
-                    continue;
+                // 先落盘再读回：目录登记 count，文件登记 size + sha256。
+                // 读取失败时保留源登记（文件已在磁盘上，至少不凭空丢清单项）。
+                let new_entry = if src_is_dir {
+                    let count = std::fs::read_dir(&dst_fs).map(|rd| rd.count()).unwrap_or(0);
+                    Entry {
+                        path: name.clone(),
+                        role: "dir".to_string(),
+                        count: Some(count as i64),
+                        title: entry.title.clone(),
+                        note: entry.note.clone(),
+                        ..Default::default()
+                    }
+                } else {
+                    let Ok(bytes) = std::fs::read(&dst_fs) else {
+                        errs.push(format!("{path}：读取失败"));
+                        continue;
+                    };
+                    Entry {
+                        path: name.clone(),
+                        role: entry.role.clone(),
+                        title: entry.title.clone(),
+                        note: entry.note.clone(),
+                        size: Some(bytes.len() as i64),
+                        sha256: Some(util::sha256_bytes(&bytes)),
+                        ..Default::default()
+                    }
                 };
                 existing.insert(name.clone());
                 sm.remove_entry_path(path);
-                dst_meta.upsert_entry(&Entry {
-                    path: name.clone(),
-                    role: entry.role.clone(),
-                    title: entry.title.clone(),
-                    note: entry.note.clone(),
-                    size: Some(bytes.len() as i64),
-                    sha256: Some(util::sha256_bytes(&bytes)),
-                    ..Default::default()
-                });
+                dst_meta.upsert_entry(&new_entry);
                 moved.push(name);
             }
             None => {
-                let src_fs = src_dir.join(path);
                 if !src_fs.exists() {
                     errs.push(format!("{path}：源文件不存在"));
                     continue;
@@ -2549,12 +2585,14 @@ fn move_group_to_branch(
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.clone());
                 let name = dedup_name(&merged, &name);
+                // 同上：必须在移动之前判定（未登记的文件夹子行也走这条臂）。
+                let src_is_dir = src_fs.is_dir();
                 if move_file(&src_fs, &dst_dir.join(&name)).is_err() {
                     errs.push(format!("{path}：移动失败"));
                     continue;
                 }
                 existing.insert(name.clone());
-                if src_fs.is_dir() {
+                if src_is_dir {
                     let count = std::fs::read_dir(dst_dir.join(&name))
                         .map(|rd| rd.count())
                         .unwrap_or(0);
@@ -3320,6 +3358,9 @@ fn move_entry_across(
     if !src_fs.exists() {
         return Err("源文件不存在".into());
     }
+    // **必须在移动之前**判定（`move_file` 之后源路径已不存在，`is_dir()` 恒 false
+    // ⇒ 未登记的文件夹会被当文件读 → 「读取失败」）。
+    let src_is_dir = src_fs.is_dir();
     move_file(&src_fs, &dest_dir.join(&name))?;
 
     // 源分支：移除顶层登记（文件夹子行本就无登记）。
@@ -3398,7 +3439,7 @@ fn move_entry_across(
         }
         (None, None) => {
             // 文件夹子行移到目标根目录：按类型登记。
-            if src_fs.is_dir() {
+            if src_is_dir {
                 let count = std::fs::read_dir(dest_dir.join(&name))
                     .map(|rd| rd.count())
                     .unwrap_or(0);
@@ -8870,5 +8911,168 @@ mod branch_move_tests {
         assert!(!tree_drop_ok(&e, dd, zw, true));
         // 标签体系 → 张伟 下半区 = 插到 张伟 之后 = 有效移动（上移一位）。
         assert!(tree_drop_ok(&e, bq, zw, true));
+    }
+}
+
+#[cfg(test)]
+mod move_group_tests {
+    use super::*;
+
+    /// 临时复制的示例 bundle（写盘测试不能污染仓库里的示例）。
+    /// `._cache` 是派生数据（revisions 基线），必须剔除 —— 手工 upsert 后的
+    /// `._meta` 与陈旧基线放一起会报 `E_REVISION_STALE`。
+    fn temp_editor() -> (PathBuf, Editor) {
+        let src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/客户运营.str");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dst = std::env::temp_dir()
+            .join(format!("str-gui-move-group-{}-{nanos}.str", std::process::id()));
+        copy_dir_recursive(&src, &dst).expect("复制示例 bundle");
+        let _ = std::fs::remove_dir_all(dst.join("._cache"));
+        let mut e = Editor::new();
+        e.open(&dst).expect("打开临时 bundle");
+        (dst, e)
+    }
+
+    /// 从 scan 里取「根分支 + 一个非根分支」的下标（visits 顺序不保证首项是根）。
+    fn root_and_child(e: &Editor) -> (usize, usize) {
+        let visits = &e.scan.as_ref().expect("有 scan").visits;
+        let root = visits
+            .iter()
+            .position(|v| v.depth == 0)
+            .expect("有根分支");
+        let child = visits
+            .iter()
+            .enumerate()
+            .find(|(i, v)| *i != root && v.depth > 0)
+            .map(|(i, _)| i)
+            .expect("有非根分支");
+        (child, root)
+    }
+
+    /// 已登记的**内容文件夹**（`role = "dir"`）必须能整组跨分支移动：目标 = 分支
+    /// 顶层 ⇒ 目标登记为 dir（带 count）、源登记移除、整棵子树在磁盘上搬迁。
+    /// 此前该路径只放行 payload/asset（用户报告「无法拖拽移动文件夹」）。
+    #[test]
+    fn registered_dir_moves_across_branches() {
+        let (tmp, mut e) = temp_editor();
+        let bundle = e.bundle.as_ref().expect("有 bundle").clone();
+        let (src_visit, dst_visit) = root_and_child(&e);
+        let (src_dir, dst_dir) = {
+            let scan = e.scan.as_ref().unwrap();
+            (
+                scan.visits[src_visit].dir.clone(),
+                scan.visits[dst_visit].dir.clone(),
+            )
+        };
+        // 造内容文件夹条目：目录 + 一个子文件 + `role = "dir"` 登记。
+        let folder = "整组文件夹";
+        let _ = std::fs::remove_dir_all(src_dir.join(folder));
+        std::fs::create_dir_all(src_dir.join(folder)).unwrap();
+        std::fs::write(src_dir.join(folder).join("note.txt"), b"hi").unwrap();
+        let mut m = read_meta(&bundle, &src_dir).unwrap();
+        m.upsert_entry(&Entry {
+            path: folder.to_string(),
+            role: "dir".to_string(),
+            count: Some(1),
+            ..Default::default()
+        });
+        m.touch();
+        m.save(&bundle.meta_path(&src_dir)).unwrap();
+        e.rescan().unwrap();
+
+        // 结构树分支落点无行概念（`&[]` + at_end）= 登记到目标顶层序列末尾。
+        let msg = move_group_to_branch(
+            &mut e,
+            &bundle,
+            src_visit,
+            &[folder.to_string()],
+            dst_visit,
+            &[],
+            true,
+            0,
+            false,
+            false,
+        )
+        .expect("内容文件夹应可跨分支整组移动");
+        assert!(msg.contains(folder), "汇总文案应含移动项：{msg}");
+
+        assert!(!src_dir.join(folder).exists(), "源目录不应再有该文件夹");
+        assert!(
+            dst_dir.join(folder).join("note.txt").exists(),
+            "目标分支应收到整棵子树"
+        );
+        let sm = read_meta(&bundle, &src_dir).unwrap();
+        assert!(
+            sm.entries.iter().all(|x| x.path != folder),
+            "源登记应移除"
+        );
+        let dm = read_meta(&bundle, &dst_dir).unwrap();
+        let en = dm
+            .entries
+            .iter()
+            .find(|x| x.path == folder)
+            .expect("目标分支应登记该文件夹");
+        assert_eq!(en.role, "dir", "目录应按 dir 角色登记");
+        assert_eq!(en.count, Some(1), "count 应等于目录实际子项数");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 未登记的磁盘文件夹（内容文件夹里的子文件夹）同样可跨分支移动，落地按
+    /// `dir` 角色登记。这条臂的「是不是目录」判定同样必须在 `move_file` **之前**
+    /// —— 否则源路径已消失、`is_dir()` 恒 false，文件夹被当文件读（「读取失败」）。
+    #[test]
+    fn unregistered_dir_moves_across_branches() {
+        let (tmp, mut e) = temp_editor();
+        let bundle = e.bundle.as_ref().expect("有 bundle").clone();
+        let (src_visit, dst_visit) = root_and_child(&e);
+        let (src_dir, dst_dir) = {
+            let scan = e.scan.as_ref().unwrap();
+            (
+                scan.visits[src_visit].dir.clone(),
+                scan.visits[dst_visit].dir.clone(),
+            )
+        };
+        // 只落磁盘、不写 `._meta`：模拟内容文件夹的子文件夹。
+        let folder = "未登记文件夹";
+        let _ = std::fs::remove_dir_all(src_dir.join(folder));
+        std::fs::create_dir_all(src_dir.join(folder)).unwrap();
+        std::fs::write(src_dir.join(folder).join("a.txt"), b"a").unwrap();
+        e.rescan().unwrap();
+
+        let msg = move_group_to_branch(
+            &mut e,
+            &bundle,
+            src_visit,
+            &[folder.to_string()],
+            dst_visit,
+            &[],
+            true,
+            0,
+            false,
+            false,
+        )
+        .expect("未登记文件夹应可跨分支移动");
+        assert!(msg.contains(folder), "汇总文案应含移动项：{msg}");
+
+        assert!(!src_dir.join(folder).exists(), "源目录不应再有该文件夹");
+        assert!(
+            dst_dir.join(folder).join("a.txt").exists(),
+            "目标分支应收到整棵子树"
+        );
+        let dm = read_meta(&bundle, &dst_dir).unwrap();
+        let en = dm
+            .entries
+            .iter()
+            .find(|x| x.path == folder)
+            .expect("目标分支应登记该文件夹");
+        assert_eq!(en.role, "dir");
+        assert_eq!(en.count, Some(1));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
