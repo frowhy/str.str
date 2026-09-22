@@ -1442,9 +1442,6 @@ export component AppWindow inherits Window {
     // ── 内容条目批量操作状态（进度 / 汇总 / 批量重命名对话框）──
     // 多选集合与计数在 EntryApi（条目域）；这里的属性是批量执行的执行态。
     in-out property <bool> batch-busy: false;
-    in-out property <int> progress-done: 0;
-    in-out property <int> progress-total: 0;
-    in-out property <string> progress-text: "";
     in-out property <bool> summary-visible: false;
     in-out property <string> summary-title: "";
     in-out property <bool> summary-has-failed: false;
@@ -3626,36 +3623,11 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── 批量操作：进行中进度（内容条目批量删除 / 批量重命名共用）──
-    if root.batch-busy: Rectangle {
-        background: #00000066;
-        TouchArea { clicked => { } }
-        Rectangle {
-            width: 380px;
-            height: 132px;
-            background: c-panel;
-            border-radius: 12px;
-            VerticalBox {
-                padding: 20px;
-                spacing: 10px;
-                Text { text: "批量操作进行中…"; font-size: 16px; font-weight: 700; color: c-text; }
-                Text { text: root.progress-text; font-size: 12px; color: c-sub; overflow: elide; }
-                Rectangle {
-                    height: 8px;
-                    border-radius: 4px;
-                    background: c-hover;
-                    Rectangle {
-                        x: 0;
-                        width: parent.width * Math.min(1.0,
-                            root.progress-total > 0 ? root.progress-done / root.progress-total : 0.0);
-                        border-radius: 4px;
-                        background: c-sel;
-                    }
-                }
-                Text { text: root.progress-done + " / " + root.progress-total; font-size: 11px; color: c-sub; }
-            }
-        }
-    }
+    // ── 批量操作：进行中进度 ──
+    // 进度**不再用模态浮层**：`batch-busy` 只作为 Rust 侧的**写入互斥**标志，
+    // 进度文本由状态栏统一显示（`spawn_gui_batch` 每个 tick 写 `status`，
+    // 形如 `批量删除中 3/10 · a.md`）。因此批量期间用户仍可浏览 / 编辑，
+    // 也不会再出现「每次都弹窗」的打扰。
 
     // ── 批量操作：完成汇总（失败项可重试）──
     if root.summary-visible: Rectangle {

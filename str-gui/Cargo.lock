@@ -5148,7 +5148,7 @@ dependencies = [
 
 [[package]]
 name = "str-gui"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "i-slint-core",
  "objc2 0.6.4",

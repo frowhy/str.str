@@ -1,6 +1,6 @@
 [package]
 name = "str-gui"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.92"
 description = "STR 结构化树资源（.str）bundle 的 GUI 编辑器（Rust + Slint）"

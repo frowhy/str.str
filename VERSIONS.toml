@@ -73,7 +73,7 @@ displayName = "STR 资源树"
 # **与 release.tag 无绑定关系**：不单独打 tag，版本随发行矩阵冻结；
 # 只在 GUI 自身内容变化时升版，因此常与 cli.version 不相等 —— 这是设计，不是漂移。
 # 必须同时等于：str-gui/Cargo.toml、str-gui/Cargo.lock。
-version = "0.3.1"
+version = "0.3.2"
 # GUI 随附（链接）的 str-format 库最低版本：写操作与校验走同一代码路径，
 # 新增 CLI 命令 / 修复指纹逻辑后应同步升此约束。
 uses_cli_format = ">=0.6.0"

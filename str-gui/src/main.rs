@@ -387,8 +387,11 @@ impl ContentOp {
 }
 
 /// 后台线程执行批量操作：顺序逐项（`._meta` 登记写回需要互斥），
-/// 逐项推进进度（invoke_from_event_loop），结束后把结果写入 `results_slot`
-/// 并在主线程弹出汇总对话框 + 触发 rescan。
+/// 逐项推进进度（`invoke_from_event_loop` **直写状态栏**，不再有模态进度浮层），
+/// 结束后把结果写入 `results_slot`，仅在**有失败**时弹汇总对话框并触发 rescan。
+///
+/// `summary_title` = 汇总对话框标题（同时用作状态栏成功摘要的判定依据）；
+/// `progress_label` = 进度前缀（如 `批量删除中`），与标题分开以保持进度文本可读。
 ///
 /// 线程只持有路径与弱 UI 句柄（不碰 `Rc<RefCell<Editor>>`）；
 /// 完成后的重扫 / 模型同步经 `invoke_batch_finished()` 回到主线程完成。
@@ -396,9 +399,11 @@ fn spawn_gui_batch(
     app_weak: Weak<AppWindow>,
     results_slot: std::sync::Arc<std::sync::Mutex<(ContentOp, Vec<BatchOutcome>)>>,
     summary_title: &str,
+    progress_label: &str,
     items: Vec<(String, String)>,
 ) {
     let title = summary_title.to_string();
+    let label = progress_label.to_string();
     std::thread::spawn(move || {
         let op = match results_slot.lock() {
             Ok(slot) => slot.0.clone(),
@@ -409,11 +414,14 @@ fn spawn_gui_batch(
         for (i, (id, t)) in items.iter().enumerate() {
             {
                 let w = app_weak.clone();
-                let text = format!("{}/{} · {}", i + 1, total, t);
+                let label = label.clone();
+                let text = format!("{label} {n}/{total} · {t}", n = i + 1);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(a) = w.upgrade() {
-                        a.set_progress_done(i as i32);
-                        a.set_progress_text(SharedString::from(text));
+                        // 直写状态栏（不走 `show_status`：它是 `main` 内的嵌套 fn，
+                        // 后台线程不可见）。终态由 `on_batch_finished` 用 `show_status`
+                        // 收尾 —— 那次调用会重启 6s 定时器，因此进度文本最终会被清空。
+                        a.set_status(SharedString::from(text));
                     }
                 });
             }
@@ -457,9 +465,11 @@ fn spawn_gui_batch(
                 a.set_summary_title(title.into());
                 a.set_summary_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
                 a.set_summary_has_failed(failed > 0);
-                a.set_progress_done(total as i32);
                 a.set_batch_busy(false);
-                a.set_summary_visible(true);
+                // **全部成功不再弹汇总框**（成功不打扰）：改由状态栏给一句摘要
+                // （见 `on_batch_finished`）；有失败才弹——失败框承载状态栏放不下的
+                // 「逐项原因」与状态栏点不到的「重试失败项」。
+                a.set_summary_visible(failed > 0);
                 a.invoke_batch_finished();
             }
         });
@@ -694,6 +704,50 @@ fn visit_title(visit: &Visit) -> String {
         .as_ref()
         .and_then(|m| m.title.clone())
         .unwrap_or_else(|| "（无标题）".into())
+}
+
+/// 名称列表槽位的统一实现：**最多列 3 个**，超出以「…」收尾。
+///
+/// 状态栏是单行 + `overflow: elide`，全量列举会把「来源 / 目标」这类关键信息挤掉；
+/// 单条（1 个名称）走 `「名称」`，多条（≥2）一律 `<N> 项：<最多 3 个名称…>`——
+/// 这条规则同时适用于拷贝 / 剪切 / 移动 / 导入 / Finder 显示，避免「有的列名有的不列」。
+fn name_list(names: &[String]) -> String {
+    const MAX: usize = 3;
+    if names.len() <= MAX {
+        names.join("、")
+    } else {
+        format!("{}…", names[..MAX].join("、"))
+    }
+}
+
+/// 按**分支目录**取分支标题：状态栏的「来源 → 目标」提示需要一个可读的分支名，
+/// 而调用点往往只有 `Path`（如 `visit_dir` / `src_parent_dir`）。
+/// 只读当前 scan（**不新增 IO**）；目录不在 scan 中时退回目录名（UUID 目录则退回空串）。
+fn title_of_dir(e: &Editor, dir: &Path) -> String {
+    // 目录名回退同时覆盖两种情形：① 目录不在 scan 中；② 分支**没有 `title`**
+    // —— `visit_title` 对无标题分支返回「（无标题）」，直接写进状态栏很难看
+    // （`str init` 未带 `--title` 的 bundle 根分支就会这样，真机验收实测到）。
+    let by_name = || {
+        dir.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "根分支".to_string())
+    };
+    match e
+        .scan
+        .as_ref()
+        .and_then(|s| s.visits.iter().find(|v| v.dir == dir))
+    {
+        Some(v) => {
+            let title = visit_title(v);
+            if title == "（无标题）" {
+                by_name()
+            } else {
+                title
+            }
+        }
+        None => by_name(),
+    }
 }
 
 fn visit_type(visit: &Visit) -> String {
@@ -1906,7 +1960,7 @@ fn reveal_in_file_manager_multi(paths: &[PathBuf]) -> Result<(), String> {
     let mut cmd = std::process::Command::new("open");
     cmd.arg("-R").args(paths);
     let _ = cmd.spawn();
-    Err("在访达中显示失败".into())
+    Err("在 Finder 中显示失败".into())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2457,11 +2511,14 @@ fn move_group_to_branch(
     if src_visit >= scan.visits.len() || to_visit >= scan.visits.len() {
         return Err("分支无效".into());
     }
-    let (src_dir, dst_root) = {
+    // 源 / 目标分支标题（状态栏「来源 → 目标」用；在移动前一次性取下）。
+    let (src_dir, dst_root, src_title, dst_title) = {
         let scan = e.scan.as_ref().unwrap();
         (
             scan.visits[src_visit].dir.clone(),
             scan.visits[to_visit].dir.clone(),
+            visit_title(&scan.visits[src_visit]),
+            visit_title(&scan.visits[to_visit]),
         )
     };
     let mut sm = read_meta(bundle, &src_dir)?;
@@ -2706,12 +2763,16 @@ fn move_group_to_branch(
         format!("（{} 项失败：{}）", errs.len(), errs.join("；"))
     };
     if moved.len() == 1 && errs.is_empty() {
-        return Ok(format!("已移动 {} → {}", paths[0], moved[0]));
+        // 单条：来源与目标都点名（目标 = 目的地分支标题）。
+        return Ok(format!(
+            "已从「{src_title}」移动「{}」→「{dst_title}」。",
+            paths[0]
+        ));
     }
     Ok(format!(
-        "已移动 {} 项 → 目标分支：{}{}",
+        "已从「{src_title}」移动 {} 项 →「{dst_title}」：{}{}",
         moved.len(),
-        moved.join("、"),
+        name_list(&moved),
         err_note
     ))
 }
@@ -2751,6 +2812,18 @@ fn apply_clip_at(
     }
     let mut meta = read_meta(bundle, visit_dir)?;
     let existing: HashSet<String> = meta.entries.iter().map(|x| x.path.clone()).collect();
+    // 状态栏「来源 → 目标」用：目标 = 目的地分支标题；来源 = 剪切时的源分支标题。
+    // 复制/粘贴的来源是剪贴板本身，故不读源 `._meta`（避免在后台批量线程里多一次 IO）。
+    let dst_title = meta.title.clone().unwrap_or_default();
+    let src_title = if cut {
+        clip.src_path
+            .parent()
+            .and_then(|p| read_meta(bundle, p).ok())
+            .and_then(|m| m.title.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let msg;
     let registered;
     match clip.role.as_str() {
@@ -2773,7 +2846,11 @@ fn apply_clip_at(
                 ..Default::default()
             });
             registered = name.clone();
-            msg = format!("已{} {name}", if cut { "移动" } else { "粘贴" });
+            msg = if cut {
+                format!("已从「{src_title}」移动「{name}」→「{dst_title}」。")
+            } else {
+                format!("已从剪贴板粘贴「{name}」→「{dst_title}」。")
+            };
         }
         "dir" => {
             let name = dedup_name(&existing, &basename(&clip.name));
@@ -2791,7 +2868,11 @@ fn apply_clip_at(
                 ..Default::default()
             });
             registered = name.clone();
-            msg = format!("已{} {name}/", if cut { "移动" } else { "粘贴" });
+            msg = if cut {
+                format!("已从「{src_title}」移动「{name}/」→「{dst_title}」。")
+            } else {
+                format!("已从剪贴板粘贴「{name}/」→「{dst_title}」。")
+            };
         }
         "node" | "branch" => {
             if cut {
@@ -2810,7 +2891,7 @@ fn apply_clip_at(
                     ..Default::default()
                 });
                 registered = name.clone();
-                msg = format!("已移动分支 {name}");
+                msg = format!("已从「{src_title}」移动分支「{name}」→「{dst_title}」。");
             } else {
                 let mut mapping = std::collections::HashMap::new();
                 let new_id = copy_branch_recursive(
@@ -2832,7 +2913,10 @@ fn apply_clip_at(
                     ..Default::default()
                 });
                 registered = new_id;
-                msg = format!("已粘贴分支 {}（新 id {}）", clip.name, registered);
+                msg = format!(
+                    "已从剪贴板粘贴分支「{}」→「{dst_title}」（新 id「{}」）。",
+                    clip.name, registered
+                );
             }
         }
         other => return Err(format!("暂不支持 role = {other} 的条目")),
@@ -3293,7 +3377,10 @@ fn branch_move_into_child(e: &mut Editor, src: usize, target: usize) -> Result<S
             e.selected = Some(visit_key(scan, i).to_string());
         }
     }
-    Ok(format!("已移动为「{target_title}」的子分支。"))
+    Ok(format!(
+        "已把分支「{name}」从「{}」移入「{target_title}」下。",
+        title_of_dir(e, &src_parent_dir)
+    ))
 }
 
 /// 跨节点移动条目：把 src 分支的条目移入 dst 分支，按悬停位置插入目标序列。
@@ -3311,7 +3398,7 @@ fn move_entry_across(
     into_dir: bool,
 ) -> Result<String, String> {
     let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
-    let (src_dir, dst_dir) = {
+    let (src_dir, dst_dir, src_title, dst_title) = {
         let scan = e.scan.as_ref().ok_or("未打开 bundle")?;
         if src_visit >= scan.visits.len() || dst_visit >= scan.visits.len() {
             return Err("源或目标分支无效".into());
@@ -3319,6 +3406,8 @@ fn move_entry_across(
         (
             scan.visits[src_visit].dir.clone(),
             scan.visits[dst_visit].dir.clone(),
+            visit_title(&scan.visits[src_visit]),
+            visit_title(&scan.visits[dst_visit]),
         )
     };
     let src_meta = read_meta(&bundle, &src_dir)?;
@@ -3478,7 +3567,7 @@ fn move_entry_across(
             .insert(visit_key(scan, dst_visit).to_string());
     }
     e.selected_entry_path = Some(highlight);
-    Ok(format!("已移动 {path} → 目标分支"))
+    Ok(format!("已从「{src_title}」移动「{path}」→「{dst_title}」。"))
 }
 
 /// 剪贴板 AppleScript 的落盘与执行：脚本按 key 缓存到临时目录（每进程一份），
@@ -4516,6 +4605,35 @@ fn main() -> Result<(), slint::PlatformError> {
     /// 状态栏文本自动清除：每次设置后 6s 清空（单发定时器随每次设置重启）。
     /// 此前状态文本常驻底栏（成功 / 失败提示永不消失），改为临时提示。
     /// 所有调用都在 UI 线程（Slint 回调内），thread_local 定时器安全。
+    ///
+    /// # 文案规范（**所有**写入状态栏的文案都必须遵循；新增文案前先读这一节）
+    ///
+    /// 状态栏是单行 12px + `overflow: elide`（`ui/app.slint`），因此
+    /// **信息槽位固定、顺序固定、长度受控**（目标 ≤ 40 个汉字）。
+    /// 规范要点（附带实现 helper）：
+    ///
+    /// 1. **四类句式**（不允许第五类）
+    ///    - 成功：`已<动词> <对象>（<数量/位置>）。`
+    ///    - 失败：`<动作>失败：<原因>`（原因原样透传底层 `Err`，不改写；句尾不强制句号）
+    ///    - 空态：`<缺什么的具体说明>。`（如「请先选择一个分支。」）
+    ///    - 无变更：`<未变更原因>。`（如「顺序未变化。」「已在目标目录内，位置未变。」）
+    /// 2. **位置变化类必须写全「来源 → 目标」**：`已从「源」<动词> <对象描述> →「目标」`。
+    ///    - 目标 = 分支标题（`title_of_dir`）/ 内容文件夹相对路径 / 剪贴板类型
+    ///      （`系统剪贴板` / `内部剪贴板`）；同分支内换目录写 `已在「分支」内…`。
+    ///    - 去向一律用 `→ 系统剪贴板` / `→ 内部剪贴板` 表达，**不再**用括号备注；
+    ///      括号只承载固定备注：`（粘贴时移动）`、`（可在废纸篓找回）`、
+    ///      `（不可撤销）`、`（revision N）`、`（<role>）`。
+    /// 3. **对象描述槽位**：单条 = `「<名称>」`；多条 = `<N> 项：<name_list>`，
+    ///    `name_list` **最多 3 个名称**、超出以「…」收尾（见 `name_list`）。
+    ///    拷贝 / 剪切 / 移动 / 导入 / Finder 显示一律同构，不允许「有的列名有的不列」。
+    /// 4. **术语与量词**：`Finder`（禁「访达」）、`拷贝`（禁「复制」）；条目 = 项、
+    ///    路径 = 条、目录 = 个、分支 = 个；名称与路径一律 `「」` 包裹；
+    ///    数字与中文之间保留**一个半角空格**（`已移动 3 项`），`「」` 两侧不加空格。
+    /// 5. **禁止内部实现术语**：canonical、写回、sha256、`._meta`、fs / IO 细节
+    ///    （`revision` 属 STR 规范概念，可保留）。
+    ///
+    /// 取标题 / 名称一律复用 `visit_title` / `title_of_dir` / `name_list`
+    /// —— 状态栏文案里**不新增磁盘 IO**。
     fn show_status(app: &AppWindow, msg: SharedString) {
         if debug_on() { eprintln!("[str-gui] show_status {:?}", msg); }
         app.set_status(msg);
@@ -4529,6 +4647,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     std::time::Duration::from_secs(6),
                     move || {
                         if let Some(a) = weak.upgrade() {
+                            // 批量进行中：进度正在**直写**状态栏（`spawn_gui_batch` 的 tick
+                            // 不走 `show_status`），这条旧定时器若清空会让进度闪断到下一个
+                            // tick。批量结束时的 `show_status`（终态摘要）会重启定时器，
+                            // 因此正常自动清空不受影响。
+                            if a.get_batch_busy() {
+                                return;
+                            }
                             if debug_on() { eprintln!("[str-gui] status auto-clear"); }
                             a.set_status(SharedString::from(""));
                         }
@@ -4538,6 +4663,21 @@ fn main() -> Result<(), slint::PlatformError> {
             });
             timer.restart();
         });
+    }
+
+    /// 批量执行期间的**写入互斥**：批量在后台线程写 `._meta` / 移动文件，
+    /// 此时任何新的写盘入口都必须被拒绝（此前靠模态进度遮罩挡住点击，
+    /// 遮罩移除后改为显式门禁）。返回 `true` = 已提示、调用方应立即 `return`。
+    ///
+    /// 只查 `batch-busy`（真正的并发窗口）；汇总对话框是模态的、点击被吞，
+    /// 不属于并发风险。
+    fn batch_busy_guard(app: &AppWindow) -> bool {
+        if app.get_batch_busy() {
+            show_status(app, "请先等待批量操作完成。".into());
+            true
+        } else {
+            false
+        }
     }
 
     fn sync_ui(app: &AppWindow, e: &Editor) {
@@ -4598,6 +4738,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak: Weak<AppWindow> = app.as_weak();
         app.on_open_bundle(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let Some(path) = rfd::FileDialog::new()
                 .set_title("选择 .str bundle 目录")
                 .pick_folder()
@@ -4609,7 +4752,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     push_recent(&path);
                     refresh_recent(&app);
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, format!("已打开：{}", path.display()).into());
+                    show_status(&app, format!("已打开 bundle：「{}」。", path.display()).into());
                 }
                 Err(msg) => show_status(&app, format!("打开失败：{msg}").into()),
             }
@@ -4622,13 +4765,16 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak: Weak<AppWindow> = app.as_weak();
         app.on_open_recent(move |path| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let path = PathBuf::from(path.to_string());
             match with_editor(&editor, |e| e.open(&path)) {
                 Ok(()) => {
                     push_recent(&path);
                     refresh_recent(&app);
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, format!("已打开：{}", path.display()).into());
+                    show_status(&app, format!("已打开 bundle：「{}」。", path.display()).into());
                 }
                 Err(msg) => show_status(&app, format!("打开失败：{msg}").into()),
             }
@@ -4657,7 +4803,7 @@ fn main() -> Result<(), slint::PlatformError> {
             match with_editor(&editor, |e| e.rescan()) {
                 Ok(()) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "已刷新。".into());
+                    show_status(&app, "已刷新 bundle。".into());
                 }
                 Err(msg) => show_status(&app, format!("刷新失败：{msg}").into()),
             }
@@ -4667,7 +4813,7 @@ fn main() -> Result<(), slint::PlatformError> {
             match with_editor(&editor2, |e| e.rescan()) {
                 Ok(()) => {
                     sync_ui(&app, &editor2.borrow());
-                    show_status(&app, "已刷新。".into());
+                    show_status(&app, "已刷新 bundle。".into());
                 }
                 Err(msg) => show_status(&app, format!("刷新失败：{msg}").into()),
             }
@@ -4802,7 +4948,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut e = editor.borrow_mut();
             // 清空展开集合即收起到只剩 ROOT 一行（与逐级收起语义一致）。
             if e.expanded.is_empty() {
-                show_status(&app, "子树已全部收起。".into());
+                show_status(&app, "已收起全部子树。".into());
                 return;
             }
             e.expanded.clear();
@@ -4822,7 +4968,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut e = editor.borrow_mut();
             let ids = visible_branch_keys(&e);
             if ids.is_empty() {
-                show_status(&app, "没有可见分支可展开内容。".into());
+                show_status(&app, "没有可展开内容的分支。".into());
                 return;
             }
             let n = ids.len();
@@ -4830,7 +4976,7 @@ fn main() -> Result<(), slint::PlatformError> {
             sync_detail(&app, &e);
             // 内容面板只出现在导图节点里，故菜单项仅在导图视图可用（见 app.slint）；
             // 这里给出条数反馈，便于确认作用范围。
-            show_status(&app, format!("已展开 {n} 个可见分支的内容。").into());
+            show_status(&app, format!("已展开可见分支的内容（{n} 个分支）。").into());
         });
     }
     {
@@ -4842,7 +4988,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
             if e.content_expanded.is_empty() {
-                show_status(&app, "内容已全部收起。".into());
+                show_status(&app, "已收起全部内容。".into());
                 return;
             }
             e.content_expanded.clear();
@@ -4922,7 +5068,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app.on_open_doc(move |which| {
             let url = doc_url(&repo, which);
             if let Some(app) = app_weak.upgrade() {
-                show_status(&app, format!("已在浏览器打开：{url}").into());
+                show_status(&app, format!("已在浏览器打开链接：{url}。").into());
             }
             open_url(&url);
         });
@@ -4965,6 +5111,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_save_details(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
@@ -4985,8 +5134,22 @@ fn main() -> Result<(), slint::PlatformError> {
             });
             match result {
                 Ok(()) => {
+                    // 分支名与 revision 取自已 rescan 的 scan（无额外 IO）。
+                    let (title, rev) = {
+                        let e = editor.borrow();
+                        match e.selected_visit() {
+                            Some(v) => (
+                                visit_title(v),
+                                v.meta.as_ref().and_then(|m| m.revision).unwrap_or(0),
+                            ),
+                            None => (String::new(), 0),
+                        }
+                    };
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "已保存（canonical 写回，revision + 1）。".into());
+                    show_status(
+                        &app,
+                        format!("已保存分支「{title}」的信息（revision {rev}）。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("保存失败：{msg}").into()),
             }
@@ -5001,7 +5164,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = e.selected_visit() else {
-                show_status(&app, "未选择分支".into());
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
             let title = visit
@@ -5024,8 +5187,16 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_branch_rename_confirm(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             app.set_branch_rename_visible(false);
             let name = app.get_branch_rename_name().trim().to_string();
+            // 旧标题（重命名提示要写「旧 → 新」，与条目重命名同构）。
+            let old_title = {
+                let e = editor.borrow();
+                e.selected_visit().map(visit_title).unwrap_or_default()
+            };
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
@@ -5042,9 +5213,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 Ok(()) => {
                     sync_ui(&app, &editor.borrow());
                     let msg = if name.is_empty() {
-                        "已清除分支标题。".to_string()
+                        format!("已清除分支「{old_title}」的标题。")
                     } else {
-                        format!("分支已重命名为「{name}」。")
+                        format!("已重命名分支「{old_title}」→「{name}」。")
                     };
                     show_status(&app, msg.into());
                 }
@@ -5087,15 +5258,18 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = e.selected_visit() else {
-                show_status(&app, "未选择分支".into());
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
             if !visit.dir.exists() {
-                show_status(&app, format!("目录不存在：{}", visit.dir.display()).into());
+                show_status(&app, "在 Finder 中显示失败：分支目录不存在。".into());
                 return;
             }
             reveal_in_file_manager(&visit.dir);
-            show_status(&app, format!("已在 Finder 中定位：{}", visit.dir.display()).into());
+            show_status(
+                &app,
+                format!("已在 Finder 中显示分支「{}」。", visit_title(visit)).into(),
+            );
         });
     }
     {
@@ -5104,16 +5278,22 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_branch_copy_path(move || {
             let app = app_weak.upgrade().unwrap();
-            let text = {
+            let (text, title) = {
                 let e = editor.borrow();
                 let Some(visit) = e.selected_visit() else {
-                    show_status(&app, "未选择分支".into());
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
-                visit.dir.to_string_lossy().to_string()
+                (
+                    visit.dir.to_string_lossy().to_string(),
+                    visit_title(visit),
+                )
             };
             match copy_text_to_clipboard(&text) {
-                Ok(()) => show_status(&app, format!("已拷贝路径：{text}").into()),
+                Ok(()) => show_status(
+                    &app,
+                    format!("已拷贝 1 条路径 → 系统剪贴板：分支「{title}」的目录。").into(),
+                ),
                 Err(msg) => show_status(&app, format!("拷贝路径失败：{msg}").into()),
             }
         });
@@ -5124,20 +5304,23 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_branch_reveal_terminal(move || {
             let app = app_weak.upgrade().unwrap();
-            let dir = {
+            let (dir, title) = {
                 let e = editor.borrow();
                 let Some(visit) = e.selected_visit() else {
-                    show_status(&app, "未选择分支".into());
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
-                visit.dir.clone()
+                (visit.dir.clone(), visit_title(visit))
             };
             if !dir.exists() {
-                show_status(&app, format!("目录不存在：{}", dir.display()).into());
+                show_status(&app, "打开终端失败：分支目录不存在。".into());
                 return;
             }
             match open_terminal_at(&dir) {
-                Ok(()) => show_status(&app, format!("已在终端中打开：{}", dir.display()).into()),
+                Ok(()) => show_status(
+                    &app,
+                    format!("已在终端中打开分支「{title}」的目录。").into(),
+                ),
                 Err(msg) => show_status(&app, format!("打开终端失败：{msg}").into()),
             }
         });
@@ -5149,9 +5332,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_add_child(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let title = app.get_child_title().trim().to_string();
             let type_ = app.get_child_type().trim().to_string();
             if title.is_empty() {
+                show_status(&app, "新建子分支失败：标题不能为空。".into());
                 return;
             }
             let result = with_editor(&editor, |e| {
@@ -5159,6 +5346,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 let scan = e.scan.as_ref().ok_or("未选择分支")?;
                 let parent_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
                 let parent = &scan.visits[parent_idx];
+                // 来源（父级）标题：rescan 后 selected 会指向新分支，故此时先取。
+                let parent_title = visit_title(parent);
                 let id_version = scan
                     .visits
                     .first()
@@ -5213,16 +5402,19 @@ fn main() -> Result<(), slint::PlatformError> {
                     e.selected = Some(key);
                 }
                 e.rebuild();
-                Ok(())
+                Ok(parent_title)
             });
             match result {
-                Ok(()) => {
+                Ok(parent_title) => {
                     app.set_child_title("".into());
                     app.set_child_type("".into());
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, format!("已添加子分支「{title}」。").into());
+                    show_status(
+                        &app,
+                        format!("已在「{parent_title}」下新建子分支「{title}」。").into(),
+                    );
                 }
-                Err(msg) => show_status(&app, format!("添加失败：{msg}").into()),
+                Err(msg) => show_status(&app, format!("新建子分支失败：{msg}").into()),
             }
         });
     }
@@ -5233,6 +5425,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_delete_branch(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let confirmed = rfd::MessageDialog::new()
                 .set_title("删除分支")
                 .set_description("确定删除该分支及其全部子分支与文件？此操作不可撤销。")
@@ -5264,13 +5459,17 @@ fn main() -> Result<(), slint::PlatformError> {
                     .save(&bundle.meta_path(&parent.dir))
                     .map_err(|err| err.to_string())?;
                 e.selected = Some(parent.rel.clone());
+                let title = visit_title(visit);
                 e.rescan()?;
-                Ok(())
+                Ok(title)
             });
             match result {
-                Ok(()) => {
+                Ok(title) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "已删除分支。".into());
+                    show_status(
+                        &app,
+                        format!("已删除分支「{title}」及其全部子分支（不可撤销）。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("删除失败：{msg}").into()),
             }
@@ -5326,6 +5525,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_save_entry(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
@@ -5339,12 +5541,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 meta.save(&bundle.meta_path(&visit.dir))
                     .map_err(|err| err.to_string())?;
                 e.rescan()?;
-                Ok(())
+                Ok(path)
             });
             match result {
-                Ok(()) => {
+                Ok(path) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "条目已保存。".into());
+                    show_status(&app, format!("已保存条目「{path}」的信息。").into());
                 }
                 Err(msg) => show_status(&app, format!("保存条目失败：{msg}").into()),
             }
@@ -5355,8 +5557,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_add_entry(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let path = app.get_a_path().trim().to_string();
             if path.is_empty() {
+                show_status(&app, "添加条目失败：路径不能为空。".into());
                 return;
             }
             let role = if app.get_a_role_index() == 1 {
@@ -5394,8 +5600,15 @@ fn main() -> Result<(), slint::PlatformError> {
             match result {
                 Ok(()) => {
                     app.set_a_path("".into());
+                    let branch_title = {
+                        let e = editor.borrow();
+                        e.selected_visit().map(visit_title).unwrap_or_default()
+                    };
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, format!("已添加条目 {path}（{role}）。").into());
+                    show_status(
+                        &app,
+                        format!("已向「{branch_title}」添加条目「{path}」（{role}）。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("添加条目失败：{msg}").into()),
             }
@@ -5407,6 +5620,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let slot = std::sync::Arc::clone(&batch_results);
         app.global::<EntryApi>().on_delete_entry(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             // 多选（≥2）→ 批量删除：Finder 的「移到废纸篓」作用于整个选区；
             // 批量属破坏性场景，按用户要求先确认（单项保持免确认，与 Finder 一致）。
             let (multi, visit_idx): (Vec<(String, String)>, Option<usize>) = {
@@ -5432,6 +5648,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             if multi.len() >= 2 {
                 if app.get_batch_busy() || app.get_summary_visible() {
+                    show_status(&app, "请先等待批量操作完成。".into());
                     return;
                 }
                 let n = multi.len();
@@ -5451,9 +5668,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 };
                 app.set_summary_visible(false);
-                app.set_progress_total(n as i32);
-                app.set_progress_done(0);
-                app.set_progress_text("".into());
                 app.set_batch_busy(true);
                 if let Ok(mut s) = slot.lock() {
                     s.0 = ContentOp::Trash { branch_dir };
@@ -5463,6 +5677,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     app.as_weak(),
                     std::sync::Arc::clone(&slot),
                     &format!("批量删除 · {n} 项"),
+                    "批量删除中",
                     multi,
                 );
                 return;
@@ -5499,12 +5714,15 @@ fn main() -> Result<(), slint::PlatformError> {
                 meta.save(&bundle.meta_path(&visit.dir))
                     .map_err(|err| err.to_string())?;
                 e.rescan()?;
-                Ok(())
+                Ok(path)
             });
             match result {
-                Ok(()) => {
+                Ok(path) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "条目已删除。".into());
+                    show_status(
+                        &app,
+                        format!("已删除条目「{path}」（可在废纸篓找回）。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("删除条目失败：{msg}").into()),
             }
@@ -5670,6 +5888,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app.global::<EntryApi>().on_entries_batch_rename(move || {
             let app = aw.upgrade().unwrap();
             if app.get_batch_busy() || app.get_summary_visible() {
+                show_status(&app, "请先等待批量操作完成。".into());
                 return;
             }
             app.set_br_mode(0);
@@ -5690,15 +5909,18 @@ fn main() -> Result<(), slint::PlatformError> {
         app.on_br_apply(move || {
             let app = aw.upgrade().unwrap();
             if app.get_batch_busy() {
+                show_status(&app, "请先等待批量操作完成。".into());
                 return;
             }
             app.set_br_visible(false);
             let (branch_dir, items, renames) = {
                 let e = ed.borrow();
                 if e.bundle.is_none() {
+                    show_status(&app, "请先打开一个 bundle。".into());
                     return;
                 }
                 let Some(vi) = e.selected_idx_in_visits() else {
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
                 let visit = &e.scan.as_ref().unwrap().visits[vi];
@@ -5708,7 +5930,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let prefix = app.get_br_prefix().to_string();
                 let suffix = app.get_br_suffix().to_string();
                 if mode == 0 && find.is_empty() {
-                    show_status(&app, "「查找」不能为空。".into());
+                    show_status(&app, "查找内容不能为空。".into());
                     return;
                 }
                 if mode == 1 && prefix.is_empty() && suffix.is_empty() {
@@ -5746,7 +5968,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         || new_name.starts_with('.')
                         || new_name == "._meta"
                     {
-                        show_status(&app, format!("无效名称：{new_name}（{path}）").into());
+                        show_status(&app, format!("名称无效：「{new_name}」（{path}）。").into());
                         return;
                     }
                     if new_name == *path {
@@ -5755,7 +5977,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                     taken.remove(path);
                     if taken.contains(&new_name) {
-                        show_status(&app, format!("名称冲突：{new_name}").into());
+                        show_status(&app, format!("名称冲突：「{new_name}」已存在。").into());
                         return;
                     }
                     taken.insert(new_name.clone());
@@ -5771,9 +5993,6 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let n = renames.len();
             app.set_summary_visible(false);
-            app.set_progress_total(n as i32);
-            app.set_progress_done(0);
-            app.set_progress_text("".into());
             app.set_batch_busy(true);
             if let Ok(mut s) = slot.lock() {
                 s.0 = ContentOp::Rename {
@@ -5786,6 +6005,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.as_weak(),
                 std::sync::Arc::clone(&slot),
                 &format!("批量重新命名 · {n} 项"),
+                "批量重命名中",
                 items,
             );
         });
@@ -5800,6 +6020,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app.on_summary_retry(move || {
             let app = aw.upgrade().unwrap();
             if app.get_batch_busy() {
+                show_status(&app, "请先等待批量操作完成。".into());
                 return;
             }
             let failed: Vec<(String, String)> = match retry_slot.lock() {
@@ -5817,9 +6038,6 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let n = failed.len();
             app.set_summary_visible(false);
-            app.set_progress_total(n as i32);
-            app.set_progress_done(0);
-            app.set_progress_text("".into());
             app.set_batch_busy(true);
             if let Ok(mut s) = retry_slot.lock() {
                 s.1.clear();
@@ -5828,6 +6046,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.as_weak(),
                 std::sync::Arc::clone(&retry_slot),
                 &format!("重试失败项 · {n}"),
+                "重试失败项中",
                 failed,
             );
         });
@@ -5931,6 +6150,50 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
+            // 全部成功时汇总框不弹（见 `spawn_gui_batch`），由状态栏给一句摘要：
+            // 这是「批量进度 / 结果统一到状态栏」的第一步；有失败时汇总框已承载
+            // 逐项原因与重试入口，状态栏不再重复报同一件事。
+            if let Ok(s) = slot.lock() {
+                let ok = s.1.iter().filter(|r| r.status == "✓").count();
+                let failed = s.1.iter().filter(|r| r.status == "✗").count();
+                if ok > 0 && failed == 0 {
+                    let msg = match &s.0 {
+                        ContentOp::Trash { branch_dir } => format!(
+                            "已删除 {ok} 项 → 分支「{}」（可在废纸篓找回）。",
+                            title_of_dir(&ed.borrow(), branch_dir)
+                        ),
+                        ContentOp::Rename { branch_dir, .. } => format!(
+                            "已在「{}」内重命名 {ok} 项。",
+                            title_of_dir(&ed.borrow(), branch_dir)
+                        ),
+                        ContentOp::Paste {
+                            visit_dir,
+                            into_folder,
+                            ..
+                        } => {
+                            // 「制作副本」与「粘贴」在上游共用 `ContentOp::Paste`
+                            // （同为 is_cut=false 的同分支落地），只能按发起时我们自己
+                            // 写入的对话框标题区分 —— 若日后拆出独立 op，可删此判断。
+                            let verb = if app.get_summary_title().starts_with("批量制作副本") {
+                                "创建副本"
+                            } else {
+                                "粘贴"
+                            };
+                            match into_folder {
+                                Some(rel) => format!(
+                                    "已{verb} {ok} 项 →「{}」/「{rel}」。",
+                                    title_of_dir(&ed.borrow(), visit_dir)
+                                ),
+                                None => format!(
+                                    "已{verb} {ok} 项 →「{}」。",
+                                    title_of_dir(&ed.borrow(), visit_dir)
+                                ),
+                            }
+                        }
+                    };
+                    show_status(&app, msg.into());
+                }
+            }
             let e = ed.borrow();
             app.global::<EntryApi>()
                 .set_multi_count(e.entry_multi.len() as i32);
@@ -5944,8 +6207,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_add_ref(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let target = app.get_r_target().trim().to_string();
             if target.is_empty() {
+                show_status(&app, "添加关联失败：目标分支 id 不能为空。".into());
                 return;
             }
             let rel = {
@@ -5958,11 +6225,18 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let title = app.get_r_title().trim().to_string();
             let result = with_editor(&editor, |e| {
-                if e.visit_idx(&target).is_none() {
+                let Some(dst_idx) = e.visit_idx(&target) else {
                     return Err(format!("目标 id 不存在于本 bundle：{target}"));
-                }
+                };
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                // 关联的「来源 → 目标」两端标题（目标按 id 反查，取不到则退回 id 本身）。
+                let src_title = visit_title(&e.scan.as_ref().unwrap().visits[visit_idx]);
+                let dst_title = e
+                    .scan
+                    .as_ref()
+                    .map(|s| visit_title(&s.visits[dst_idx]))
+                    .unwrap_or_else(|| target.clone());
                 let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
                 let mut meta = read_meta(bundle, &visit.dir)?;
                 meta.push_ref(&RefItem {
@@ -5977,15 +6251,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 meta.save(&bundle.meta_path(&visit.dir))
                     .map_err(|err| err.to_string())?;
                 e.rescan()?;
-                Ok(())
+                Ok((src_title, dst_title))
             });
             match result {
-                Ok(()) => {
+                Ok((src_title, dst_title)) => {
                     app.set_r_target("".into());
                     app.set_r_rel("".into());
                     app.set_r_title("".into());
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "已添加关联。".into());
+                    show_status(
+                        &app,
+                        format!("已添加关联：「{src_title}」→「{dst_title}」。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("添加关联失败：{msg}").into()),
             }
@@ -5996,28 +6273,40 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_delete_ref(move |index| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
                 let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
-                let ref_id = e
+                let (ref_id, ref_target) = e
                     .selected_visit()
                     .and_then(|v| v.meta.as_ref())
                     .and_then(|m| m.refs.get(index as usize))
-                    .map(|r| r.id.clone())
+                    .map(|r| (r.id.clone(), r.target.clone()))
                     .ok_or("未找到该关联")?;
+                // 关联的「来源 → 目标」两端标题（目标按 id 反查）。
+                let src_title = visit_title(visit);
+                let dst_title = e
+                    .visit_idx(&ref_target)
+                    .and_then(|i| e.scan.as_ref().map(|s| visit_title(&s.visits[i])))
+                    .unwrap_or_else(|| ref_target.clone());
                 let mut meta = read_meta(bundle, &visit.dir)?;
                 meta.remove_ref(&ref_id);
                 meta.touch();
                 meta.save(&bundle.meta_path(&visit.dir))
                     .map_err(|err| err.to_string())?;
                 e.rescan()?;
-                Ok(())
+                Ok((src_title, dst_title))
             });
             match result {
-                Ok(()) => {
+                Ok((src_title, dst_title)) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, "已移除关联。".into());
+                    show_status(
+                        &app,
+                        format!("已移除关联：「{src_title}」→「{dst_title}」。").into(),
+                    );
                 }
                 Err(msg) => show_status(&app, format!("移除关联失败：{msg}").into()),
             }
@@ -6052,22 +6341,43 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = action_visit(&app, &e) else {
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
             let targets = menu_targets(&app);
             if targets.is_empty() {
+                show_status(&app, "请先选择一个条目。".into());
                 return;
             }
+            let title = visit_title(visit);
             let full: Vec<PathBuf> = targets.iter().map(|p| visit.dir.join(p)).collect();
             let n = full.len();
             let reveal_ok = reveal_in_file_manager_multi(&full).is_ok();
-            if n > 1 || !reveal_ok {
-                drop(e);
-                if reveal_ok {
-                    show_status(&app, format!("已在访达中显示 {} 项。", n).into());
-                } else {
-                    show_status(&app, "在访达中显示失败".into());
-                }
+            drop(e);
+            // **无条件提示**：此前只有「多条或失败」才提示，单条成功静默 ——
+            // 同一动作两种可见性，属覆盖缺口。
+            if reveal_ok {
+                show_status(
+                    &app,
+                    if n > 1 {
+                        format!(
+                            "已在 Finder 中显示 {n} 项 → 分支「{title}」：{}。",
+                            name_list(&targets)
+                        )
+                        .into()
+                    } else {
+                        format!(
+                            "已在 Finder 中显示「{}」→ 分支「{title}」。",
+                            targets.first().map(String::as_str).unwrap_or("")
+                        )
+                        .into()
+                    },
+                );
+            } else {
+                show_status(
+                    &app,
+                    format!("在 Finder 中显示失败：分支「{title}」。").into(),
+                );
             }
         });
     }
@@ -6077,24 +6387,38 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_entry_copy_path(move || {
             let app = app_weak.upgrade().unwrap();
-            let text = {
+            let (text, title, names) = {
                 let e = editor.borrow();
                 let Some(visit) = action_visit(&app, &e) else {
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
-                menu_targets(&app)
+                let names: Vec<String> = menu_targets(&app);
+                let text = names
                     .iter()
                     .map(|p| visit.dir.join(p).to_string_lossy().to_string())
                     .collect::<Vec<_>>()
-                    .join("\n")
+                    .join("\n");
+                (text, visit_title(visit), names)
             };
             if text.is_empty() {
                 return;
             }
             match copy_text_to_clipboard(&text) {
                 Ok(()) => {
-                    let n = text.lines().count();
-                    show_status(&app, format!("已拷贝 {n} 条路径。").into());
+                    let n = names.len();
+                    show_status(
+                        &app,
+                        if n > 1 {
+                            format!(
+                                "已拷贝 {n} 条路径 → 系统剪贴板：{}。",
+                                name_list(&names)
+                            )
+                            .into()
+                        } else {
+                            format!("已拷贝 1 条路径 → 系统剪贴板：分支「{title}」下的「{}」。", names.first().map(String::as_str).unwrap_or("")).into()
+                        },
+                    );
                 }
                 Err(msg) => show_status(&app, format!("拷贝路径失败：{msg}").into()),
             }
@@ -6106,9 +6430,10 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_entry_reveal_terminal(move || {
             let app = app_weak.upgrade().unwrap();
-            let dirs: Vec<PathBuf> = {
+            let (dirs, title): (Vec<PathBuf>, String) = {
                 let e = editor.borrow();
                 let Some(visit) = action_visit(&app, &e) else {
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
                 let mut dirs: Vec<PathBuf> = Vec::new();
@@ -6123,7 +6448,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         dirs.push(dir);
                     }
                 }
-                dirs
+                (dirs, visit_title(visit))
             };
             let mut ok = 0usize;
             for d in &dirs {
@@ -6132,9 +6457,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             show_status(&app, if ok > 0 {
-                format!("已在终端中打开 {ok} 个目录。").into()
+                format!("已在终端中打开分支「{title}」下的 {ok} 个目录。").into()
             } else {
-                "打开终端失败".into()
+                format!("在终端中打开失败：分支「{title}」。").into()
             });
         });
     }
@@ -6145,10 +6470,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = action_visit(&app, &e) else {
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
-            for p in menu_targets(&app) {
-                let full = visit.dir.join(&p);
+            let targets = menu_targets(&app);
+            if targets.is_empty() {
+                show_status(&app, "请先选择一个条目。".into());
+                return;
+            }
+            let title = visit_title(visit);
+            for p in &targets {
+                let full = visit.dir.join(p);
                 #[cfg(target_os = "macos")]
                 let _ = std::process::Command::new("open").arg(&full).spawn();
                 #[cfg(windows)]
@@ -6158,6 +6490,21 @@ fn main() -> Result<(), slint::PlatformError> {
                 #[cfg(all(unix, not(target_os = "macos")))]
                 let _ = std::process::Command::new("xdg-open").arg(&full).spawn();
             }
+            // 交给系统应用打开后不返回结果：**改为无条件提示**（此前完全静默 ——
+            // 多选时用户无法确认到底打开了几项）。
+            show_status(
+                &app,
+                if targets.len() > 1 {
+                    format!(
+                        "已用默认应用打开 {} 项 → 分支「{title}」：{}。",
+                        targets.len(),
+                        name_list(&targets)
+                    )
+                    .into()
+                } else {
+                    format!("已用默认应用打开「{}」→ 分支「{title}」。", targets[0]).into()
+                },
+            );
         });
     }
     {
@@ -6168,6 +6515,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = action_visit(&app, &e) else {
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
             let paths = menu_targets(&app);
@@ -6187,6 +6535,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 })
                 .collect();
             let n = items.len();
+            // 来源分支标题（「已从「X」拷贝…」）。
+            let src_title = visit_title(visit);
             let names: Vec<String> = items.iter().map(|c| c.name.clone()).collect();
             *clipboard.borrow_mut() = items;
             // 同步到系统剪贴板（无剪切标记）：Finder 中 ⌘V 即可粘贴。
@@ -6202,14 +6552,18 @@ fn main() -> Result<(), slint::PlatformError> {
             .is_ok();
             #[cfg(not(target_os = "macos"))]
             let sys_ok = false;
+            // 去向 = 剪贴板类型（与「来源 → 目标」模板一致，不再用括号备注表达）。
+            let dst = if sys_ok { "系统剪贴板" } else { "内部剪贴板" };
             show_status(&app, 
-                if sys_ok {
-                    format!("已拷贝 {} 项（已同步系统剪贴板）。", n)
-                } else if n > 1 {
-                    format!("已拷贝 {} 项：{}（内部剪贴板）。", n, names.join("、"))
+                if n > 1 {
+                    format!(
+                        "已从「{src_title}」拷贝 {} 项 → {dst}：{}。",
+                        n,
+                        name_list(&names)
+                    )
                 } else {
                     format!(
-                        "已拷贝 {}（内部剪贴板）。",
+                        "已从「{src_title}」拷贝「{}」→ {dst}。",
                         names.first().map(String::as_str).unwrap_or("")
                     )
                 }
@@ -6226,6 +6580,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(visit) = action_visit(&app, &e) else {
+                show_status(&app, "请先选择一个分支。".into());
                 return;
             };
             let paths = menu_targets(&app);
@@ -6244,7 +6599,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 })
                 .collect();
             let n = items.len();
+            // 来源分支标题（「已从「X」剪切…」）。
+            let src_title = visit_title(visit);
             let single_name = items.first().map(|c| c.name.clone()).unwrap_or_default();
+            let names: Vec<String> = items.iter().map(|c| c.name.clone()).collect();
             // macOS：系统剪贴板是粘贴的唯一事实来源——剪切也要写入源文件 URL，
             // 并随写入打上剪切标记（粘贴时据此执行移动而非复制）。
             #[cfg(target_os = "macos")]
@@ -6253,10 +6611,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 let _ = mac_write_clipboard_files(&src_paths, true);
             }
             *clipboard.borrow_mut() = items;
+            // 去向 = 剪贴板类型；「粘贴时移动」为固定备注，置于名称列表之前。
+            #[cfg(target_os = "macos")]
+            let dst = "系统剪贴板";
+            #[cfg(not(target_os = "macos"))]
+            let dst = "内部剪贴板";
             show_status(&app, if n > 1 {
-                format!("已剪切 {} 项（粘贴时移动到目标分支）。", n).into()
+                format!(
+                    "已从「{src_title}」剪切 {} 项 → {dst}（粘贴时移动）：{}。",
+                    n,
+                    name_list(&names)
+                )
+                .into()
             } else {
-                format!("已剪切 {}（粘贴时移动到目标分支）。", single_name).into()
+                format!(
+                    "已从「{src_title}」剪切「{}」→ {dst}（粘贴时移动）。",
+                    single_name
+                )
+                .into()
             });
         });
     }
@@ -6267,16 +6639,19 @@ fn main() -> Result<(), slint::PlatformError> {
         let slot_dupe = std::sync::Arc::clone(&batch_results);
         app.global::<EntryApi>().on_entry_duplicate(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             // 制作副本 = 同分支拷贝（is_cut=false）。
             let (clips, visit_dir, depth, id_version, bundle_root) = {
                 let e = editor.borrow();
                 let Some(visit) = action_visit(&app, &e) else {
-                    show_status(&app, "未选择分支".into());
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
                 let paths = menu_targets(&app);
                 if paths.is_empty() {
-                    show_status(&app, "未选择条目".into());
+                    show_status(&app, "请先选择一个条目。".into());
                     return;
                 }
                 let clips: Vec<ClipItem> = paths
@@ -6307,7 +6682,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 (clips, visit.dir.clone(), visit.depth, idv, root)
             };
             if clips.is_empty() {
-                show_status(&app, "未选择条目".into());
+                show_status(&app, "请先选择一个条目。".into());
                 return;
             }
             if clips.len() == 1 {
@@ -6349,13 +6724,21 @@ fn main() -> Result<(), slint::PlatformError> {
                         e.entry_multi = [rel.clone()].into_iter().collect();
                         e.entry_anchor = None;
                         e.selected_entry_path = Some(rel);
-                        return Ok(format!("已创建副本 {new_name}"));
+                        return Ok(format!(
+                            "已在「{}」内创建副本「{new_name}」。",
+                            title_of_dir(e, &parent)
+                        ));
                     }
-                    apply_clip(e, &clips[0]).map(|(m, pasted)| {
+                    apply_clip(e, &clips[0]).map(|(_m, pasted)| {
                         e.entry_multi = [pasted.clone()].into_iter().collect();
                         e.entry_anchor = None;
-                        e.selected_entry_path = Some(pasted);
-                        m
+                        e.selected_entry_path = Some(pasted.clone());
+                        // `apply_clip_at` 的文案面向「粘贴 / 移动」，制作副本须自述动作
+                        // （否则会显示「已从剪贴板粘贴…」，与用户操作不符）。
+                        format!(
+                            "已在「{}」内创建副本「{pasted}」。",
+                            title_of_dir(e, &visit_dir)
+                        )
                     })
                 });
                 match result {
@@ -6369,9 +6752,6 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             // 多条：批量管线（进度 + 汇总 + 重试）；激活在 batch_finished 完成。
             app.set_summary_visible(false);
-            app.set_progress_total(clips.len() as i32);
-            app.set_progress_done(0);
-            app.set_progress_text("".into());
             app.set_batch_busy(true);
             if let Ok(mut s) = slot_dupe.lock() {
                 s.0 = ContentOp::Paste {
@@ -6393,6 +6773,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.as_weak(),
                 std::sync::Arc::clone(&slot_dupe),
                 &format!("批量制作副本 · {} 项", clips.len()),
+                "批量创建副本中",
                 items,
             );
         });
@@ -6408,6 +6789,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let app = app_weak.upgrade().unwrap();
                 let e = editor.borrow();
                 let Some(visit) = action_visit(&app, &e) else {
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
                 // 多选（≥2）→ 一律批量重命名（无论有无主选中）：菜单与右键的
@@ -6422,6 +6804,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     return;
                 }
                 let Some(path) = menu_targets(&app).into_iter().next() else {
+                    show_status(&app, "请先选择一个条目。".into());
                     return;
                 };
                 *pending.borrow_mut() = Some((visit.dir.clone(), path.clone()));
@@ -6437,6 +6820,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let app_weak = app.as_weak();
             app.on_rename_confirm(move || {
                 let app = app_weak.upgrade().unwrap();
+                if batch_busy_guard(&app) {
+                    return;
+                }
                 app.set_rename_visible(false);
                 let Some((dir, old_path)) = pending.borrow_mut().take() else {
                     return;
@@ -6469,7 +6855,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         return Err(format!("无效名称：{new_name}"));
                     }
                     if new_full == old_path {
-                        return Ok(String::new());
+                        return Ok("未重命名：名称未变化。".to_string());
                     }
                     let dst = base_dir.join(&new_name);
                     if dst.exists() {
@@ -6503,7 +6889,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         e.selected_entry_path = Some(new_full.clone());
                     }
                     e.rescan()?;
-                    Ok(format!("已重命名 {old_path} → {new_full}"))
+                    Ok(format!("已重命名「{old_path}」→「{new_full}」。"))
                 });
                 match result {
                     Ok(msg) => {
@@ -6529,10 +6915,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_new_folder(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let visit_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
                 let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
+                let branch_title = visit_title(visit);
                 let mut meta = read_meta(bundle, &visit.dir)?;
                 let existing: HashSet<String> =
                     meta.entries.iter().map(|x| x.path.clone()).collect();
@@ -6549,7 +6939,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     .map_err(|err| err.to_string())?;
                 e.selected_entry_path = Some(name.clone());
                 e.rescan()?;
-                Ok(format!("已创建文件夹 {name}"))
+                Ok(format!("已在「{branch_title}」下新建文件夹「{name}」。"))
             });
             match result {
                 Ok(msg) => {
@@ -6567,6 +6957,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_new_folder_into(move |dir_rel| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let dir_rel = dir_rel.to_string();
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
@@ -6602,7 +6995,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 // 展开目标文件夹沿途父级（必须在 rescan 前设置）。
                 expand_dir_chain(e, &visit_dir, &dir_rel);
                 e.rescan()?;
-                Ok(format!("已在 {dir_rel}/ 创建文件夹 {name}"))
+                Ok(format!("已在「{dir_rel}/」新建文件夹「{name}」。"))
             });
             match result {
                 Ok(msg) => {
@@ -6631,7 +7024,7 @@ fn main() -> Result<(), slint::PlatformError> {
         ) -> bool {
             let sys_paths = mac_read_clipboard_files().unwrap_or_default();
             if sys_paths.is_empty() {
-                show_status(&app, "剪贴板为空：请先拷贝或剪切条目".into());
+                show_status(&app, "剪贴板为空，请先拷贝或剪切条目。".into());
                 return true;
             }
             let is_cut = mac_read_clipboard_cut();
@@ -6661,10 +7054,17 @@ fn main() -> Result<(), slint::PlatformError> {
                     let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
                     let names = import_paths_into(bundle, &visit.dir, &visit.dir, true, &external)?;
                     e.rescan()?;
+                    // 目标分支标题：rescan 之后重新借用 scan（上面 visit 的借用已结束）。
+                    let dst_title = e
+                        .scan
+                        .as_ref()
+                        .and_then(|s| s.visits.get(visit_idx))
+                        .map(visit_title)
+                        .unwrap_or_default();
                     Ok(format!(
-                        "已从系统剪贴板粘贴 {} 项：{}",
+                        "已从系统剪贴板粘贴 {} 项 →「{dst_title}」：{}。",
                         names.len(),
-                        names.join("、")
+                        name_list(&names)
                     ))
                 });
                 match result {
@@ -6680,7 +7080,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let (visit_dir, depth, id_version) = {
                 let e = editor.borrow();
                 let Some(visit_idx) = e.selected_idx_in_visits() else {
-                    show_status(&app, "未选择分支".into());
+                    show_status(&app, "请先选择一个分支。".into());
                     return true;
                 };
                 let scan = e.scan.as_ref().unwrap();
@@ -6698,7 +7098,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 match e.bundle.as_ref() {
                     Some(b) => b.root.clone(),
                     None => {
-                        show_status(&app, "未打开 bundle".into());
+                        show_status(&app, "请先打开一个 bundle。".into());
                         return true;
                     }
                 }
@@ -6735,9 +7135,6 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             // 多条：批量管线（进度 + 汇总 + 重试）；激活在 batch_finished 完成。
             app.set_summary_visible(false);
-            app.set_progress_total(in_bundle.len() as i32);
-            app.set_progress_done(0);
-            app.set_progress_text("".into());
             app.set_batch_busy(true);
             if let Ok(mut s) = slot.lock() {
                 s.0 = ContentOp::Paste {
@@ -6759,6 +7156,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.as_weak(),
                 std::sync::Arc::clone(slot),
                 &format!("批量粘贴 · {} 项", in_bundle.len()),
+                "批量粘贴中",
                 items,
             );
             true
@@ -6775,18 +7173,24 @@ fn main() -> Result<(), slint::PlatformError> {
         let clipboard_pi = clipboard.clone();
         app.global::<EntryApi>().on_paste_into(move |dir_rel| {
             let app = app_weak_pi.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let dir_rel = dir_rel.to_string();
             let mut clips: Vec<ClipItem> = Vec::new();
             let mut external: Vec<PathBuf> = Vec::new();
             let is_cut;
+            // 剪贴板来源（状态栏「已从<来源>粘贴…」用）。
+            let source;
             #[cfg(target_os = "macos")]
             {
                 let sys_paths = mac_read_clipboard_files().unwrap_or_default();
                 if sys_paths.is_empty() {
-                    show_status(&app, "剪贴板为空：请先拷贝或剪切条目".into());
+                    show_status(&app, "剪贴板为空，请先拷贝或剪切条目。".into());
                     return;
                 }
                 is_cut = mac_read_clipboard_cut();
+                source = "系统剪贴板";
                 let e = editor_pi.borrow();
                 if let (Some(_b), Some(scan)) = (e.bundle.as_ref(), e.scan.as_ref()) {
                     for p in &sys_paths {
@@ -6803,8 +7207,9 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 clips = clipboard_pi.borrow().clone();
                 is_cut = clips.first().map(|c| c.is_cut).unwrap_or(false);
+                source = "内部剪贴板";
                 if clips.is_empty() {
-                    show_status(&app, "剪贴板为空：请先拷贝或剪切条目".into());
+                    show_status(&app, "剪贴板为空，请先拷贝或剪切条目。".into());
                     return;
                 }
             }
@@ -6815,7 +7220,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let (visit_dir, depth, id_version) = {
                     let e = editor_pi.borrow();
                     let Some(visit_idx) = e.selected_idx_in_visits() else {
-                        show_status(&app, "未选择分支".into());
+                        show_status(&app, "请先选择一个分支。".into());
                         return;
                     };
                     let scan = e.scan.as_ref().unwrap();
@@ -6829,9 +7234,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     (v.dir.clone(), v.depth, idv)
                 };
                 app.set_summary_visible(false);
-                app.set_progress_total(clips.len() as i32);
-                app.set_progress_done(0);
-                app.set_progress_text("".into());
                 app.set_batch_busy(true);
                 if let Ok(mut s) = slot_pi.lock() {
                     s.0 = ContentOp::Paste {
@@ -6853,6 +7255,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     app.as_weak(),
                     std::sync::Arc::clone(&slot_pi),
                     &format!("批量粘贴 · {} 项", clips.len()),
+                    "批量粘贴中",
                     items,
                 );
                 return;
@@ -6892,7 +7295,18 @@ fn main() -> Result<(), slint::PlatformError> {
                         e.selected_entry_path = pasted.first().cloned();
                     }
                     sync_ui(&app, &editor_pi.borrow());
-                    show_status(&app, format!("已粘贴到 {dir_rel}/（{} 项）", pasted.len()).into());
+                    let branch_title = {
+                        let e = editor_pi.borrow();
+                        e.selected_visit().map(visit_title).unwrap_or_default()
+                    };
+                    show_status(
+                        &app,
+                        format!(
+                            "已从{source}粘贴 {} 项 →「{branch_title}」/「{dir_rel}」。",
+                            pasted.len()
+                        )
+                        .into(),
+                    );
                 }
                 Ok(_) => {}
                 Err(msg) => show_status(&app, format!("粘贴失败：{msg}").into()),
@@ -6901,6 +7315,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
         app.global::<EntryApi>().on_paste(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             #[cfg(target_os = "macos")]
             {
                 // macOS：**始终**走系统剪贴板（唯一事实来源——应用内拷贝/剪切与
@@ -6913,7 +7330,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // 非 macOS：无系统文件剪贴板实现 → 内部剪贴板（单条同步 / 多条批量管线）。
             let clips = clipboard.borrow().clone();
             if clips.is_empty() {
-                show_status(&app, "剪贴板为空：请先拷贝或剪切条目".into());
+                show_status(&app, "剪贴板为空，请先拷贝或剪切条目。".into());
                 return;
             }
             if clips.len() == 1 {
@@ -6942,7 +7359,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let (visit_dir, depth, id_version) = {
                 let e = editor.borrow();
                 let Some(visit_idx) = e.selected_idx_in_visits() else {
-                    show_status(&app, "未选择分支".into());
+                    show_status(&app, "请先选择一个分支。".into());
                     return;
                 };
                 let visit = &e.scan.as_ref().unwrap().visits[visit_idx];
@@ -6960,9 +7377,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 )
             };
             app.set_summary_visible(false);
-            app.set_progress_total(clips.len() as i32);
-            app.set_progress_done(0);
-            app.set_progress_text("".into());
             app.set_batch_busy(true);
             if let Ok(mut s) = slot_paste.lock() {
                 s.0 = ContentOp::Paste {
@@ -6984,6 +7398,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.as_weak(),
                 std::sync::Arc::clone(&slot_paste),
                 &format!("批量粘贴 · {} 项", clips.len()),
+                "批量粘贴中",
                 items,
             );
         });
@@ -6995,6 +7410,9 @@ fn main() -> Result<(), slint::PlatformError> {
         app.global::<EntryApi>()
             .on_drop_row(move |transfer, files, row_index, into_dir, after| {
                 let app = app_weak.upgrade().unwrap();
+                if batch_busy_guard(&app) {
+                    return;
+                }
                 // **以拖拽开始时的整组快照为准**（app.slint 在 `changed dragging` 里同步
                 // 调 payload-for 写入 `DndApi.payload`）。不能反过来优先 data-transfer
                 // 文本：行的 `data` 绑定只在重渲染时求值，抓「选中组里的一行」时它往往是
@@ -7106,7 +7524,18 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                         }
                         e.rescan()?;
-                        let where_ = if register { "分支" } else { "文件夹" };
+                        // 目标位置：落到分支根 = 该**分支标题**；落到内容文件夹 = 该文件夹相对路径。
+                        let where_ = if register {
+                            format!("「{}」", title_of_dir(e, &visit_dir))
+                        } else {
+                            format!(
+                                "「{}/」",
+                                target_dir
+                                    .strip_prefix(&visit_dir)
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default()
+                            )
+                        };
                         // 导入到文件夹时自动展开，保证新条目可见。
                         if !register {
                             e.expanded_dirs
@@ -7118,9 +7547,9 @@ fn main() -> Result<(), slint::PlatformError> {
                                 Some(in_dir_child_path(&visit_dir, &target_dir, first));
                         }
                         return Ok(format!(
-                            "已导入到{where_}（{} 项）：{}",
+                            "已从外部拖入导入 {} 项 → {where_}：{}。",
                             names.len(),
-                            names.join("、")
+                            name_list(&names)
                         ));
                     }
                     // 多选拖拽（Finder 语义：拖一个选中项 = 拖全部）。行级落点的
@@ -7329,7 +7758,11 @@ fn main() -> Result<(), slint::PlatformError> {
                             } else {
                                 format!("（{} 项失败：{}）", errs.len(), errs.join("；"))
                             };
-                            return Ok(format!("已移动 {} 项 → {dir_rel}/{err_note}", moved.len()));
+                            return Ok(format!(
+                                "已在「{}」内移动 {} 项 →「{dir_rel}/」{err_note}",
+                                title_of_dir(e, &visit_dir),
+                                moved.len()
+                            ));
                         }
                         // 整组重排：根层级行之间；组成员按原相对顺序插到落点位
                         // （先扣除落在插入位之前的组成员数，再移除-回插）。
@@ -7392,7 +7825,11 @@ fn main() -> Result<(), slint::PlatformError> {
                         meta.save(&bundle.meta_path(&visit_dir))
                             .map_err(|err| err.to_string())?;
                         e.rescan()?;
-                        return Ok(format!("已调整 {} 项的顺序。", g_paths.len()));
+                        return Ok(format!(
+                            "已在「{}」内调整 {} 项的顺序。",
+                            title_of_dir(e, &visit_dir),
+                            g_paths.len()
+                        ));
                     }
                     let (src_visit, path) = parse_entry_transfer(&transfer)
                         .ok_or_else(|| format!("拖拽载荷无效：{transfer}"))?;
@@ -7446,7 +7883,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                         let parents = src.fs_path.parent().unwrap_or(Path::new(""));
                         if dst_dir == parents {
-                            return Ok(String::new());
+                            return Ok("位置未变化。".to_string());
                         }
                         // 落点在根路径时计算插入顺序位（拖到根层级行列之间 = 可排序）。
                         let root_insert_pos = if dst_dir == visit_dir {
@@ -7575,7 +8012,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         // 高亮移动后的新位置。
                         e.selected_entry_path =
                             Some(in_dir_child_path(&visit_dir, &dst_dir, &name));
-                        return Ok(format!("已移动 {path} → {where_}"));
+                        return Ok(format!(
+                            "已在「{}」内移动「{path}」→「{where_}」",
+                            title_of_dir(e, &visit_dir)
+                        ));
                     }
                     let mut meta = read_meta(&bundle, &visit_dir)?;
                     // 落到文件夹（含拖到子行 = 移入其所在文件夹）= 把条目移入该文件夹。
@@ -7619,7 +8059,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         meta.touch();
                         meta.save(&bundle.meta_path(&visit_dir))
                             .map_err(|err| err.to_string())?;
-                        let msg = format!("已移动 {path} → {dir_rel}/");
+                        let msg = format!(
+                            "已在「{}」内移动「{path}」→「{dir_rel}/」",
+                            title_of_dir(e, &visit_dir)
+                        );
                         // 自动展开目标文件夹，保证新条目可见并被高亮。
                         if internal_target_dir != visit_dir {
                             e.expanded_dirs
@@ -7677,7 +8120,10 @@ fn main() -> Result<(), slint::PlatformError> {
                     e.rescan()?;
                     // 高亮被重排的条目。
                     e.selected_entry_path = Some(path.clone());
-                    Ok("条目顺序已更新。".into())
+                    Ok(format!(
+                        "已在「{}」内调整条目顺序。",
+                        title_of_dir(e, &visit_dir)
+                    ))
                 });
                 match result {
                     Ok(msg) => {
@@ -7696,6 +8142,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_entry_drop_to_branch(move |transfer, files, to_visit| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             // data-transfer 文本不可靠时回退到拖拽开始时记录的全局载荷。
             let transfer = if parse_entry_transfer(&transfer).is_some() {
                 transfer
@@ -7717,10 +8166,18 @@ fn main() -> Result<(), slint::PlatformError> {
                     let dst_dir = scan.visits[to_visit].dir.clone();
                     let names = import_paths_into(bundle, &dst_dir, &dst_dir, true, &paths)?;
                     e.rescan()?;
+                    // 目的地分支名（Tier B：只读 rescan 后的 scan，不新增 IO）。
+                    let dst_title = e
+                        .scan
+                        .as_ref()
+                        .and_then(|s| s.visits.get(to_visit))
+                        .map(visit_title)
+                        .unwrap_or_default();
                     return Ok(format!(
-                        "已导入到分支（{} 项）：{}",
+                        "已从外部拖入导入 {} 项 →「{}」：{}。",
                         names.len(),
-                        names.join("、")
+                        dst_title,
+                        name_list(&names)
                     ));
                 }
                 // 多选拖拽（Finder 语义：拖一个选中项 = 拖全部）→ 逐项移动；
@@ -7757,11 +8214,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_drop_branch_row(move |src, target, nest| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             if debug_on() {
                 eprintln!("[str-gui] drop-branch-row src={src} target={target} nest={nest}");
             }
             let (Ok(src), Ok(target)) = (usize::try_from(src), usize::try_from(target)) else {
-                show_status(&app, "分支无效".into());
+                show_status(&app, "移动分支失败：分支无效。".into());
                 return;
             };
             let result = with_editor(&editor, |e| {
@@ -7772,7 +8232,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 // 下半区 = 排序：插到 target 之后 **所在层级**（同父 = 重排；
                 // 跨层级 = 结构移动，fs 目录移动 + 两侧登记转移）。
                 let Some(op) = branch_move_plan(e, src, target, true)? else {
-                    return Ok("顺序未变。".to_string());
+                    return Ok("顺序未变化。".to_string());
                 };
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
                 match op {
@@ -7790,7 +8250,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         meta.save(&bundle.meta_path(&parent_dir))
                             .map_err(|err| err.to_string())?;
                         e.rescan()?;
-                        Ok("已调整分支顺序。".to_string())
+                        Ok(format!(
+                            "已在「{}」内调整分支顺序。",
+                            title_of_dir(e, &parent_dir)
+                        ))
                     }
                     BranchMoveOp::Move {
                         src_dir,
@@ -7849,7 +8312,11 @@ fn main() -> Result<(), slint::PlatformError> {
                                 e.selected = Some(visit_key(scan, i).to_string());
                             }
                         }
-                        Ok("已移动分支。".to_string())
+                        Ok(format!(
+                            "已把分支「{name}」从「{}」移动到「{}」。",
+                            title_of_dir(e, &src_parent_dir),
+                            title_of_dir(e, &new_parent_dir)
+                        ))
                     }
                 }
             });
@@ -7868,6 +8335,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_external_files_dropped(move |files| {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             // 整窗兜底 / 画布空白 / 节点级落点都会走到这里：打印悬停状态即可判断
             // 拖拽期间有没有收到 DragMove（can-drop 有没有跑过）。
             if debug_on() {
@@ -7916,9 +8386,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 let names = import_paths_into(bundle, &dir, &dir, true, &paths)?;
                 e.rescan()?;
                 Ok(format!(
-                    "已导入到「{title}」（{} 项）：{}",
+                    "已从外部拖入导入 {} 项 →「{title}」：{}。",
                     names.len(),
-                    names.join("、")
+                    name_list(&names)
                 ))
             });
             match result {
@@ -7943,12 +8413,13 @@ fn main() -> Result<(), slint::PlatformError> {
             let app = app_weak.upgrade().unwrap();
             let e = editor.borrow();
             let Some(bundle) = e.bundle.as_ref() else {
+                show_status(&app, "请先打开一个 bundle。".into());
                 return;
             };
             match validate::validate(bundle) {
                 Ok(report) => {
                     let (errs, warns) = (report.error_count(), report.warning_count());
-                    let summary = format!("校验完成：{errs} errors / {warns} warnings");
+                    let summary = format!("校验完成：{errs} 个错误、{warns} 个警告。");
                     let detail = if errs + warns > 0 {
                         report
                             .to_text()
@@ -8005,9 +8476,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let app_weak = app.as_weak();
         app.on_dialog_create(move || {
             let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
             let name = app.get_new_name().trim().to_string();
             let dir = app.get_new_dir().to_string();
             if name.is_empty() || dir.is_empty() {
+                show_status(&app, "新建 bundle 失败：名称与位置不能为空。".into());
                 return;
             }
             app.set_dialog_visible(false);
@@ -8024,7 +8499,7 @@ fn main() -> Result<(), slint::PlatformError> {
             match result.and_then(|()| with_editor(&editor, |e| e.open(&bundle_dir))) {
                 Ok(()) => {
                     sync_ui(&app, &editor.borrow());
-                    show_status(&app, format!("已创建并打开：{}", bundle_dir.display()).into());
+                    show_status(&app, format!("已新建并打开 bundle：「{}」。", bundle_dir.display()).into());
                 }
                 Err(msg) => show_status(&app, format!("创建失败：{msg}").into()),
             }
@@ -8040,7 +8515,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 Ok(()) => {
                     push_recent(&path);
                     refresh_recent(&app);
-                    show_status(&app, format!("已打开：{}", path.display()).into());
+                    show_status(&app, format!("已打开 bundle：「{}」。", path.display()).into());
                 }
                 Err(msg) => show_status(&app, format!("打开失败：{msg}").into()),
             }
