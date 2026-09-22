@@ -20,6 +20,31 @@ export { Palette }
 // data-transfer 在 Slint 中不透明：经宿主语言回调编解码（"visit|path"）。
 export global DndApi {
     pure callback entry-to-transfer(string) -> data-transfer;
+    // 同源的**字符串**版载荷（拖拽开始时求整组并写进 DndApi.payload）：
+    // entry-to-transfer 的返回类型是 data-transfer，赋不进 string 属性。
+    pure callback payload-for(int, string) -> string;
+    // 拖拽组是否**连续**（选区行在可视行序里中间不夹未选中行；单条拖拽 = true）。
+    // 连续组凡与组相接的插入边界（组前 / 组内 / 组后紧邻）都是顺序不变的无效点，
+    // 用于抑制插入指示线；非连续组任何落点都会让其余成员移动补位（全部放行）。
+    // 拖拽开始时与 payload 一同求值（见行 DragArea 的 changed dragging）。
+    pure callback src-contig-for(int, string) -> bool;
+    // 拖拽组是否含未登记成员（见 src-mixed；与 drop_row 的 has_unregistered 同源）。
+    pure callback src-mixed-for(int, string) -> bool;
+    // ── 结构树分支拖拽（同级重排）──
+    // 载荷 = branch-to-transfer(visit)（"branch|<visit>"，与条目载荷可辨）。
+    in-out property <int> tree-src-visit: -1;
+    in-out property <int> tree-hover-visit: -2;
+    in-out property <int> tree-hover-half: 0;
+    // 上半区 = 插入为子分支（整行高亮，与内容「移入文件夹」一致）；
+    // 下半区 = 同级排序（行底插入线）。
+    in-out property <bool> tree-hover-nest: false;
+    pure callback branch-to-transfer(int) -> data-transfer;
+    // 解析分支载荷：条目 / 外部文件载荷返回 -1。
+    pure callback transfer-to-branch(data-transfer) -> int;
+    // 上半区落点有效性：不能拖到自身 / 自身子树内（ROOT 不可拖动）。
+    pure callback tree-nest-ok(int, int) -> bool;
+    // 下半区落点有效性：同父同级且非「顺序不变」边界（拖到自身 / 紧邻原位）。
+    pure callback tree-drop-ok(int, int, bool) -> bool;
     pure callback transfer-to-entry(data-transfer) -> string;
     // 外部文件拖入（OS 文件管理器）：判别与读取路径列表（\n 分隔）。
     pure callback transfer-has-files(data-transfer) -> bool;
@@ -34,6 +59,12 @@ export global DndApi {
     // 拖拽源行号与其是否为顶层条目（用于拒绝"顺序不变"的无效落点）。
     in-out property <int> hover-src-row: -1;
     in-out property <bool> hover-src-top: false;
+    // 拖拽组连续性（src-contig-for 的结果，随 hover-src-row 一同写入）。
+    in-out property <bool> src-contig: true;
+    // 拖拽组是否含**未登记**成员（内容文件夹子行等，无 order 语义）：此时
+    // 「重排」不可表达，文件夹行上半区退化为移入该文件夹（指示同步切换为
+    // 整行高亮），保证提示与实际落点一致。
+    in-out property <bool> src-mixed: false;
     // 当前落点是否参与排序（显示插入线）：根条目总是可排序；
     // 子行只有拖到根层级的行之间才可排序（文件夹内不排序）。
     in-out property <bool> hover-sortable: false;
@@ -74,6 +105,12 @@ export global DndApi {
         // 拖拽源标记与载荷：仅在一次拖拽会话内有效。
         hover-src-row = -1;
         hover-src-top = false;
+        src-contig = true;
+        src-mixed = false;
+        tree-src-visit = -1;
+        tree-hover-visit = -2;
+        tree-hover-half = 0;
+        tree-hover-nest = false;
         hover-external = false;
         payload = "";
         entry-drag-active = false;
@@ -96,6 +133,9 @@ export global DndApi {
         hover-into-dir = false;
         hover-panel = -2;
         hover-node = -2;
+        tree-hover-visit = -2;
+        tree-hover-half = 0;
+        tree-hover-nest = false;
         // 边缘滚动只在画布 / 节点区域内有效。
         mind-drag = false;
         mind-pos-x = -1px;
@@ -131,6 +171,12 @@ export global EntryApi {
     callback save-entry();
     callback new-folder();
     callback paste();
+    // 粘贴到**内容文件夹**（文件夹行右键「粘贴」）：参数 = 文件夹相对路径。
+    callback paste-into(string);
+    // 在**内容文件夹**内新建文件夹（文件夹行右键）：参数 = 文件夹相对路径。
+    callback new-folder-into(string);
+    // 右键菜单「刷新」（条目行 / 面板空白）：重新扫描磁盘并同步 UI。
+    callback refresh-request();
     // 落点处理：transfer / files / 行号(-1=末尾) / 是否移入文件夹 / 是否插到行后。
     callback drop-row(string, string, int, bool, bool);
     // ── 内容条目批量操作（Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选）──
@@ -159,6 +205,10 @@ export global EntryApi {
 export struct BranchRow {
     visit: int,
     title: string,
+    // 行主文本（title）是否**全为拉丁**（不含 CJK / 假名 / 谚文 / 全角 / emoji 等
+    // 「满高字形」）。由 Rust 侧建模型时算一次（main.rs `is_latin_only`），
+    // UI 只读布尔值 ⇒ 渲染期零字符串开销。仅拉丁行需要 1px 光学下移补偿。
+    latin: bool,
     type-str: string,
     depth: int,
     kind: string,
@@ -180,6 +230,8 @@ export struct EntryRow {
     path: string,
     // 显示用名称：顶层条目 = path；文件夹子行 = 真实文件名（不带父路径前缀）。
     display: string,
+    // 行主文本（display）是否全为拉丁 —— 同 BranchRow.latin，建模型时算一次。
+    latin: bool,
     role: string,
     title: string,
     size: string,
@@ -234,7 +286,7 @@ export struct MindNode {
     is-selected: bool,
     // 内容展开态：true 时节点内嵌完整内容列表面板（与列表视图功能一致）。
     expanded: bool,
-    // 子树是否展开（控制 ▶/▼ 图标）。
+    // 子树是否展开（控制行首 ›/⌄ 箭头）。
     children-expanded: bool,
     has-children: bool,
     // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
@@ -242,7 +294,42 @@ export struct MindNode {
     entry-rows: [EntryRow],
 }
 
+// 列表行首展开 / 收起箭头：矢量折线（原来是 9px 的 ▶/▼ 文本字形——字形随字体度量
+// 浮动、笔画粗细不匀、字面还自带左右留白）。折叠 = 右向 ›、展开 = 下向 ⌄，
+// **几何与导图 MindIconButton 完全相同**（10×10 viewbox、1.5px 描边、同一组命令），
+// 全应用只此一种箭头样式。
+// 宽度 = 箭头列本身（10px）：这个值是结构树 / 内容列表 `padding-left` 缩进步长的
+// 组成部分，改它要同步改缩进（每级缩进 = 本列 + 行内间距 4px = 14px）。
+// **叶子行也占同一列**（`expandable: false` 时只占位、不画折线）：Slint 的
+// `visible: false` 仍占布局空间，同级「有箭头 / 无箭头」的行必须同宽，否则标题会错开。
+component RowChevron inherits Rectangle {
+    in property <bool> expanded;
+    in property <bool> expandable;
+    in property <color> fg;
+    callback clicked;
+    width: 10px;
+    TouchArea {
+        clicked => { if (parent.expandable) { parent.clicked(); } }
+    }
+    if expandable: Path {
+        width: 10px;
+        height: 10px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        fill: transparent;
+        stroke: parent.fg;
+        stroke-width: 1.5px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: parent.expanded
+            ? "M 1.5 3.5 L 5 7 L 8.5 3.5"
+            : "M 3.5 1.5 L 7 5 L 3.5 8.5";
+    }
+}
+
 // 内容条目四列视图：列表视图与导图节点共用（同列宽、同字体、同配色）。
+// 字号统一 12px：Finder 列表的各列**同字号**，主/副之分只靠颜色（labelColor /
+// secondaryLabelColor），不像我们原先副列小一号 —— 那是自造的层级，与 Finder 不符。
 component EntryCols inherits HorizontalLayout {
     in property <string> display;
     in property <string> title;
@@ -269,7 +356,7 @@ component EntryCols inherits HorizontalLayout {
     }
     Text {
         text: role;
-        font-size: 11px;
+        font-size: 12px;
         color: sub-color;
         overflow: elide;
         vertical-alignment: center;
@@ -277,7 +364,7 @@ component EntryCols inherits HorizontalLayout {
     }
     Text {
         text: size;
-        font-size: 11px;
+        font-size: 12px;
         color: sub-color;
         vertical-alignment: center;
         width: 60px;
@@ -413,9 +500,19 @@ component EntryListPanel inherits Rectangle {
     in property <color> col-text;
     in property <color> col-sub;
     in property <color> col-sel;
+    in property <color> col-row-bg;
+    in property <color> col-on-sel;
+    // 拖拽中的行底（见 `c-drag-bg`）。
+    in property <color> col-drag-bg;
+    // 面板空白处被点击（语义由调用方决定：清内容选区 / 取消分支激活）。
+    callback blank-clicked();
     in property <color> col-badge;
-    in property <color> col-hover;
     in property <color> col-accent;
+    // 整组拖拽：被抓行属于多选选区（与 Rust 侧 payload 展开同一判据）。
+    // 单条拖拽（被抓行不在选区内）为 false —— 此时插入无效点的抑制只看被抓行
+    // 自身（mem-* 里的 `== hover-src-row` 分支），不会波及无关的选中块。
+    property <bool> group-drag: DndApi.hover-src-row >= 0
+        && entries[Math.max(DndApi.hover-src-row, 0)].in-multi;
     clip: true;
 
     // 底层：分支级菜单（仅手动 show，避免自动触发）。
@@ -435,15 +532,20 @@ component EntryListPanel inherits Rectangle {
                     EntryApi.paste();
                 }
             }
+            MenuSeparator { }
+            MenuItem {
+                title: "刷新";
+                activated => {
+                    EntryApi.refresh-request();
+                }
+            }
         }
     }
-    // 空白处点击 = 取消选中（TouchArea 消费所有按键，
-    // 因此右键也在这里处理：取消选中 + 手动弹分支菜单）。
+    // 空白处点击（TouchArea 消费所有按键，因此右键也在这里处理：取消选中 + 手动弹
+    // 分支菜单）。语义交给调用方：列表视图 = 只清内容选区（当前分支仍是激活分支）；
+    // 导图节点内嵌面板 = 取消分支激活（与画布空白一致）。
     TouchArea {
-        clicked => {
-            EntryApi.activate-visit(src-visit);
-            EntryApi.clear-selection();
-        }
+        clicked => { root.blank-clicked(); }
         pointer-event(event) => {
             if (event.button == PointerEventButton.right
                 && event.kind == PointerEventKind.up) {
@@ -472,9 +574,9 @@ component EntryListPanel inherits Rectangle {
             min-height: 0px;
             vertical-stretch: 1;
             for entry[index] in entries: Rectangle {
-                // 行高对标 Finder 列表视图（默认 24px / 字号 13），
-                // 本列表字号 12px，24px 行高上下各留 6px。
-                height: 24px;
+                // 行高对标 Finder 列表视图（本机实测 40px @2x = 20pt；与 Rust 侧
+                // ENTRY_ROW_H 一致，导图节点高度按它计算）。
+                height: 20px;
                 property <bool> hover-top: DndApi.hover-panel == src-visit
                     && DndApi.hover-row == index
                     && DndApi.hover-half == 0;
@@ -499,15 +601,87 @@ component EntryListPanel inherits Rectangle {
                     && DndApi.hover-sortable
                     && hover-bottom && !entry.is-dir
                     && index == entries.length - 1;
-                property <bool> is-dragging: dragarea.dragging;
-                // 单选与多选**同一高亮**：主选中与选区成员都用 col-sel。
-                background: (selected-index == index || entry.in-multi) ? col-sel
-                    : hover-folder ? col-badge
-                    : (Math.mod(index, 2) == 0 ? transparent : col-hover);
-                // 拖动中：被抓取行与同面板内选区成员一起半透明（整组"正在被拖"）。
-                opacity: (is-dragging
-                    || (DndApi.entry-drag-active && DndApi.src-visit == src-visit && entry.in-multi))
-                    ? 0.4 : 1.0;
+                // 拖动中（Finder 语义）：被抓取行 + 同面板选区成员整组「正在被搬走」。
+                property <bool> is-dragging: dragarea.dragging
+                    || (DndApi.entry-drag-active && DndApi.src-visit == src-visit
+                        && entry.in-multi);
+                // 落点边界两侧是否属于「被拖的组」：单条拖拽 = 仅被抓行自身；
+                // 整组拖拽 = 全部选区行。配合 src-contig：连续组凡与组相接的边界
+                // 都是顺序不变的无效点；非连续组仅拼接段内部（两侧都是选区行）无效。
+                property <bool> mem-self: index == DndApi.hover-src-row
+                    || (group-drag && entry.in-multi);
+                property <bool> mem-prev: index > 0
+                    && (index - 1 == DndApi.hover-src-row
+                        || (group-drag && entries[Math.max(index - 1, 0)].in-multi));
+                property <bool> mem-next: index < entries.length - 1
+                    && (index + 1 == DndApi.hover-src-row
+                        || (group-drag
+                            && entries[Math.min(index + 1, entries.length - 1)].in-multi));
+                // 落点参数以**全局悬停状态**为准：行上叠加了三层 DropArea
+                // （topzone / bottomzone / filedrop），实测 Slint 的 dropped 可能
+                // 落在 filedrop（最上层）而非 can-drop 接受的那层——此前 filedrop
+                // 传 `entry.is-dir`，文件夹行上方明明显示插入线却落进了文件夹。
+                // 悬停状态由 can-drop 写入、与指示符完全同源 ⇒ 落点与指示必然一致。
+                // hover-panel != src-visit（跨面板边缘情形）时退化为行本地值。
+                property <bool> drop-live: DndApi.hover-panel == src-visit;
+                property <int> drop-row-idx: drop-live && DndApi.hover-row >= 0
+                    ? DndApi.hover-row
+                    : index;
+                property <bool> drop-into: drop-live
+                    ? DndApi.hover-into-dir
+                    : entry.is-dir;
+                property <bool> drop-after: drop-live && DndApi.hover-half == 1;
+                // 单选与多选**同一高亮**：主选中与选区成员同一色块。
+                // 拖拽中不算选中 ⇒ 文字 / 箭头自动回到普通色，底色由 is-dragging 单独画；
+                // 但**拼接段**（连续选区合并成一整块）在拖拽中必须保持 —— is-block 就是
+                // 「这块要画成整段」的判定，圆角与段内分隔线都看它。
+                property <bool> is-sel: (selected-index == index || entry.in-multi)
+                    && !is-dragging;
+                property <bool> is-block: is-sel || is-dragging;
+                // 连续选中段（Finder 语义：多选高亮合并成一整块）——
+                // 判断上下相邻行是否也选中，只给整段的首行圆上角、末行圆下角，
+                // 段内直角，于是相邻行拼成一整块而无内部圆角/缝隙。
+                // 数组按下标取值先 Math.max/min 夹紧，避免越界（不依赖 && 短路）。
+                property <bool> sel-prev: index > 0
+                    && (selected-index == index - 1
+                        || entries[Math.max(index - 1, 0)].in-multi);
+                property <bool> sel-next: index < entries.length - 1
+                    && (selected-index == index + 1
+                        || entries[Math.min(index + 1, entries.length - 1)].in-multi);
+                // 行底：Finder 式圆角内缩色块（左右各内缩 4px、铺满行高无行间缝、
+                // 圆角 6px），与结构树同形状。选中段 = 实心 accent（段内合并），
+                // 未选中行交替底色（偶数行留白 / 奇数行浅灰）。
+                // 必须最先声明：沉在行内容与各命中层之下。
+                Rectangle {
+                    x: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height;
+                    border-top-left-radius: is-block && sel-prev ? 0px : 6px;
+                    border-top-right-radius: is-block && sel-prev ? 0px : 6px;
+                    border-bottom-left-radius: is-block && sel-next ? 0px : 6px;
+                    border-bottom-right-radius: is-block && sel-next ? 0px : 6px;
+                    background: is-dragging ? col-drag-bg
+                        : is-sel ? col-sel
+                        : hover-folder ? col-badge
+                        : (Math.mod(index, 2) == 0 ? transparent : col-row-bg);
+                }
+                // 合并段内部的分隔线：Finder 实测 —— 选中色混 **10% 白**、1px 高
+                // （底色 rgb(0,107,218) → 线 rgb(25,121,222)，三通道反解混白比例一致）。
+                // 只画在段内相邻两行的交界处：段首 sel-prev 为 false 不画，段尾由下一行画。
+                // 注意 Slint `mix(other, f)` 的 f 是 **self 的权重**（源码 lerp(self, other, f)），
+                // 所以「混 10% 白」要写 0.9。
+                Rectangle {
+                    visible: is-block && sel-prev;
+                    x: 4px;
+                    y: 0;
+                    width: parent.width - 8px;
+                    height: 1px;
+                    // 拖拽中块底是浅灰，分隔线用「块色混 8% 黑」的下沉沟槽
+                    // （白色过亮突兀）；选中蓝时沿用混白 10%。
+                    background: is-dragging
+                        ? col-drag-bg.mix(#000000, 0.92)
+                        : col-sel.mix(#ffffff, 0.9);
+                }
                 Rectangle {
                     y: 0;
                     height: 3px;
@@ -553,30 +727,45 @@ component EntryListPanel inherits Rectangle {
                         MenuSeparator { }
                         MenuItem {
                             title: "重命名…";
-                            enabled: entry.depth == 0;
+                            enabled: entry.role != "node" && entry.role != "branch";
                             activated => {
                                 EntryApi.entry-rename-open();
                             }
                         }
                         MenuItem {
                             title: "拷贝";
-                            enabled: entry.depth == 0;
+                            enabled: entry.role != "node" && entry.role != "branch";
                             activated => {
                                 EntryApi.entry-copy();
                             }
                         }
                         MenuItem {
                             title: "剪切";
-                            enabled: entry.depth == 0;
+                            enabled: entry.role != "node" && entry.role != "branch";
                             activated => {
                                 EntryApi.entry-cut();
                             }
                         }
                         MenuItem {
                             title: "制作副本";
-                            enabled: entry.depth == 0;
+                            enabled: entry.role != "node" && entry.role != "branch";
                             activated => {
                                 EntryApi.entry-duplicate();
+                            }
+                        }
+                        // 文件夹行：在**该文件夹内部**新建文件夹 / 粘贴（Finder 语义）。
+                        if entry.is-dir: MenuItem {
+                            title: "新建文件夹";
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.new-folder-into(entry.path);
+                            }
+                        }
+                        if entry.is-dir: MenuItem {
+                            title: "粘贴";
+                            activated => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.paste-into(entry.path);
                             }
                         }
                         MenuSeparator { }
@@ -590,6 +779,13 @@ component EntryListPanel inherits Rectangle {
                                 EntryApi.delete-entry();
                             }
                         }
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "刷新";
+                            activated => {
+                                EntryApi.refresh-request();
+                            }
+                        }
                     }
                 }
                 // 上半区：内部条目拖到 = 插到该行之前。
@@ -600,31 +796,41 @@ component EntryListPanel inherits Rectangle {
                         // 先清空上一个区域的悬停指示，再置本区域状态（规则见 DndApi.clear-hover）。
                         DndApi.clear-hover();
                         // 命中面板行级落点：精确放置（clear-hover 已暂停导图边缘滚动）。
-                        // 顶层源：自身行 / 下一行顶边 = 顺序不变的无效点，直接拒绝。
+                        // 顶层源：顺序不变的无效落点直接拒绝 —— 连续组 = 凡与被拖组
+                        // 相接的边界（自身行 / 组前 / 组内 / 组后紧邻）；非连续组 =
+                        // 拼接段内部（两侧都是选区行，首项前后照常可插入）。
                         // 该抑制只对拖拽源面板本身生效（src-visit 相同）——
                         // 跨节点拖放时源行号属于另一面板，不能套用。
                         if (DndApi.transfer-to-entry(event.data) != ""
                             && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
                                 && entry.depth == 0
-                                && (index == DndApi.hover-src-row
-                                    || index == DndApi.hover-src-row + 1))) {
+                                && (DndApi.src-contig
+                                    ? (mem-self || mem-prev)
+                                    : (mem-self && mem-prev)))) {
                             DndApi.hover-row = index;
                             DndApi.hover-half = 0;
                             DndApi.hover-files = false;
                             DndApi.hover-external = false;
-                            DndApi.hover-into-dir = false;
-                            DndApi.hover-sortable = entry.depth == 0;
+                            // 上半区 = 插到该行之前；唯一例外是含未登记成员的整组
+                            // 拖到文件夹行上（重排不可表达 ⇒ 退化为移入，指示用整行
+                            // 高亮而非插入线，见 src-mixed）。
+                            DndApi.hover-into-dir = entry.is-dir && DndApi.src-mixed;
+                            DndApi.hover-sortable = entry.depth == 0
+                                && !(entry.is-dir && DndApi.src-mixed);
                             DndApi.hover-panel = src-visit;
                             DndApi.hover-node = src-visit;
                             DragAction.move
                         } else if (DndApi.transfer-has-files(event.data)) {
-                            // 外部文件与应用内一致：根层级行 = 插入位（可排序）。
+                            // 外部文件：文件夹行 = 导入其内部（Rust 端 dir 行一律落入
+                            // drop_dir，指示必须一致 ⇒ 上半区也显示整行高亮而非插入线）；
+                            // 文件行 = 插入位（可排序）。
                             DndApi.hover-row = index;
                             DndApi.hover-half = 0;
                             DndApi.hover-files = true;
                             DndApi.hover-external = true;
-                            DndApi.hover-into-dir = false;
-                            DndApi.hover-sortable = entry.depth == 0;
+                            DndApi.hover-into-dir = entry.is-dir;
+                            DndApi.hover-sortable = entry.depth == 0
+                                && !entry.is-dir;
                             DndApi.hover-panel = src-visit;
                             DndApi.hover-node = src-visit;
                             DragAction.copy
@@ -639,12 +845,13 @@ component EntryListPanel inherits Rectangle {
                     }
                     dropped(event) => {
                         EntryApi.activate-visit(src-visit);
+                        // 落点参数取全局悬停状态（与指示符同源），见 drop-* 属性注释。
                         EntryApi.drop-row(
                             DndApi.transfer-to-entry(event.data),
                             DndApi.transfer-to-files(event.data),
-                            index,
-                            entry.is-dir,
-                            DndApi.hover-half == 1);
+                            drop-row-idx,
+                            drop-into,
+                            drop-after);
                         EntryApi.end-drop();
                         return event.proposed-action;
                     }
@@ -658,14 +865,18 @@ component EntryListPanel inherits Rectangle {
                         DndApi.clear-hover();
                         // 命中面板行级落点：精确放置（clear-hover 已暂停导图边缘滚动）。
                         // "上一行的下半区"是重排的无序位；但文件夹行下半区
-                        // = 移入文件夹（与源位置无关，始终有效），不能拒绝。
-                        // 源行抑制同样只对拖拽源面板本身生效。
+                        // = 移入文件夹（与源位置无关，始终有效），不能拒绝
+                        //（仅被抓文件夹行自身的下半区仍按无效点拒绝）。
+                        // 无效点判定与上半区同规则：连续组 = 与被拖组相接的边界；
+                        // 非连续组 = 拼接段内部。抑制只对拖拽源面板本身生效。
                         if (DndApi.transfer-to-entry(event.data) != ""
                             && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
                                 && entry.depth == 0
-                                && (index == DndApi.hover-src-row
-                                    || (!entry.is-dir
-                                        && index == DndApi.hover-src-row - 1)))) {
+                                && (entry.is-dir
+                                    ? index == DndApi.hover-src-row
+                                    : (DndApi.src-contig
+                                        ? (mem-self || mem-next)
+                                        : (mem-self && mem-next))))) {
                             DndApi.hover-row = index;
                             DndApi.hover-half = 1;
                             DndApi.hover-files = false;
@@ -699,12 +910,13 @@ component EntryListPanel inherits Rectangle {
                     }
                     dropped(event) => {
                         EntryApi.activate-visit(src-visit);
+                        // 落点参数取全局悬停状态（与指示符同源），见 drop-* 属性注释。
                         EntryApi.drop-row(
                             DndApi.transfer-to-entry(event.data),
                             DndApi.transfer-to-files(event.data),
-                            index,
-                            entry.is-dir,
-                            DndApi.hover-half == 1);
+                            drop-row-idx,
+                            drop-into,
+                            drop-after);
                         EntryApi.end-drop();
                         return event.proposed-action;
                     }
@@ -719,18 +931,19 @@ component EntryListPanel inherits Rectangle {
                     }
                     dropped(event) => {
                         EntryApi.activate-visit(src-visit);
+                        // 落点参数取全局悬停状态（与指示符同源），见 drop-* 属性注释。
                         EntryApi.drop-row(
                             DndApi.transfer-to-entry(event.data),
                             DndApi.transfer-to-files(event.data),
-                            index,
-                            entry.is-dir,
-                            DndApi.hover-half == 1);
+                            drop-row-idx,
+                            drop-into,
+                            drop-after);
                         EntryApi.end-drop();
                         return event.proposed-action;
                     }
                 }
                 // 整行可拖拽；TouchArea 在内容层之下（后声明者在上），
-                // 三角按钮的点击才能落在自己的 TouchArea 上。
+                // 展开箭头的点击才能落在自己的 TouchArea 上。
                 dragarea := DragArea {
                     data: DndApi.entry-to-transfer("\{src-visit}|\{entry.path}");
                     allow-copy: true;
@@ -739,11 +952,16 @@ component EntryListPanel inherits Rectangle {
                         if (self.dragging) {
                             DndApi.src-visit = src-visit;
                             DndApi.entry-drag-active = true;
-                            // 兜底载荷为单路径（data-transfer 主路径携带整组载荷，
-                            // 由 entry-to-transfer 展开；仅当其不可解析时才回退到这里）。
-                            DndApi.payload = "\{src-visit}|\{entry.path}";
+                            // **在拖拽开始这一刻**求整组载荷（同步调 payload-for，读到的
+                            // 正是此刻的选区）。行的 `data` 绑定只在重渲染时求值，抓「选中组
+                            // 里的一行」时它常是选中之前的陈旧单条值 ⇒ 批量移动只动一个。
+                            // 落点以本字段为准（见 on_drop_row 的注释）。
+                            DndApi.payload = DndApi.payload-for(src-visit, entry.path);
                             DndApi.hover-src-row = index;
                             DndApi.hover-src-top = entry.depth == 0;
+                            // 选区连续性同样以拖拽开始这一刻为准（与 payload 同源）。
+                            DndApi.src-contig = DndApi.src-contig-for(src-visit, entry.path);
+                            DndApi.src-mixed = DndApi.src-mixed-for(src-visit, entry.path);
                         } else {
                             DndApi.entry-drag-active = false;
                         }
@@ -797,37 +1015,43 @@ component EntryListPanel inherits Rectangle {
                         }
                     }
                     HorizontalLayout {
-                        padding-left: 10px + entry.depth * 18px;
+                        // 行内容相对**整行**居中（铺满行高）；**仅全拉丁行**下移 1px 做
+                        // 光学居中：Text 按行盒居中，而字体把下伸部也算进行盒，拉丁字母
+                        // 墨迹只占 cap 高度 ⇒ 不补偿会偏高（实测 12px 字体：上 12 / 下 18）。
+                        // 满高字形（CJK 等）墨迹本就接近行盒中心，下移反而偏低，故不补偿。
+                        // latin 由 Rust 建模型时算好，这里只读布尔值。
+                        y: entry.latin ? 1.5px : 0px;
+                        height: 100%;
+                        // 每级缩进 = 箭头列 10px + 行内间距 4px：子级箭头正好落在
+                        // 父级标题的起始位置，形成「一级一个箭头列」的规整阶梯。
+                        // 基础 8px = 行底色块的 4px 内缩 + 箭头自身的 4px 留白
+                        // —— 箭头必须落在色块内部，故比色块内缩再多 4px。
+                        padding-left: 8px + entry.depth * 14px;
                         padding-right: 10px;
+                        // 箭头左右留白求对称（相对色块左缘）：左 = 4px(块内留白) +
+                        // 2.75px(折线自身笔画余量)，右 = 2.25px(同上) + 4px(本间距)。
                         spacing: 4px;
-                        // 文件夹展开/收缩三角。
-                        Rectangle {
-                            width: 16px;
-                            visible: entry.is-dir;
-                            Text {
-                                text: entry.expanded ? "▼" : "▶";
-                                font-size: 9px;
-                                color: col-sub;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                                width: parent.width;
-                                height: parent.height;
-                            }
-                            TouchArea {
-                                clicked => {
-                                    EntryApi.activate-visit(src-visit);
-                                    EntryApi.toggle-dir(index);
-                                }
+                        // 文件夹展开/收缩箭头（列宽见 RowChevron）；文件行只占位。
+                        RowChevron {
+                            expandable: entry.is-dir;
+                            expanded: entry.expanded;
+                            fg: is-sel ? col-on-sel : col-sub;
+                            clicked => {
+                                EntryApi.activate-visit(src-visit);
+                                EntryApi.toggle-dir(index);
                             }
                         }
-                        Rectangle { width: 4px; visible: !entry.is-dir; }
                         EntryCols {
                             display: entry.display;
                             title: entry.title;
                             role: entry.role;
                             size: entry.size;
-                            main-color: col-text;
-                            sub-color: col-sub;
+                            // 选中行色块为实心 accent：主列转纯白，副列转**白 70%**
+                            // —— Finder 选中行实测：主文本 rgb(255,255,255)、
+                            // 副文本 = 白在选中蓝上以 70% 合成（rgb(179,211,244)，三通道
+                            // 反解 α 一致 = 0.70），不是纯白。
+                            main-color: is-sel ? col-on-sel : col-text;
+                            sub-color: is-sel ? col-on-sel.transparentize(0.3) : col-sub;
                         }
                     }
                 }
@@ -865,7 +1089,10 @@ component EntryListPanel inherits Rectangle {
                     if ((DndApi.transfer-to-entry(event.data) != ""
                         || DndApi.transfer-has-files(event.data))
                         && !(DndApi.src-visit == src-visit && DndApi.hover-src-top
-                            && DndApi.hover-src-row == entries.length - 1)) {
+                            && DndApi.src-contig
+                            && (DndApi.hover-src-row == entries.length - 1
+                                || (group-drag
+                                    && entries[Math.max(entries.length - 1, 0)].in-multi)))) {
                         DndApi.hover-row = -1;
                         DndApi.hover-files = false;
                         DndApi.hover-panel = src-visit;
@@ -944,7 +1171,9 @@ export component AppWindow inherits Window {
     in property <color> c-window: root.dark-mode ? #1b1d22 : #f5f6f8;
     in property <color> c-panel: root.dark-mode ? #24262c : #ffffff;
     in property <color> c-text: root.dark-mode ? #e5e7eb : #1f2937;
-    in property <color> c-sub: root.dark-mode ? #8b909c : #6b7280;
+    // 副文本色对标 Finder 的 `secondaryLabelColor`：浅色 = 黑 50%（白底实测
+    // rgb(128,128,128)），深色 = 白 55%（≈ 与面板底色混合后的中性灰）。
+    in property <color> c-sub: root.dark-mode ? #909090 : #808080;
     in property <color> c-line: root.dark-mode ? #33363d : #e5e7eb;
     in property <color> c-sel: root.dark-mode ? #1e3a5f : #e4edff;
     in property <color> c-sel-text: root.dark-mode ? #7ab3ff : #1d4ed8;
@@ -953,7 +1182,17 @@ export component AppWindow inherits Window {
     in property <color> c-badge-text: root.dark-mode ? #a5b4fc : #4f46e5;
     in property <color> c-status-bg: root.dark-mode ? #26282e : #eceef1;
     in property <color> c-accent: root.dark-mode ? #4f7cff : #1d4ed8;
-    in property <color> c-root-bg: root.dark-mode ? #31356f : #eef2ff;
+    // 行底令牌（结构树 / 内容列表共用同一套「Finder 式行」）：未选中行统一浅灰
+    // 圆角色块；选中行用 c-accent 实心填充，其上的文字与箭头一律 c-on-accent。
+    in property <color> c-row-bg: root.dark-mode ? #2a2d34 : #f4f5f5;
+    // 拖拽中的行底（Finder 语义）：被抓取条目 + 同组选区成员整组「正在被搬走」，
+    // 只把底色调成**非常浅**的中性灰（结构与文字样式都不变，仅换色）。
+    in property <color> c-drag-bg: root.dark-mode ? #43464f : #e7e8ea;
+    // 选中行填充色 = macOS `NSColor.selectedContentBackgroundColor` 实测值
+    // （Finder 列表的选中行就是它）：light #0064E1 / dark #0059D1。
+    // 与 c-accent 分开：c-accent 还用于描边/指示线/链接（深色下需要更亮）。
+    in property <color> c-row-sel: root.dark-mode ? #0059d1 : #0064e1;
+    in property <color> c-on-accent: #ffffff;
 
     // ── 状态 ──
     in property <string> bundle-name: "未打开 bundle";
@@ -1041,6 +1280,9 @@ export component AppWindow inherits Window {
     // 外置子树按钮、内容面板圆角等溢出节点矩形的部分（400px 远大于其尺寸，
     // 且不影响滚动时的观感）。
     property <length> mind-cull-margin: 400px;
+    // 节点标题行高（与 Rust NODE_H 的标题行一致）。既是布局高度，也是节点手势的
+    // 命中高度 —— 两者必须同源，否则「点标题行 = 选中该节点」的判定会和视觉错位。
+    property <length> node-title-h: 28px;
     // 子树按钮的横向占位（值由 Rust 侧 SUBTREE_BTN_EXTENT 提供）：
     // 缩略图内容宽度需据此扣除，否则右侧多一段空白、左右留白不对称。
     in property <float> mind-edge-offset: 0.0;
@@ -1180,6 +1422,8 @@ export component AppWindow inherits Window {
     callback delete-branch();
     callback add-entry();
     callback entry-drop-to-branch(string, string, int);
+    // 分支拖拽重排：src_visit 拖到 target_visit 的前/后（同级分支之间）。
+    callback drop-branch-row(int, int, bool);
     callback external-files-dropped(string);
     callback reveal-branch();
     callback branch-copy-path();
@@ -1524,12 +1768,41 @@ export component AppWindow inherits Window {
                         ListView {
                             vertical-stretch: 1;
                             for row[index] in root.rows: Rectangle {
-                                // 行高与导图内容条目同基准（Finder 列表 24px）。
-                                height: 24px;
-                                property <bool> drag-hover: treedrop.has-drag;
-                                background: drag-hover ? c-badge-bg
-                                    : (row.is-selected ? c-sel : (Math.mod(index, 2) == 0 ? transparent : c-hover));
-                                // 行级 TouchArea 必须先声明，否则会盖住三角按钮的点击区。
+                                // 行高与内容列表同基准（对标 Finder 列表实测 20pt）。
+                                height: 20px;
+                                // 重排悬停（下半区）：只显示行底插入线，**不**亮整行
+                                //（与内容列表排序手势一致——高亮 = 移入语义专属）。
+                                property <bool> tree-reorder-hover: DndApi.tree-hover-visit == row.visit
+                                    && DndApi.tree-hover-half == 1
+                                    && !DndApi.tree-hover-nest;
+                                // 整行高亮 = 「移入」语义专属（上半区嵌套 / 条目与外部
+                                // 文件拖入）；重排悬停时必须熄灭，否则排序落点看着像移入。
+                                property <bool> drag-hover: (treetop.has-drag || treebottom.has-drag)
+                                    && !tree-reorder-hover;
+                                property <bool> tree-line-bottom: tree-reorder-hover;
+                                // 行底：Finder 式圆角内缩色块（与内容列表同形状/同尺寸）。
+                                // 铺满行高 ⇒ 行上下相接无缝隙；未选中行交替底色
+                                // （偶数行留白 / 奇数行 c-row-bg 浅灰），与 Finder 列表一致。
+                                // 必须最先声明：沉在行内容与各命中层之下。
+                                Rectangle {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: parent.height;
+                                    border-radius: 6px;
+                                    background: drag-hover ? c-badge-bg
+                                        : (row.is-selected ? c-row-sel
+                                            : (Math.mod(index, 2) == 0
+                                                ? transparent : c-row-bg));
+                                }
+                                Rectangle {
+                                    x: 4px;
+                                    y: parent.height - 3px;
+                                    width: parent.width - 8px;
+                                    height: 3px;
+                                    background: c-accent;
+                                    visible: tree-line-bottom;
+                                }
+                                // 行级 TouchArea 必须先声明，否则会盖住展开箭头的点击区。
                                 // 分支级右键菜单：TouchArea 消费右键后手动 show()。
                                 // 分支右键菜单：与菜单栏「分支」同一批操作（右键即选中，
                                 // 见下方 TouchArea 的 pointer-event），仅额外保留两项
@@ -1575,74 +1848,153 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                TouchArea {
-                                    clicked => { root.row-click(index); }
-                                    double-clicked => { root.toggle-expand(index); }
-                                    // 右键即选中（Finder 语义）+ 在光标处弹菜单。
-                                    pointer-event(event) => {
-                                        if (event.button == PointerEventButton.right
-                                            && event.kind == PointerEventKind.up) {
-                                            root.select-visit(row.visit);
-                                            treectx.show({x: self.mouse-x, y: self.mouse-y});
-                                            // 必须接受事件：否则冒泡到 ContextMenuArea 会重复弹菜单，
-                                            // 两层菜单叠加导致菜单项点击失效。
-                                            return EventResult.accept;
+                                // 整行可拖拽（分支同级重排）；TouchArea 包在其中，
+                                // 点击 / 双击 / 右键语义不变（同内容列表 dragarea 模式）。
+                                branchdrag := DragArea {
+                                    data: DndApi.branch-to-transfer(row.visit);
+                                    allow-move: true;
+                                    changed dragging => {
+                                        DndApi.tree-src-visit = self.dragging ? row.visit : -1;
+                                    }
+                                    drag-finished(action) => { EntryApi.end-drop(); }
+                                    TouchArea {
+                                        clicked => { root.row-click(index); }
+                                        double-clicked => { root.toggle-expand(index); }
+                                        // 右键即选中（Finder 语义）+ 在光标处弹菜单。
+                                        pointer-event(event) => {
+                                            if (event.button == PointerEventButton.right
+                                                && event.kind == PointerEventKind.up) {
+                                                root.select-visit(row.visit);
+                                                treectx.show({x: self.mouse-x, y: self.mouse-y});
+                                                // 必须接受事件：否则冒泡到 ContextMenuArea 会重复弹菜单，
+                                                // 两层菜单叠加导致菜单项点击失效。
+                                                return EventResult.accept;
+                                            }
+                                            return EventResult.reject;
                                         }
-                                        return EventResult.reject;
                                     }
                                 }
-                                // 拖入条目 → 移动 payload/asset 到该分支；拖入外部文件 → 导入该分支。
-                                treedrop := DropArea {
+                                // 上半区：分支拖拽 = 插到该分支之前；条目 / 外部文件 = 移入该分支。
+                                treetop := DropArea {
+                                    y: 0;
+                                    height: 50%;
                                     can-drop(event) => {
                                         // 光标在树上：清空所有悬停指示（行 / 节点 / 边缘滚动，见 DndApi.clear-hover）。
                                         DndApi.clear-hover();
-                                        DndApi.transfer-to-entry(event.data) != "" || DndApi.transfer-has-files(event.data)
-                                            ? DragAction.move : DragAction.none;
+                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                            // 分支拖拽上半区 = 插入为该分支的**子分支**（可跨父级
+                                            // 结构移动）：指示 = 整行高亮（同内容「移入文件夹」）。
+                                            if (DndApi.tree-nest-ok(DndApi.tree-src-visit, row.visit)) {
+                                                DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-nest = true;
+                                                DragAction.move
+                                            } else {
+                                                DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-nest = false;
+                                                DragAction.none
+                                            }
+                                        } else if (DndApi.transfer-to-entry(event.data) != ""
+                                            || DndApi.transfer-has-files(event.data)) {
+                                            DragAction.move
+                                        } else {
+                                            DragAction.none
+                                        }
                                     }
                                     dropped(event) => {
-                                        root.entry-drop-to-branch(
-                                            DndApi.transfer-to-entry(event.data),
-                                            DndApi.transfer-to-files(event.data),
-                                            row.visit);
+                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                            // 落点参数取全局悬停状态（与指示符同源，同内容列表 drop-*）。
+                                            root.drop-branch-row(
+                                                DndApi.tree-src-visit,
+                                                DndApi.tree-hover-visit >= 0
+                                                    ? DndApi.tree-hover-visit : row.visit,
+                                                DndApi.tree-hover-nest);
+                                        } else {
+                                            root.entry-drop-to-branch(
+                                                DndApi.transfer-to-entry(event.data),
+                                                DndApi.transfer-to-files(event.data),
+                                                row.visit);
+                                        }
+                                        EntryApi.end-drop();
+                                        return event.proposed-action;
+                                    }
+                                }
+                                // 下半区：分支拖拽 = 同级排序（插到该分支之后）；条目 / 外部文件 = 移入该分支。
+                                treebottom := DropArea {
+                                    y: parent.height / 2;
+                                    height: parent.height / 2;
+                                    can-drop(event) => {
+                                        DndApi.clear-hover();
+                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                            // 分支拖拽下半区 = 同级排序（插到该分支之后）。
+                                            if (DndApi.tree-drop-ok(DndApi.tree-src-visit, row.visit, true)) {
+                                                DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-half = 1;
+                                                DndApi.tree-hover-nest = false;
+                                                DragAction.move
+                                            } else {
+                                                DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-nest = false;
+                                                DragAction.none
+                                            }
+                                        } else if (DndApi.transfer-to-entry(event.data) != ""
+                                            || DndApi.transfer-has-files(event.data)) {
+                                            DragAction.move
+                                        } else {
+                                            DragAction.none
+                                        }
+                                    }
+                                    dropped(event) => {
+                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                            root.drop-branch-row(
+                                                DndApi.tree-src-visit,
+                                                DndApi.tree-hover-visit >= 0
+                                                    ? DndApi.tree-hover-visit : row.visit,
+                                                DndApi.tree-hover-nest);
+                                        } else {
+                                            root.entry-drop-to-branch(
+                                                DndApi.transfer-to-entry(event.data),
+                                                DndApi.transfer-to-files(event.data),
+                                                row.visit);
+                                        }
                                         EntryApi.end-drop();
                                         return event.proposed-action;
                                     }
                                 }
                                 HorizontalLayout {
-                                    padding-left: 10px + row.depth * 20px;
+                                    // 行内容相对**整行**居中（铺满行高）；**仅全拉丁行**下移
+                                    // 1px 做光学居中（同内容列表：满高字形不需要补偿）。
+                                    // latin 由 Rust 建模型时算好，这里只读布尔值。
+                                    y: row.latin ? 1.5px : 0px;
+                                    height: 100%;
+                                    // 每级缩进 = 箭头列 10px + 行内间距 4px：子级箭头
+                                    // 与父级标题起始位置对齐。基础 8px = 色块内缩 4px +
+                                    // 箭头自身留白 4px —— 箭头必须落在色块内部。
+                                    padding-left: 8px + row.depth * 14px;
                                     padding-right: 10px;
+                                    // 同内容列表：箭头左右留白（相对色块左缘）对称。
                                     spacing: 4px;
-                                    Rectangle {
-                                        width: 16px;
-                                        visible: row.has-children;
-                                        Text {
-                                            text: row.expanded ? "▼" : "▶";
-                                            font-size: 9px;
-                                            color: c-sub;
-                                            vertical-alignment: center;
-                                            horizontal-alignment: center;
-                                            width: parent.width;
-                                            height: parent.height;
-                                        }
-                                        TouchArea {
-                                            clicked => { root.toggle-expand(index); }
-                                        }
+                                    RowChevron {
+                                        expandable: row.has-children;
+                                        expanded: row.expanded;
+                                        fg: row.is-selected ? c-on-accent : c-sub;
+                                        clicked => { root.toggle-expand(index); }
                                     }
-                                    Rectangle { width: 4px; visible: !row.has-children; }
                                     Text {
                                         text: row.title;
                                         vertical-alignment: center;
                                         overflow: elide;
                                         font-weight: row.is-selected ? 600 : 400;
-                                        color: row.is-selected ? c-sel-text : c-text;
+                                        color: row.is-selected ? c-on-accent : c-text;
                                         horizontal-stretch: 0;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                     Text {
                                         text: row.type-str;
                                         vertical-alignment: center;
-                                        font-size: 11px;
-                                        color: c-sub;
+                                        // 与标题同字号（Finder 各列同字号，只以颜色分层）；
+                                        // 选中时副列是**白 70%**，不是纯白（同内容列表）。
+                                        color: row.is-selected
+                                            ? c-on-accent.transparentize(0.3) : c-sub;
                                         overflow: elide;
                                     }
                                 }
@@ -1803,6 +2155,29 @@ export component AppWindow inherits Window {
                             root.center-canvas(self.width / 1px, self.height / 1px);
                         }
 
+                        // 视口级空白点击层（Flickable 的第一个子元素 ⇒ 沉在最底层）。
+                        // 画布元素被 scale-factor 缩放，它只在自己「世界坐标 × zoom」覆盖到
+                        // 的范围内接得住点击：缩小后视口四周会露出一圈没有任何点击层的
+                        // 空白，点它什么都不发生（表现为「点空白无法移除激活状态」）。
+                        // 这一层用 -content-x/-content-y 抵消滚动、尺寸取视口与内容的大者，
+                        // 因此**永远贴合视口**，兜住所有没被连线/节点/面板接走的点击。
+                        TouchArea {
+                            x: -flick.content-x;
+                            y: -flick.content-y;
+                            width: max(root.mind-canvas-w * root.mind-zoom, flick.width);
+                            height: max(root.mind-canvas-h * root.mind-zoom, flick.height);
+                            clicked => { root.clear-activation(); }
+                            // 与画布层同款兜底：任何按下都结束「拖拽悬停」态，
+                            // 避免上一次拖拽残留的 mind-drag 让平移窜出意外滚动。
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    DndApi.mind-drag = false;
+                                    DndApi.mind-pos-x = -1px;
+                                    DndApi.mind-pos-y = -1px;
+                                }
+                            }
+                        }
+
                         // 缩放容器：所有画布内容（空白层 / 连线 / 节点）都在其中，
                         // scale-factor 统一缩放（transform-origin 左上角，与滚动换算一致）。
                         Rectangle {
@@ -1931,7 +2306,10 @@ export component AppWindow inherits Window {
                                 width: 100%;
                                 height: 100%;
                                 property <bool> node-hover: DndApi.hover-node == node.visit;
-                                background: node.is-root ? c-root-bg : c-panel;
+                                // 根节点不再用专用底色（曾是淡/深靛蓝填充，观感与其它节点
+                                // 不一致、像卡在选中/悬停态）：统一面板色，靠 root 徽标 +
+                                // 加粗标题 + 最左位置区分。
+                                background: c-panel;
                                 border-radius: 8px;
                                 // 边框由最上层覆盖层绘制（见节点末尾），避免内容
                                 // 行的激活背景盖住边框线。
@@ -2090,17 +2468,38 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                // 整节点手势（先声明在底层）：点击选中，双击伸缩子树，右键弹菜单。
+                                // 节点手势（先声明在底层）：点标题行选中、双击伸缩子树、右键弹菜单。
+                                // 左键**只把标题行当节点**：卡片其余部分（内容面板留白、底部伸缩
+                                // 箭头带、节点底色）在视觉上就是空白 ⇒ 取消分支激活（与画布空白、
+                                // 节点内面板空白同一语义）。旧版整张卡片都 select-visit，于是
+                                // 「点卡片空白」会把刚取消的激活又设回去 —— 表现为「分支激活态
+                                // 无法移除」。这里**显式**处理空白，不靠 reject 透传到底层空白层：
+                                // 能否透传取决于兄弟元素的命中顺序，实测在可缩放的画布上并不稳。
                                 TouchArea {
-                                    clicked => { root.select-visit(node.visit); }
-                                    double-clicked => { root.toggle-visit-expand(node.visit); }
+                                    // 双击伸缩子树同样只认标题行：卡片空白上的双击
+                                    // 语义是「取消激活」，不该顺带折叠子树。
+                                    double-clicked => {
+                                        if (self.mouse-y <= root.node-title-h) {
+                                            root.toggle-visit-expand(node.visit);
+                                        }
+                                    }
                                     pointer-event(event) => {
                                         if (event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.up) {
-                                            // 右键即选中（Finder 语义）：菜单操作作用于
-                                            // 右键的节点，而非之前激活的分支。
+                                            // 右键整张卡片都算：右键即选中（Finder 语义），
+                                            // 菜单操作作用于右键的节点而非之前激活的分支。
                                             root.select-visit(node.visit);
                                             nodectx.show({x: self.mouse-x, y: self.mouse-y});
+                                            return EventResult.accept;
+                                        }
+                                        if (event.button == PointerEventButton.left
+                                            && event.kind == PointerEventKind.up) {
+                                            // 左键：标题行内 = 选中该节点；其余 = 取消激活。
+                                            if (self.mouse-y <= root.node-title-h) {
+                                                root.select-visit(node.visit);
+                                            } else {
+                                                root.clear-activation();
+                                            }
                                             return EventResult.accept;
                                         }
                                         return EventResult.reject;
@@ -2109,9 +2508,9 @@ export component AppWindow inherits Window {
 
                                 VerticalLayout {
                                     spacing: 0px;
-                                    // 标题行（高度与 Rust NODE_H 一致）。
+                                    // 标题行（高度与 Rust NODE_H 一致，且是节点手势的命中高度）。
                                     HorizontalLayout {
-                                        height: 28px;
+                                        height: root.node-title-h;
                                         padding-left: 8px;
                                         padding-right: 8px;
                                         spacing: 4px;
@@ -2146,10 +2545,15 @@ export component AppWindow inherits Window {
                                         selected-index: node.is-selected ? root.entry-selected : -1;
                                         col-text: c-text;
                                         col-sub: c-sub;
-                                        col-sel: c-sel;
+                                        col-sel: c-row-sel;
+                                        col-row-bg: c-row-bg;
+                                        col-on-sel: c-on-accent;
+                                        col-drag-bg: c-drag-bg;
                                         col-badge: c-badge-bg;
-                                        col-hover: c-hover;
                                         col-accent: c-accent;
+                                        // 节点内嵌面板：点空白 = 取消分支激活
+                                        // （与画布空白同一语义，否则「点空白没反应」）。
+                                        blank-clicked => { root.clear-activation(); }
                                     }
 
                                 }
@@ -2448,10 +2852,18 @@ export component AppWindow inherits Window {
                             selected-index: root.entry-selected;
                             col-text: c-text;
                             col-sub: c-sub;
-                            col-sel: c-sel;
+                            col-sel: c-row-sel;
+                            col-row-bg: c-row-bg;
+                            col-on-sel: c-on-accent;
+                            col-drag-bg: c-drag-bg;
                             col-badge: c-badge-bg;
-                            col-hover: c-hover;
                             col-accent: c-accent;
+                            // 列表视图：点空白只清内容选区，当前分支仍是激活分支
+                            // （Finder 语义：点文件列表空白不会退出当前文件夹）。
+                            blank-clicked => {
+                                EntryApi.activate-visit(DndApi.src-visit);
+                                EntryApi.clear-selection();
+                            }
                         }
 
 
