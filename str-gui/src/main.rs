@@ -11,7 +11,7 @@
 // 若 release 下也需要日志，应改写为落文件（`eprintln!` 在 GUI 子系统下无处可去）。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -2242,6 +2242,7 @@ fn shortcut_table(mac: bool) -> Vec<Shortcut> {
         format!("{m}C / {m}X / {m}V"),
     );
     push(&mut out, "编辑", "制作副本", format!("{m}D"));
+    push(&mut out, "编辑", "快速查看（系统预览，仅 macOS）", "空格".into());
     push(&mut out, "编辑", "删除条目", format!("{m}{del}"));
     push(&mut out, "编辑", "保存条目修改", format!("{m}S"));
 
@@ -2331,6 +2332,16 @@ struct VisibleEntry {
     size: Option<i64>,
     /// 顶层条目的 title（文件夹子行无）。
     title: Option<String>,
+}
+
+/// 当前选中行在可视行里的下标（无选中 = None）。
+fn selected_row_index(app: &AppWindow) -> Option<usize> {
+    let idx = app.get_entry_selected();
+    if idx < 0 {
+        None
+    } else {
+        Some(idx as usize)
+    }
 }
 
 /// 构建当前选中分支的可见内容行。
@@ -4047,11 +4058,226 @@ fn debug_on() -> bool {
 #[cfg(target_os = "macos")]
 fn native_toggle_shift() -> (bool, bool) {
     use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+    // 注意：不要在这里调 CGEventSourceFlagsState —— 在 AppKit 事件分发回调内
+    // 调它会拿不到锁、把整个事件循环卡死（真机实测：普通按键都失去响应）。
     let flags = NSEvent::modifierFlags_class();
     (
         flags.contains(NSEventModifierFlags::Command),
         flags.contains(NSEventModifierFlags::Shift),
     )
+}
+
+// ── macOS 快速查看（Quick Look）：空格键调起系统预览面板 ──
+//
+// Finder 语义：选中一个或多个内容条目后按空格，弹出系统 `QLPreviewPanel`
+// （多条目可在面板内左右切换，Esc 关闭）。走系统面板而非自绘预览窗，是为了
+// 复用系统已注册的 Quick Look 扩展（图片 / PDF / 音视频 / 代码 / Office…），
+// 观感也与 Finder 一致。
+//
+// 三个必须遵守的约定：
+//   1. 面板的 `dataSource` 是弱引用 ⇒ Rust 侧必须强持有，否则回调落到已释放对象；
+//   2. 每个预览项是独立的 `QLItem`（实现 QLPreviewItem 的 `previewItemURL`）——
+//      不能让数据源既当数据源又当条目（index 无处携带）；
+//   3. 只认 file:// NSURL，路径必须是绝对路径。
+#[cfg(target_os = "macos")]
+mod quicklook {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, NSObject};
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+    use objc2_foundation::{NSString, NSURL};
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    // QLPreviewPanel 位于 QuickLookUI.framework（Quartz 伞框架的子框架）。
+    #[link(name = "QuickLookUI", kind = "framework")]
+    extern "C" {}
+
+    /// 一个预览项：QLPreviewItem 协议唯一必需的方法 `previewItemURL`。
+    #[derive(Clone)]
+    struct ItemIvars {
+        url: Retained<NSURL>,
+    }
+
+    define_class!(
+        // SAFETY: 父类 NSObject 无子类化约束；本类不实现 Drop。
+        #[unsafe(super(NSObject))]
+        #[name = "StrQuickLookItem"]
+        #[ivars = ItemIvars]
+        struct QLItem;
+
+        impl QLItem {
+            #[unsafe(method_id(previewItemURL))]
+            fn preview_item_url(&self) -> Retained<NSURL> {
+                self.ivars().url.clone()
+            }
+        }
+    );
+
+    impl QLItem {
+        fn new(path: &PathBuf) -> Retained<Self> {
+            let name = NSString::from_str(&path.to_string_lossy());
+            let this = Self::alloc().set_ivars(ItemIvars {
+                url: NSURL::fileURLWithPath(&name),
+            });
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// 面板数据源：QLPreviewPanelDataSource + delegate 的控制权方法。
+    #[derive(Clone)]
+    struct SourceIvars {
+        items: Vec<Retained<QLItem>>,
+    }
+
+    define_class!(
+        // SAFETY: 同上。全部方法只被 AppKit 在主线程调用。
+        #[unsafe(super(NSObject))]
+        #[name = "StrQuickLookSource"]
+        #[ivars = SourceIvars]
+        struct QLSource;
+
+        impl QLSource {
+            #[unsafe(method(numberOfPreviewItemsInPreviewPanel:))]
+            fn number_of_items(&self, _panel: &AnyObject) -> isize {
+                self.ivars().items.len() as isize
+            }
+
+            #[unsafe(method_id(previewPanel:previewItemAtIndex:))]
+            fn item_at(&self, _panel: &AnyObject, index: isize) -> Option<Retained<QLItem>> {
+                self.ivars().items.get(index as usize).cloned()
+            }
+
+            // 显式接管面板控制权：否则系统会沿 responder 链另找数据源，面板可能空白。
+            #[unsafe(method(acceptsPreviewPanelControl:))]
+            fn accepts_control(&self, _panel: &AnyObject) -> bool {
+                true
+            }
+
+            #[unsafe(method(beginPreviewPanelControl:))]
+            fn begin_control(&self, panel: &AnyObject) {
+                unsafe {
+                    let _: () = msg_send![panel, setDataSource: self];
+                    let _: () = msg_send![panel, setDelegate: self];
+                    let _: () = msg_send![panel, reloadData];
+                }
+            }
+
+            #[unsafe(method(endPreviewPanelControl:))]
+            fn end_control(&self, panel: &AnyObject) {
+                unsafe {
+                    let _: () = msg_send![panel, setDataSource: Option::<&AnyObject>::None];
+                }
+            }
+        }
+    );
+
+    impl QLSource {
+        fn new(items: Vec<Retained<QLItem>>) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(SourceIvars { items });
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    thread_local! {
+        /// 面板只弱引用数据源 ⇒ Rust 侧强持有（见模块注释约定 1）。
+        static SOURCE: RefCell<Option<Retained<QLSource>>> = const { RefCell::new(None) };
+    }
+
+    /// 打开（或**就地更新**）预览面板：已可见时只换数据源与当前项，不重复弹窗。
+    ///
+    /// 用 `orderFront:` 而不是 `makeKeyAndOrderFront:`——后者会让面板成为 key
+    /// window，应用的方向键随即被它吃掉（用它翻页），而本应用要求**预览期间
+    /// 方向键仍然归内容列表**（↑↓ 移动选中、→← 展开收起）。不抢 key 的代价是
+    /// 面板自己收不到 Esc / 空格，这两者改由应用接（Finder 的空格切换语义）。
+    pub(super) fn show(paths: &[PathBuf]) -> Result<(), String> {
+        let Some(_mtm) = objc2::MainThreadMarker::new() else {
+            return Err("不在主线程".into());
+        };
+        let Some(cls) = AnyClass::get(c"QLPreviewPanel") else {
+            return Err("系统 Quick Look 不可用".into());
+        };
+        if paths.is_empty() {
+            return Err("没有可预览的条目".into());
+        }
+        let items: Vec<Retained<QLItem>> = paths.iter().map(QLItem::new).collect();
+        let source = QLSource::new(items);
+        SOURCE.with(|c| *c.borrow_mut() = Some(source.clone()));
+        let Some(panel): Option<Retained<AnyObject>> =
+            (unsafe { msg_send![cls, sharedPreviewPanel] })
+        else {
+            return Err("无法创建 Quick Look 面板".into());
+        };
+        unsafe {
+            let _: () = msg_send![&panel, setDataSource: &*source];
+            let _: () = msg_send![&panel, setDelegate: &*source];
+            // NSPanel：只在需要时才成为 key。QLPreviewPanel 在应用激活时会自动
+            // becomeKey 抢走键盘 —— 预览期间方向键必须归内容列表，故关掉这条路径。
+            if let Some(nspanel) = AnyClass::get(c"NSPanel") {
+                let is_panel: bool = msg_send![&panel, isKindOfClass: nspanel];
+                if is_panel {
+                    let _: () = msg_send![&panel, setBecomesKeyOnlyIfNeeded: true];
+                }
+            }
+            // reloadData / 定位项必须在面板**显示之后**：显示前调用
+            // `setCurrentPreviewItemIndex` 实测会让面板整个不出现（真机复现：
+            // 状态栏报成功、屏幕无面板）。
+            let visible: bool = msg_send![&panel, isVisible];
+            if !visible {
+                let _: () = msg_send![&panel, orderFront: Option::<&AnyObject>::None];
+            }
+            let _: () = msg_send![&panel, reloadData];
+            let _: () = msg_send![&panel, setCurrentPreviewItemIndex: 0isize];
+            // 把 key window 还给应用主窗口（面板仍在最前，只是不持有键盘）。
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                restore_key_window(mtm);
+            }
+        }
+        Ok(())
+    }
+
+    /// 把 key window 还给应用主窗口（`QLPreviewPanel` 之外的第一个可见窗口）。
+    unsafe fn restore_key_window(mtm: objc2::MainThreadMarker) {
+        use objc2::runtime::NSObjectProtocol as _;
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        let ql = AnyClass::get(c"QLPreviewPanel");
+        for w in app.windows().iter() {
+            if let Some(ql) = ql {
+                if w.isKindOfClass(ql) {
+                    continue;
+                }
+            }
+            if w.isVisible() {
+                let _: () = msg_send![&w, makeKeyAndOrderFront: Option::<&AnyObject>::None];
+                return;
+            }
+        }
+    }
+
+    /// 关闭预览面板。
+    pub(super) fn close() {
+        let Some(cls) = AnyClass::get(c"QLPreviewPanel") else {
+            return;
+        };
+        let Some(panel): Option<Retained<AnyObject>> =
+            (unsafe { msg_send![cls, sharedPreviewPanel] })
+        else {
+            return;
+        };
+        unsafe {
+            let _: () = msg_send![&panel, orderOut: Option::<&AnyObject>::None];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod quicklook {
+    use std::path::PathBuf;
+
+    pub(super) fn show(_paths: &[PathBuf]) -> Result<(), String> {
+        Err("快速查看仅支持 macOS（系统 Quick Look 面板）。".into())
+    }
+
+    pub(super) fn close() {}
 }
 
 // ── 应用配置：最近打开的 bundle + 欢迎引导标记 ──
@@ -4586,6 +4812,39 @@ fn main() -> Result<(), slint::PlatformError> {
 
         // 内容尺寸变化时 slint 侧会经 flick 的 changed width 触发 center-canvas 居中。
         sync_selected_detail(app, e);
+    }
+
+    /// 预览跟随：面板开着时，把选中项（主选中）喂给预览。面板是 `orderFront`
+    /// 显示的（不抢 key），方向键始终归列表 —— 选中变、预览跟着变。
+    fn sync_quick_look_preview(app: &AppWindow, e: &Editor) {
+        if !app.global::<EntryApi>().get_quick_look_open() {
+            return;
+        }
+        let target = e
+            .selected_visit()
+            .map(|v| v.dir.clone())
+            .and_then(|dir| e.selected_entry_path.as_ref().map(|p| dir.join(p)));
+        if let Some(p) = target {
+            let _ = quicklook::show(&[p]);
+        }
+    }
+
+    /// 按行号选中内容条目（**单选 = 单元素选区**，Finder 语义：与多选同一集合、
+    /// 同一高亮）。方向键移动选中、快速查看面板翻页同步选中都走这里。
+    fn select_entry_index(app: &AppWindow, e: &mut Editor, index: usize) {
+        e.entry_multi.clear();
+        e.entry_anchor = Some(index);
+        let path = build_entry_rows(e).get(index).map(|v| v.path.clone());
+        if let Some(p) = &path {
+            e.entry_multi.insert(p.clone());
+        }
+        app.global::<EntryApi>()
+            .set_multi_count(e.entry_multi.len() as i32);
+        e.selected_entry_path = path;
+        // 重建条目模型：让 in-multi 高亮（单元素选区）与选中态一致。
+        sync_detail(app, e);
+        app.set_info_tab(1);
+        sync_quick_look_preview(app, e);
     }
 
     /// 选中分支 → 信息侧栏表单（与视图无关：列表 / 导图两种视图都要维护）。
@@ -5653,21 +5912,82 @@ fn main() -> Result<(), slint::PlatformError> {
         app.global::<EntryApi>().on_select_entry(move |index| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            // 单选 = 单元素选区（Finder 语义）：与多选同一集合、同一高亮。
-            e.entry_multi.clear();
-            e.entry_anchor = Some(index as usize);
-            let path = build_entry_rows(&e)
-                .get(index as usize)
-                .map(|v| v.path.clone());
-            if let Some(p) = &path {
-                e.entry_multi.insert(p.clone());
+            select_entry_index(&app, &mut e, index as usize);
+        });
+    }
+    {
+        // ↑↓ 移动选中（Finder 语义：边界夹紧，无选中时从第一行起）；
+        // **Shift+↑↓ = 以锚点为基准的范围选区**（与鼠标 Shift+点击同一锚点，
+        // 锚点不动：Shift+↓ 延伸、Shift+↑ 收回，越过锚点后反向延伸）。
+        // Shift 标志 = Slint 事件 modifiers ∥ NSEvent 系统真值（native_toggle_shift）：
+        // 前者在部分环境/合成事件下不填充，后者对真实键盘可靠，取或最稳。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_step(move |delta, shift_flag| {
+            let app = app_weak.upgrade().unwrap();
+            let (native_shift, _cmd) = native_toggle_shift();
+            let shift_down = shift_flag || native_shift;
+            let mut e = editor.borrow_mut();
+            let rows = build_entry_rows(&e);
+            if rows.is_empty() {
+                return;
             }
-            app.global::<EntryApi>()
-                .set_multi_count(e.entry_multi.len() as i32);
-            e.selected_entry_path = path;
-            // 重建条目模型：让 in-multi 高亮（单元素选区）与选中态一致。
-            sync_detail(&app, &e);
-            app.set_info_tab(1);
+            if shift_down {
+                let cur = e
+                    .selected_entry_path
+                    .as_ref()
+                    .and_then(|p| rows.iter().position(|r| &r.path == p))
+                    .unwrap_or_else(|| selected_row_index(&app).unwrap_or(0));
+                let anchor = e.entry_anchor.unwrap_or(cur);
+                let new = (cur as i32 + delta).clamp(0, rows.len() as i32 - 1) as usize;
+                let (lo, hi) = (anchor.min(new), anchor.max(new));
+                e.entry_multi.clear();
+                for r in &rows[lo..=hi] {
+                    e.entry_multi.insert(r.path.clone());
+                }
+                e.selected_entry_path = Some(rows[new].path.clone());
+                // 锚点保持不动（下一次延伸的基准）。
+                app.global::<EntryApi>()
+                    .set_multi_count(e.entry_multi.len() as i32);
+                sync_detail(&app, &e);
+                app.set_info_tab(1);
+                sync_quick_look_preview(&app, &e);
+            } else {
+                let next = match selected_row_index(&app) {
+                    None => 0,
+                    Some(cur) => (cur as i32 + delta).clamp(0, rows.len() as i32 - 1) as usize,
+                };
+                select_entry_index(&app, &mut e, next);
+            }
+        });
+    }
+    {
+        // ← 在非展开行上 = 选中父目录行（Finder 语义）；已展开的文件夹由
+        // Slint 侧先收起（toggle-dir），走不到这里。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.global::<EntryApi>().on_entry_select_parent(move || {
+            let app = app_weak.upgrade().unwrap();
+            let mut e = editor.borrow_mut();
+            let rows = build_entry_rows(&e);
+            let Some(cur) = selected_row_index(&app) else {
+                return;
+            };
+            if cur == 0 || cur >= rows.len() {
+                return;
+            }
+            let depth = rows[cur].depth;
+            let mut i = cur - 1;
+            loop {
+                if rows[i].depth < depth {
+                    break;
+                }
+                if i == 0 {
+                    return; // 已在顶层且上方无更浅的行：不动
+                }
+                i -= 1;
+            }
+            select_entry_index(&app, &mut e, i);
         });
     }
     {
@@ -6675,6 +6995,116 @@ fn main() -> Result<(), slint::PlatformError> {
                     format!("已用默认应用打开「{}」→ 分支「{title}」。", targets[0]).into()
                 },
             );
+        });
+    }
+    // 快速查看是否开着。面板**不抢 key window**（见 quicklook 模块），方向键
+    // 始终归内容列表；开 / 关与 Esc 都由应用这边驱动。
+    let quicklook_open: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // 本地键盘监视器：面板虽不 makeKey，但 QLPreviewPanel 在应用激活时会自动
+    // 成为 key window、把方向键吃掉（拿去翻页）。预览开着时只拦 **↑↓ / 空格 /
+    // Esc** —— ↑↓ 转交 Slint 窗口（列表移动选中，面板实时跟着换预览），
+    // **←→ 留给预览面板翻页**（不占用它的左右键），其余按键照常放行。
+    let _ql_monitor: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = unsafe {
+        let app_weak = app.as_weak();
+        let open = quicklook_open.clone();
+        let block = block2::RcBlock::new(
+            move |evt: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
+                if !open.get() {
+                    return evt.as_ptr();
+                }
+                let e = evt.as_ref();
+                const LEFT: u16 = 123;
+                const RIGHT: u16 = 124;
+                const DOWN: u16 = 125;
+                const UP: u16 = 126;
+                const SPACE: u16 = 49;
+                const ESC: u16 = 53;
+                let code = e.keyCode();
+                if !matches!(code, LEFT | RIGHT | DOWN | UP | SPACE | ESC) {
+                    return evt.as_ptr();
+                }
+                // ←→ 的归属看多选状态：多选预览时归面板翻页（放行）；
+                // 单选预览时仍归列表（→ 展开 / ← 收起跳父），照常转交 Slint。
+                let Some(app) = app_weak.upgrade() else {
+                    return evt.as_ptr();
+                };
+                let multi = app.global::<EntryApi>().get_multi_count() > 1;
+                if multi && matches!(code, LEFT | RIGHT) {
+                    return evt.as_ptr();
+                }
+                let text = e.characters().map(|s| s.to_string()).unwrap_or_default();
+                app.window()
+                    .dispatch_event(slint::platform::WindowEvent::KeyPressed {
+                        text: text.into(),
+                    });
+                // 已转交 Slint：返回 nil，事件不再分发给面板（不翻页）。
+                std::ptr::null_mut()
+            },
+        );
+        objc2_app_kit::NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            objc2_app_kit::NSEventMask::KeyDown,
+            &block,
+        )
+    };
+    {
+        // 快速查看（空格键 / 右键菜单「快速查看」）：macOS 系统 QLPreviewPanel。
+        // **预览集 = 选区本身**（Finder 严格语义）：单选 1 项、多选这几项。
+        // 面板打开期间方向键照常作用于列表，选中走到哪条就预览哪条（见
+        // `select_entry_index` 末尾的跟随）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        let open = quicklook_open.clone();
+        app.global::<EntryApi>().on_entry_quick_look(move || {
+            let app = app_weak.upgrade().unwrap();
+            if open.get() {
+                // 再按一次空格 = 关闭（Finder 的切换语义）。
+                open.set(false);
+                app.global::<EntryApi>().set_quick_look_open(false);
+                quicklook::close();
+                show_status(&app, "已关闭快速查看。".into());
+                return;
+            }
+            let (dir, rels) = {
+                let e = editor.borrow();
+                let Some(visit) = action_visit(&app, &e) else {
+                    show_status(&app, "请先选择一个分支。".into());
+                    return;
+                };
+                (visit.dir.clone(), menu_targets(&app))
+            };
+            if rels.is_empty() {
+                show_status(&app, "请先选择一个条目。".into());
+                return;
+            }
+            let n = rels.len();
+            let full: Vec<std::path::PathBuf> = rels.iter().map(|p| dir.join(p)).collect();
+            match quicklook::show(&full) {
+                Ok(()) => {
+                    open.set(true);
+                    app.global::<EntryApi>().set_quick_look_open(true);
+                    show_status(
+                        &app,
+                        if n > 1 {
+                            format!("已打开快速查看（{n} 项）：{}。", name_list(&rels)).into()
+                        } else {
+                            format!("已打开快速查看：「{}」。", rels[0]).into()
+                        },
+                    );
+                }
+                Err(msg) => show_status(&app, format!("快速查看失败：{msg}").into()),
+            }
+        });
+    }
+    {
+        // Esc 关闭预览：面板不抢 key，Esc 由列表 FocusScope 接住后转到这里。
+        let app_weak = app.as_weak();
+        let open = quicklook_open.clone();
+        app.global::<EntryApi>().on_entry_quick_look_close(move || {
+            let app = app_weak.upgrade().unwrap();
+            open.set(false);
+            app.global::<EntryApi>().set_quick_look_open(false);
+            quicklook::close();
+            show_status(&app, "已关闭快速查看。".into());
         });
     }
     {

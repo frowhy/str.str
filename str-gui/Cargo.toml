@@ -1,6 +1,6 @@
 [package]
 name = "str-gui"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.92"
 description = "STR 结构化树资源（.str）bundle 的 GUI 编辑器（Rust + Slint）"
@@ -35,7 +35,12 @@ slint-build = { path = "vendor/slint/api/rs/build" }
 # NSAppearance。版本号刻意与依赖树中的现有版本一致，避免引入第二份 objc2。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# 事件监视器（NSEvent addLocalMonitor）的 block 构造用；版本与依赖树一致。
+block2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSAppearance", "NSApplication", "NSWindow", "NSEvent"] }
+# 快速查看（Quick Look）：构造 file:// NSURL 交给 QLPreviewPanel。
+# 版本刻意与依赖树中已有的 objc2-foundation 一致，避免引入第二份。
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL"] }
 
 # macOS 拖放补丁：winit 0.30.x 未实现 draggingUpdated:（返回 YES 才允许落下），
 # 也不在拖拽悬停时上报光标位置，而本 GUI 的树形/行内拖放依赖二者。

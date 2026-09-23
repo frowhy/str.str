@@ -156,6 +156,15 @@ export global EntryApi {
     // 「当前生效选区」解析结果，相对路径 \n 分隔，由 Rust 在每次选中状态
     // 变化时刷新）——彻底消除行号空间错位 / 右键时序导致的作用域漂移。
     callback entry-open();
+    // 快速查看：macOS 系统 Quick Look 面板（空格键，Finder 语义）。
+    callback entry-quick-look();
+    // 方向键（Finder 列表语义）：delta = -1/1 上下移动选中；shift = 范围多选；
+    // ← 跳父目录行。
+    callback entry-step(int, bool);
+    callback entry-select-parent();
+    // 快速查看面板是否开着：面板不抢 key window，方向键始终归列表，Esc 由列表接管。
+    in-out property <bool> quick-look-open;
+    callback entry-quick-look-close();
     callback entry-reveal();
     callback entry-copy-path();
     callback entry-reveal-terminal();
@@ -541,6 +550,61 @@ component EntryListPanel inherits Rectangle {
             }
         }
     }
+    // 空格键 = 快速查看（Finder 语义）：点击列表行后焦点落在本 FocusScope，
+    // 按空格触发预览；焦点在右侧栏输入框时，空格由输入框消费、不误触发。
+    // 不能绑成菜单快捷键 @keys(Space)：macOS 菜单 keyEquivalent 会抢在文本输入
+    // 之前拦截空格（英文输入法下实测误弹预览，见「快速查看」菜单项处的注释）。
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        // 行点击处显式聚焦本 FocusScope（`keys.focus()`）：Slint 的 focus-on-click
+        // 只在点击事件**到达 FocusScope 自身**时生效（input_items.rs:669-685），
+        // 而行 TouchArea / DragArea 会把点击消费掉 —— 不显式聚焦就永远收不到空格。
+        key-pressed(event) => {
+            // Esc 关闭快速查看（面板不抢 key，故按键由本面板接住）。
+            if (event.text == Key.Escape && EntryApi.quick-look-open) {
+                EntryApi.entry-quick-look-close();
+                return EventResult.accept;
+            }
+            // 方向键 = Finder 列表语义：↑↓ 移动选中、→ 展开、← 收起 / 跳父级。
+            // 预览打开时同样走这里 —— 面板用 orderFront 显示（不成为 key window），
+            // 不会截走这些按键。
+            if (event.text == Key.UpArrow) {
+                EntryApi.entry-step(-1, event.modifiers.shift);
+                return EventResult.accept;
+            }
+            if (event.text == Key.DownArrow) {
+                EntryApi.entry-step(1, event.modifiers.shift);
+                return EventResult.accept;
+            }
+            if (event.text == Key.RightArrow) {
+                if (root.selected-index >= 0 && root.selected-index < entries.length
+                    && entries[root.selected-index].is-dir
+                    && !entries[root.selected-index].expanded) {
+                    EntryApi.toggle-dir(root.selected-index);
+                    // 行数变化会整体替换条目模型并重建组件（FocusScope 随之销毁），
+                    // 必须重新聚焦，否则后续方向键全部失效。
+                    keys.focus();
+                }
+                return EventResult.accept;
+            }
+            if (event.text == Key.LeftArrow) {
+                if (root.selected-index >= 0 && root.selected-index < entries.length
+                    && entries[root.selected-index].is-dir
+                    && entries[root.selected-index].expanded) {
+                    EntryApi.toggle-dir(root.selected-index);
+                    keys.focus();
+                } else {
+                    EntryApi.entry-select-parent();
+                }
+                return EventResult.accept;
+            }
+            if (event.text == " ") {
+                EntryApi.entry-quick-look();
+                return EventResult.accept;
+            }
+            return EventResult.reject;
+        }
     // 空白处点击（TouchArea 消费所有按键，因此右键也在这里处理：取消选中 + 手动弹
     // 分支菜单）。语义交给调用方：列表视图 = 只清内容选区（当前分支仍是激活分支）；
     // 导图节点内嵌面板 = 取消分支激活（与画布空白一致）。
@@ -573,6 +637,27 @@ component EntryListPanel inherits Rectangle {
             // 节点内嵌时容器高度固定：禁止 ListView 隐式最小高度把末尾放置区推出裁剪区。
             min-height: 0px;
             vertical-stretch: 1;
+            // 选中行滚动到可见（Finder 语义：键盘移动选中也会滚进视口）。
+            // 行高固定 20px，与 Rust 侧 ENTRY_ROW_H 一致。
+            // `changed` 只接受本元素的属性，故用 sel 镜像面板的 selected-index。
+            property <int> sel: root.selected-index;
+            // 本版 Slint 的函数体不支持隐式局部变量，故把中间量写成属性。
+            property <length> sel-y: sel >= 0 ? sel * 20px : 0px;
+            property <length> view-top: -self.content-y;
+            property <length> view-h: self.height;
+            function ensure-visible(index: int) {
+                if (index < 0) {
+                    return;
+                }
+                if (sel-y < view-top) {
+                    self.content-y = -sel-y;
+                } else if (sel-y + 20px > view-top + view-h) {
+                    self.content-y = -(sel-y + 20px - view-h);
+                }
+            }
+            changed sel => {
+                self.ensure-visible(sel);
+            }
             for entry[index] in entries: Rectangle {
                 // 行高对标 Finder 列表视图（本机实测 40px @2x = 20pt；与 Rust 侧
                 // ENTRY_ROW_H 一致，导图节点高度按它计算）。
@@ -704,6 +789,12 @@ component EntryListPanel inherits Rectangle {
                             title: "打开";
                             activated => {
                                 EntryApi.entry-open();
+                            }
+                        }
+                        MenuItem {
+                            title: "快速查看";
+                            activated => {
+                                EntryApi.entry-quick-look();
                             }
                         }
                         MenuItem {
@@ -1003,6 +1094,9 @@ component EntryListPanel inherits Rectangle {
                             }
                             if (event.button == PointerEventButton.left
                                 && event.kind == PointerEventKind.up) {
+                                // 空格键快速查看的前提：点击后面板持有键盘焦点
+                                //（FocusScope 的 focus-on-click 收不到被行消费的点击）。
+                                keys.focus();
                                 // 修饰键决策统一收敛到 Rust 侧（entry-click）：
                                 // macOS 上 Slint 的键盘事件跟踪不可靠，由 NSEvent
                                 // 实时查询兜底；这里的 modifiers 只作非 macOS 提示值。
@@ -1124,6 +1218,7 @@ component EntryListPanel inherits Rectangle {
                 }
             }
         }
+    }
     }
 }
 
@@ -1520,6 +1615,14 @@ export component AppWindow inherits Window {
                 activated => { EntryApi.paste(); }
             }
             MenuSeparator { }
+            MenuItem {
+                title: "快速查看";
+                // 注意：这里**不能**绑 @keys(Space)——macOS 菜单 keyEquivalent 会
+                // 抢在文本输入之前拦截空格（英文输入法下实测误弹预览）。空格由
+                // EntryListPanel 的 FocusScope 捕获（见该处注释）。
+                enabled: root.entry-cmd-ok;
+                activated => { EntryApi.entry-quick-look(); }
+            }
             MenuItem {
                 title: "制作副本";
                 shortcut: @keys(Control + D);

@@ -28,6 +28,48 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
+## [Unreleased]
+
+规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.4.0
+
+### 新增
+
+- **空格键快速查看（gui 0.3.2 → 0.4.0）**：选中内容条目按空格调起 macOS 系统
+  Quick Look 预览面板（`QLPreviewPanel`，与 Finder 同款），目标是整个选区
+  （与「打开 / 在 Finder 中显示」走同一套 `menu-targets` 解析），多选时面板内
+  可左右切换，Esc / 再按空格关闭；已可见时再触发 = 关闭。实现要点：
+  通过 `objc2` 手写绑定 QuickLookUI（数据源 `QLPreviewPanelDataSource` +
+  每个条目一个实现 `previewItemURL` 的 `QLItem`；**面板对 dataSource 是弱引用，
+  Rust 侧必须强持有**），右键菜单与「编辑」菜单补「快速查看」入口，快捷键一览同步。
+  两个踩实的坑：① 空格**不能**绑成菜单快捷键 `@keys(Space)`——macOS 菜单
+  keyEquivalent 抢在文本输入之前拦截空格（英文输入法下真机实测误弹预览；
+  中文输入法下因空格被组词消费而测不出来）；② Slint `FocusScope` 的
+  `focus-on-click` 只在点击事件**到达 FocusScope 自身**时生效
+  （`input_items.rs`），行 TouchArea 会把点击消费掉——需在行点击处显式
+  `keys.focus()`，空格由面板 FocusScope 捕获，焦点在输入框时正常输入。
+
+- **Finder 式方向键 + 预览不抢键盘**（同 gui 0.4.0）：内容列表聚焦时 **↑↓ 移动
+  选中**（边界夹紧、选中行自动滚进视口），**Shift+↑↓ = 以锚点为基准的范围多选**
+  （锚点与鼠标 Shift+点击共用：Shift+↓ 延伸 / Shift+↑ 收回，越过锚点后反向延伸，
+  主选中跟随移动端），**→ 展开文件夹、← 收起 / 跳父目录行**；
+  **预览面板打开时上下键照常工作**——选中走到哪条面板就实时预览哪条。
+  Shift 检测取「Slint 事件 modifiers ∥ NSEvent 系统真值」之或（两者单独在部分
+  合成/时序场景下会漏报）。快速查看
+  保持 **预览集 = 选区本身**（单选 1 项、多选几项，Finder 严格语义）；**←→ 的归属
+  看多选状态**：多选预览时归面板翻页（在选区内切换，Finder 语义：翻页不改变列表
+  选中），**单选预览时仍归列表**（→ 展开 / ← 收起跳父，面板 1 项无翻页）；空格
+  切换开 / 关，Esc 关闭（均由列表 FocusScope 接管）。实现（终态）：
+  面板用 `orderFront` 显示（不 `makeKeyAndOrderFront`）+ `setBecomesKeyOnlyIfNeeded(true)` +
+  显示后把 key window 还给主窗口，**再配 NSEvent 本地 monitor** —— QLPreviewPanel
+  在应用激活时会自动 becomeKey 把键盘吃掉，monitor 在预览开着时只拦 **↑↓ / 空格 /
+  Esc**、以 `WindowEvent::KeyPressed` 直接转交 Slint（单一分发入口仍是列表
+  FocusScope），**←→ 仅在多选预览时放行给面板翻页**（单选时照常转交列表），其余
+  按键放行。其余坑：`setCurrentPreviewItemIndex`
+  必须在面板显示**之后**调用（显示前调用实测面板整个不出现）；展开 / 收起改变行数
+  → 条目模型整体替换、FocusScope 销毁 → 方向键失效，toggle 后须重新 `keys.focus()`；
+  本版 Slint 的 `changed` 回调不支持跨元素路径与函数内隐式局部变量（滚动逻辑用
+  「镜像属性 + 元素 function」实现）。
+
 ## [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) — 2026-09-23
 
 规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.3.2
