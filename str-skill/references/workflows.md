@@ -185,3 +185,59 @@ $S sync <B> && $S validate <B> --strict   # 仍报错：sync 不会替你洗白
 | 出现业务点文件/目录 | `W_DOTFILE` / `E_RESERVED_NAME` | `._` 是格式保留命名空间，业务内容改名 |
 | `fmt` 说需要规范化 | — | `$S fmt <B>`；顺序由写命令与 `fmt` 共同收口 |
 | 想用 `--out` / `--ascii` / `--recursive` / `--id-version` | — | **都已支持**，见 `cli-reference.md` §3 |
+
+## 配方 10 · 定位取数协议（`find` / `grep` / `where` / `get`）
+
+面向 AI 的取数主路径：**定位 → 确认 → 精读**，全部只读（不推进 `revision`、不写 `._meta`）。
+范围语义：`[dir]` 为 bundle 根 = 全 bundle；`[dir]` 指向分支目录 = 该分支子树；
+`--scope <uuid|rel>` 可从任意位置显式指定子树（uuid 或 bundle 相对路径）。
+
+```sh
+# ① 导航维度：标签词表（最廉价的信号，先看有哪些维度可用）
+$S tags <B>
+# crm      1
+# demo     1
+# ...
+
+# ② 元数据定位：关键词命中分支自身字段与实体条目行字段（含命中字段标注）
+$S find <B> 跟进 --limit 10
+# .  <root-uuid>  客户运营结构化数据束  [crm,demo]  命中: summary
+# <rel>  <uuid>  跟进记录  (crm.followup_log)  [followup]  命中: title, summary
+$S find <B> --type crm.customer                 # type 纯过滤
+$S find <B> --tag vip --tag 华东区              # 标签交集
+$S find <B> --tag vip --json | jq -r '.[].path' # 机器可读：拿 rel 路径（喂给写命令）
+
+# ②' 正文定位：磁盘全量文本（含内容文件夹未登记子项与散落文件，registered 标注）
+$S grep --glob "*.md" 张伟 <B>
+# <rel>  <uuid>  2026-09 会议纪要
+#   2026-09-10.md:4: - 客户：张伟
+$S grep --json 张伟 <B> | jq -r '.[].file'       # JSON 恒含命中文件绝对路径
+$S grep --real-path 张伟 <B>                      # 文本输出也用绝对路径（可接 wc/sed 等）
+
+# ③ 确认位置：ROOT → 目标面包屑（引用 uuid 前先看一眼，防止拿错分支）
+$S where <B> <UUID>
+# .  <root-uuid>  客户运营结构化数据束（-）
+#   └─ <uuid>  <uuid>  客户档案 · 张伟（crm.customer）
+#       └─ <rel>  <uuid>  跟进记录（crm.followup_log）  ← 目标
+
+# ④ 精读：单个条目正文（字节直出 stdout）
+$S get <B> <UUID> --path profile.json
+$S get <B> <UUID> --path reports/r.md            # 多段路径 = 已登记内容目录内的未登记子项
+$S get --info <B> <UUID> --path reports/r.md     # 元信息 JSON（含 registered / sha256）
+
+# ⑤ 范围收窄：只搜某个子树（其余分支不进入）
+$S find <B>/<某节点目录> 关键词                  # [dir] 指向分支目录 → 缺省即该子树
+$S grep --scope <UUID> 关键词 <B>                # 显式按 uuid 限定
+$S grep --scope <uuid>/<子uuid> 关键词 <B>       # 显式按 bundle 相对路径限定
+```
+
+要点：
+- **不要**为找一个东西跑 `str export` 全树导出，更不要用 `grep -r` / `find` 扫 bundle 磁盘 ——
+  查询命令返回的 rel 路径 + UUID 正是写命令接受的寻址形态，且遵守忽略名单、跳过二进制；
+- `grep` 命中的 `registered: false` 行 = 内容文件夹未登记子项（合法形态）：
+  用 `get` 的多段路径直读，或用 JSON 里的 `file` 绝对路径交给普通文件工具；
+  而**不在内容目录内的散落文件**是 `E_MANIFEST_MISSING` 违规形态 —— `get` 会拒绝，先 `sync` 补登；
+- 预算控制：`find` / `grep` 用 `--limit`，`find` 另有 `--depth`，`context` 用 `--budget`；
+  机器消费优先 `--json` + `jq`；
+- 期望全 bundle 结果时确认 `[dir]` 是 bundle 根 —— 传成分支目录时范围会收窄为该子树（这是特性，
+  不是丢失结果）。

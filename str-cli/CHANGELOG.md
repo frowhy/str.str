@@ -10,6 +10,47 @@ crate `str-format` 的版本变更 —— 可执行文件名 `str`，另含可�
 
 ---
 
+## [0.8.0] — 2026-09-28
+
+对应规范 **v1.15.0**（命令面补齐：查询命令）。
+
+### 新增
+
+- **查询命令五件套（「定位 → 精读」链路，全部只读）**：
+  - `str find [dir] [query]` —— 元数据检索：在分支自身字段（`title`/`summary`/`type`/`tags`）
+    与实体条目行字段（`title`/`summary`/`note`/`path`）中做不区分大小写的字面子串匹配，
+    或按 `--type` / `--tag`（交集）纯过滤；`--field` 限定检索字段、`--depth` 限深、
+    `--limit` 限量、`--json` 机器可读（含 `matched` 数组）。命中按 `(depth, rel)` 排序；
+    结构类条目行（`node`/`branch`/`link`）不参与条目字段检索（子分支会被单独访问）。
+  - **检索范围（find / grep 共用）**：缺省 = **当前节点子树**（§9 `[uuid]` 缺省规则的
+    沿用 —— `[dir]` 为 bundle 根即全 bundle，指向分支目录即只搜该分支及其全部后代）；
+    `--scope <uuid|rel>` 可从任意位置显式指定（分支 id 或 bundle 相对路径，
+    无法解析 → `BadArg`，不静默回退全 bundle）。
+  - `str grep <PATTERN> [dir]` —— 正文全文检索：字面子串（非正则），
+    `--ignore-case` / `--glob`（通配分支内相对路径）/ `--limit` / `--json`；二进制（含 NUL）
+    与非 UTF-8 文件跳过，命中行截断到 200 字符，按分支分组输出并附所属分支上下文。
+    **缺省遍历分支目录磁盘上的全部文本文件** —— 覆盖内容文件夹（`role = "dir"`）
+    的未登记子项与未登记散落文件（命中带 `registered` 标注；JSON 恒含 `file`
+    绝对路径），`--manifest-only` 退回「仅清单登记条目」口径；遍历不进入其它
+    分支目录 / 子 bundle，跳过保留名 / 系统噪声 / `.lock`，并应用忽略名单
+    （`.gitignore` + `policies.ignore`，与校验同源）。
+  - `str tags [dir]` —— 全 bundle 分支级标签词表 + 计数（次数降序，再按名升序）。
+  - `str where [dir] [uuid]` —— 面包屑定位：从 ROOT 到目标分支的完整链条
+    （相对路径 + id + 标题 + `type`，目标行标注 `← 目标`）。
+  - `str get [dir] [uuid] --path <P>` —— 精读单个**已登记**实体条目的正文（字节直出
+    stdout）；`--path` 亦接受**多段路径**直读已登记内容目录内的未登记子项
+    （`--info` 以 `registered: false` 标注、`role` 按扩展名推断、`size` / `sha256`
+    按磁盘实算）。子分支 / 链接条目与其余未登记路径以 `BadArg` 拒绝并指路
+    （`show` / 对目标再 `get` / `ls` / 先 `sync` 补登）。
+  - `str find` / `str grep` 新增 `--real-path`：文本输出切换为**绝对路径**
+    （JSON 恒含 `path_abs` / `file` 绝对路径字段），便于直接管道给其它命令。
+- 五者均不推进 `revision`、不写任何 `._meta`；收集逻辑与打印层分离
+  （`find_hits` / `grep_hits` / `tag_counts` / `where_json` / `get_bytes` / `get_info`
+  为公开库 API，供测试与嵌入方复用）。新增集成测试 `tests/query.rs`（14 例，
+  覆盖未登记子项检索 / 忽略名单剪枝 / 分支遍历边界 / 绝对路径输出）。
+
+---
+
 ## [0.7.2] — 2026-09-23
 
 对应规范 **v1.13.0**（无规范变更）。

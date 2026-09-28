@@ -2031,6 +2031,671 @@ fn toml_from_json(v: &JValue, indent: usize) -> String {
     }
 }
 
+// ─────────────────────────── find / grep / tags / where / get ───────────────────────────
+//
+// 「定位 → 精读」链路（面向 AI 的渐进式读取，规范 §9）：
+//   `str tags`  看导航维度      →  `str find` / `str grep`  按元数据 / 正文定位
+//   →  `str where`  面包屑确认位置  →  `str get` / `str show`  精读目标内容。
+// 本组命令全部**只读**：不推进 `revision`、不写任何 `._meta`。
+
+/// 不区分大小写的子串匹配。
+fn ci_contains(s: Option<&str>, q: &str) -> bool {
+    s.map(|x| x.to_lowercase().contains(q)).unwrap_or(false)
+}
+
+/// 按字符数截断长行（全文检索的命中行保底预算）。
+fn clip_line(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars).collect();
+    format!("{cut}…")
+}
+
+/// 查询命令的范围解析：`--scope` 接受**分支 id** 或 **bundle 相对路径**；
+/// 缺省沿用 §9 `[uuid]` 缺省规则 —— 当前节点（`[dir]` 为 bundle 根即 ROOT = 全 bundle，
+/// 指向分支目录即该分支子树）。
+fn resolve_scope(bundle: &Bundle, scan: &Scan, dir: &Path, scope: Option<&str>) -> Result<usize> {
+    match scope {
+        Some(s) => {
+            if let Some(i) = locate(scan, s) {
+                return Ok(i);
+            }
+            if let Some(i) = scan.visits.iter().position(|v| v.rel == s) {
+                return Ok(i);
+            }
+            Err(Error::BadArg(format!(
+                "`--scope` = {s:?} 无法解析：既不是分支 id，也不是 bundle 相对路径（用 `str tree` / `str where` 查看）"
+            )))
+        }
+        None => target_branch(bundle, scan, dir, None),
+    }
+}
+
+/// `idx` 是否在 `scope` 子树内（含自身）。
+fn within_subtree(scan: &Scan, idx: usize, scope: usize) -> bool {
+    let mut cur = Some(idx);
+    while let Some(i) = cur {
+        if i == scope {
+            return true;
+        }
+        cur = scan.visits[i].parent;
+    }
+    false
+}
+
+/// `str find` 的收集段：在分支自身字段与 `entries[]` 行字段中找关键词，
+/// 或按 `type` / 标签做纯过滤。命中按 `(depth, rel)` 排序；恒含绝对路径 `path_abs` 字段。
+#[allow(clippy::too_many_arguments)]
+pub fn find_hits(
+    dir: &Path,
+    query: Option<String>,
+    type_: Option<&str>,
+    tags: &[String],
+    field: Option<&str>,
+    scope: Option<&str>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Vec<JValue>> {
+    const FIELDS: &[&str] = &["all", "title", "summary", "type", "tags", "note", "path"];
+    let field = field.unwrap_or("all");
+    if !FIELDS.contains(&field) {
+        return Err(Error::BadArg(format!(
+            "`--field` = {field:?} 非法（可选：{}）",
+            FIELDS.join(" / ")
+        )));
+    }
+    let q = query.as_deref().map(str::to_lowercase);
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let scope = resolve_scope(&bundle, &scan, dir, scope)?;
+    let mut hits: Vec<JValue> = Vec::new();
+    for (vi, v) in scan.visits.iter().enumerate() {
+        if !within_subtree(&scan, vi, scope) {
+            continue;
+        }
+        if depth.is_some_and(|d| v.depth > d) {
+            continue;
+        }
+        let Some(meta) = v.meta.as_ref() else {
+            continue;
+        };
+        if let Some(t) = type_
+            && meta.r#type.as_deref() != Some(t)
+        {
+            continue;
+        }
+        if !tags.is_empty()
+            && !tags
+                .iter()
+                .all(|t| meta.tags.iter().any(|mt| mt.eq_ignore_ascii_case(t)))
+        {
+            continue;
+        }
+        let mut matched: Vec<String> = Vec::new();
+        if let Some(q) = &q {
+            let mut want = |name: String, on: bool| {
+                if on && (field == "all" || field == name.rsplit('.').next().unwrap_or(&name))
+                    && !matched.iter().any(|m| m == &name)
+                {
+                    matched.push(name);
+                }
+            };
+            want("title".into(), ci_contains(meta.title.as_deref(), q));
+            want("summary".into(), ci_contains(meta.summary.as_deref(), q));
+            want("type".into(), ci_contains(meta.r#type.as_deref(), q));
+            want(
+                "tags".into(),
+                meta.tags.iter().any(|t| t.to_lowercase().contains(q)),
+            );
+            // 结构类条目（子分支 / 链接）的行字段不参与检索：子分支自身会被单独访问，
+            // 否则同一份数据会在父级与本命中重复出现。
+            for e in meta.entries.iter().filter(|e| !e.is_branch() && !e.is_link()) {
+                let base = format!("entries[].{}", e.path);
+                want(
+                    format!("{base}.title"),
+                    ci_contains(e.title.as_deref(), q),
+                );
+                want(
+                    format!("{base}.summary"),
+                    ci_contains(e.summary.as_deref(), q),
+                );
+                want(format!("{base}.note"), ci_contains(e.note.as_deref(), q));
+                want("path".into(), e.path.to_lowercase().contains(q));
+            }
+            if matched.is_empty() {
+                continue;
+            }
+        }
+        hits.push(serde_json::json!({
+            "path": v.rel,
+            "path_abs": bundle.root.join(&v.rel).display().to_string(),
+            "depth": v.depth,
+            "id": meta.id,
+            "kind": meta.kind.map(|k| k.as_str()),
+            "title": meta.title,
+            "type": meta.r#type,
+            "summary": meta.summary,
+            "tags": meta.tags,
+            "matched": matched,
+        }));
+    }
+    hits.sort_by(|a, b| {
+        let ka = (
+            a["depth"].as_u64().unwrap_or(0),
+            a["path"].as_str().unwrap_or(""),
+        );
+        let kb = (
+            b["depth"].as_u64().unwrap_or(0),
+            b["path"].as_str().unwrap_or(""),
+        );
+        ka.cmp(&kb)
+    });
+    if let Some(n) = limit {
+        hits.truncate(n);
+    }
+    Ok(hits)
+}
+
+/// `str find`：元数据检索（打印 [`find_hits`] 的结果；`--json` 输出 JSON 数组）。
+/// `--real-path` 让文本输出使用绝对路径（便于管道给其它命令）；JSON 恒含 `path_abs`。
+#[allow(clippy::too_many_arguments)]
+pub fn find(
+    dir: &Path,
+    query: Option<String>,
+    type_: Option<&str>,
+    tags: &[String],
+    field: Option<&str>,
+    scope: Option<&str>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+    real_path: bool,
+    json: bool,
+) -> Result<()> {
+    let hits = find_hits(dir, query, type_, tags, field, scope, depth, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_default());
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("（无命中）");
+        return Ok(());
+    }
+    for h in &hits {
+        let loc = if real_path {
+            h["path_abs"].as_str().unwrap_or(".")
+        } else {
+            h["path"].as_str().unwrap_or(".")
+        };
+        let mut line = format!(
+            "{}  {}  {}",
+            loc,
+            h["id"].as_str().unwrap_or("-"),
+            h["title"].as_str().unwrap_or("（无标题）")
+        );
+        if let Some(t) = h["type"].as_str() {
+            line.push_str(&format!("  ({t})"));
+        }
+        let tags: Vec<&str> = h["tags"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        if !tags.is_empty() {
+            line.push_str(&format!("  [{}]", tags.join(",")));
+        }
+        let m: Vec<&str> = h["matched"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        if !m.is_empty() {
+            line.push_str(&format!("  命中: {}", m.join(", ")));
+        }
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// `str grep` 的收集段：正文全文检索（字面子串，非正则）。
+///
+/// 缺省遍历每个分支目录**磁盘上**的全部文本文件 —— 覆盖已登记的 `payload` / `asset`
+/// 条目、内容文件夹（`role = "dir"`）的未登记子项与未登记散落文件；
+/// `manifest_only = true` 时退回「仅清单登记条目」口径。
+/// 不进入：其它分支目录（各自作为 visit 单独遍历）、含 `._meta` 的目录、
+/// 保留名 / 系统噪声 / `.lock`、被忽略名单（`Scan.ignore`）剪中的路径。
+/// 二进制（含 NUL 字节）与非 UTF-8 文件跳过；命中行截断到 200 字符。
+/// 返回 `(命中列表, 是否因 --limit 提前停止)`；命中恒含绝对路径 `file` 字段。
+pub fn grep_hits(
+    dir: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    ignore_case: bool,
+    manifest_only: bool,
+    scope: Option<&str>,
+    limit: Option<usize>,
+) -> Result<(Vec<JValue>, bool)> {
+    use std::collections::HashSet;
+    if pattern.is_empty() {
+        return Err(Error::BadArg("检索文本不能为空".into()));
+    }
+    let matcher = match glob {
+        Some(g) => Some(
+            globset::Glob::new(g)
+                .map_err(|e| Error::BadArg(format!("`--glob` = {g:?} 非法：{e}")))?
+                .compile_matcher(),
+        ),
+        None => None,
+    };
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        String::new()
+    };
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let scope = resolve_scope(&bundle, &scan, dir, scope)?;
+    let visit_dirs: HashSet<&PathBuf> = scan.visits.iter().map(|v| &v.dir).collect();
+    let mut hits: Vec<JValue> = Vec::new();
+    let mut stopped = false;
+    'outer: for (vi, v) in scan.visits.iter().enumerate() {
+        if !within_subtree(&scan, vi, scope) {
+            continue;
+        }
+        let Some(meta) = v.meta.as_ref() else {
+            continue;
+        };
+        let branch_json = serde_json::json!({ "path": v.rel, "id": meta.id, "title": meta.title });
+        // 候选文件：`(分支内相对路径, 磁盘路径, 是否已登记)`
+        let mut candidates: Vec<(String, PathBuf, bool)> = Vec::new();
+        if manifest_only {
+            for e in &meta.entries {
+                if e.is_file_like() {
+                    candidates.push((e.path.clone(), v.dir.join(&e.path), true));
+                }
+            }
+        } else {
+            for entry in walkdir::WalkDir::new(&v.dir)
+                .min_depth(1)
+                .sort_by_file_name()
+                .into_iter()
+                .filter_entry(|e| {
+                    if e.depth() == 0 {
+                        return true;
+                    }
+                    let name = e.file_name().to_string_lossy().to_string();
+                    // 保留名 / 系统噪声 / 锁文件 / 子 bundle（`.str` 硬边界）
+                    if util::is_reserved_name(&name)
+                        || util::is_lock_file(&name)
+                        || util::is_os_noise(&name)
+                        || util::is_sub_bundle(&name)
+                    {
+                        return false;
+                    }
+                    // 其它分支目录（含 `._meta` 的目录）不进入：各自作为 visit 单独遍历
+                    let p = e.path();
+                    if e.file_type().is_dir()
+                        && (visit_dirs.contains(&p.to_path_buf())
+                            || p.join(util::META_FILE).is_file())
+                    {
+                        return false;
+                    }
+                    if scan.ignore.is_empty() {
+                        return true;
+                    }
+                    let rel = bundle.rel(p);
+                    let is_dir = e.file_type().is_dir();
+                    !scan.ignore.is_ignored(&rel, is_dir)
+                })
+                .flatten()
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(&v.dir)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let registered = meta.entries.iter().any(|e| e.path == rel);
+                candidates.push((rel, entry.path().to_path_buf(), registered));
+            }
+        }
+        for (rel, p, registered) in candidates {
+            if let Some(m) = &matcher
+                && !m.is_match(&rel)
+            {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&p) else {
+                continue;
+            };
+            if bytes.contains(&0u8) || String::from_utf8(bytes.clone()).is_err() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (i, line) in text.lines().enumerate() {
+                let hit = if ignore_case {
+                    line.to_lowercase().contains(&needle)
+                } else {
+                    line.contains(pattern)
+                };
+                if !hit {
+                    continue;
+                }
+                hits.push(serde_json::json!({
+                    "branch": branch_json,
+                    "entry": rel,
+                    "file": p.display().to_string(),
+                    "registered": registered,
+                    "line": i + 1,
+                    "text": clip_line(line, 200),
+                }));
+                if limit.is_some_and(|n| hits.len() >= n) {
+                    stopped = true;
+                    break 'outer;
+                }
+            }
+        }
+    }
+    Ok((hits, stopped))
+}
+
+/// `str grep`：正文全文检索（打印 [`grep_hits`] 的结果，按分支分组）。
+/// `--real-path` 让命中行显示绝对路径（便于管道给其它命令）；JSON 恒含 `file` 绝对路径；
+/// `--scope` / `[dir]` 决定检索范围（缺省当前节点）。
+#[allow(clippy::too_many_arguments)]
+pub fn grep(
+    dir: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+    ignore_case: bool,
+    manifest_only: bool,
+    scope: Option<&str>,
+    real_path: bool,
+    limit: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    let (hits, stopped) =
+        grep_hits(dir, pattern, glob, ignore_case, manifest_only, scope, limit)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_default());
+    } else if hits.is_empty() {
+        println!("（无命中）");
+    } else {
+        let mut last_branch = String::new();
+        for h in &hits {
+            let bp = h["branch"]["path"].as_str().unwrap_or(".").to_string();
+            if bp != last_branch {
+                println!(
+                    "{bp}  {}  {}",
+                    h["branch"]["id"].as_str().unwrap_or("-"),
+                    h["branch"]["title"].as_str().unwrap_or("（无标题）")
+                );
+                last_branch = bp;
+            }
+            let loc = if real_path {
+                h["file"].as_str().unwrap_or("")
+            } else {
+                h["entry"].as_str().unwrap_or("")
+            };
+            println!(
+                "  {}:{}: {}",
+                loc,
+                h["line"].as_u64().unwrap_or(0),
+                h["text"].as_str().unwrap_or("")
+            );
+        }
+    }
+    if stopped {
+        let n = limit.unwrap_or(0);
+        println!("…（已达 --limit = {n}，提前停止）");
+    }
+    Ok(())
+}
+
+/// `str tags` 的收集段：全 bundle 的分支级标签词表（按使用次数降序，再按标签名升序）。
+pub fn tag_counts(dir: &Path) -> Result<Vec<(String, usize)>> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for v in &scan.visits {
+        if let Some(meta) = v.meta.as_ref() {
+            for t in &meta.tags {
+                *counts.entry(t.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(rows)
+}
+
+/// `str tags`：打印 [`tag_counts`] 的结果。
+pub fn tags(dir: &Path, json: bool) -> Result<()> {
+    let rows = tag_counts(dir)?;
+    if json {
+        let arr: Vec<JValue> = rows
+            .iter()
+            .map(|(t, c)| serde_json::json!({ "tag": t, "count": c }))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("（bundle 内尚无标签）");
+        return Ok(());
+    }
+    for (t, c) in &rows {
+        println!("{c}\t{t}");
+    }
+    Ok(())
+}
+
+/// `str where` 的收集段：目标分支与 ROOT → 目标的链条（面包屑 JSON）。
+pub fn where_json(dir: &Path, uuid: Option<String>) -> Result<JValue> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let chain: Vec<usize> = scan.ancestors(idx);
+    let node_json = |i: usize| {
+        let v = &scan.visits[i];
+        let m = v.meta.as_ref();
+        serde_json::json!({
+            "path": v.rel,
+            "depth": v.depth,
+            "id": m.and_then(|m| m.id.clone()),
+            "title": m.and_then(|m| m.title.clone()),
+            "type": m.and_then(|m| m.r#type.clone()),
+        })
+    };
+    Ok(serde_json::json!({
+        "bundle": bundle.name(),
+        "target": node_json(idx),
+        "chain": chain.iter().map(|i| node_json(*i)).collect::<Vec<JValue>>(),
+    }))
+}
+
+/// `str where`：定位分支 —— 打印从 ROOT 到目标的完整链条（面包屑）。
+pub fn where_(dir: &Path, uuid: Option<String>, json: bool) -> Result<()> {
+    let v = where_json(dir, uuid)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return Ok(());
+    }
+    let chain = v["chain"].as_array().cloned().unwrap_or_default();
+    let target_path = v["target"]["path"].as_str().unwrap_or(".").to_string();
+    for (level, node) in chain.iter().enumerate() {
+        let rel = node["path"].as_str().unwrap_or(".");
+        let title = node["title"].as_str().unwrap_or("（无标题）");
+        let id = node["id"].as_str().unwrap_or("-");
+        let type_ = node["type"].as_str().unwrap_or("-");
+        let indent = "  ".repeat(level);
+        let mark = if level == 0 { "" } else { "└─ " };
+        let tail = if rel == target_path { "  ← 目标" } else { "" };
+        println!("{indent}{mark}{rel}  {id}  {title}（{type_}）{tail}");
+    }
+    Ok(())
+}
+
+/// `str get` 的公共解析段：校验 `--path` 并定位目标分支上的条目。
+///
+/// 两种合法形态：① **已登记**条目（单段名，任意实体 role）；
+/// ② **内容文件夹子项**（多段路径，首段须是已登记 `role = "dir"` 的条目，
+/// 其余段为磁盘上的未登记子项 —— 内容文件夹的子项本就不参与清单比对，规范 §4.8）。
+struct LocatedEntry {
+    /// 条目所在分支的目录。
+    dir: PathBuf,
+    /// 条目所在分支的 bundle 相对路径。
+    rel: String,
+    /// 分支 id / 标题（`--info` 用）。
+    branch_id: Option<String>,
+    branch_title: Option<String>,
+    /// 命中的条目行（内容文件夹子项为按磁盘合成的行）。
+    entry: Entry,
+    /// 是否来自 `entries[]` 清单（false = 内容文件夹未登记子项）。
+    registered: bool,
+}
+
+fn get_entry(dir: &Path, uuid: Option<String>, path: &str) -> Result<LocatedEntry> {
+    let invalid = |why: &str| {
+        Error::BadArg(format!("`--path` = {path:?} 非法：{why}（先 `str ls` 查看清单）"))
+    };
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.split('/').any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return Err(invalid("路径段不得为空 / `.` / `..`"));
+    }
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let v = &scan.visits[idx];
+    let meta = v
+        .meta
+        .as_ref()
+        .ok_or_else(|| Error::BadArg(format!("{} 的 `._meta` 解析失败", v.rel)))?;
+    // ① 已登记条目（精确匹配）
+    if let Some(entry) = meta.entries.iter().find(|e| e.path == path) {
+        return Ok(LocatedEntry {
+            dir: v.dir.clone(),
+            rel: v.rel.clone(),
+            branch_id: meta.id.clone(),
+            branch_title: meta.title.clone(),
+            entry: entry.clone(),
+            registered: true,
+        });
+    }
+    // ② 内容文件夹子项：首段必须是已登记的 `dir` 条目，其余段按磁盘解析
+    let (first, _) = path.split_once('/').ok_or_else(|| {
+        Error::BadArg(format!(
+            "{} 的清单中未登记条目 `{path}`（先 `str ls` 查看；磁盘上新文件请先 `str sync` 补登）",
+            v.rel
+        ))
+    })?;
+    let dir_entry = meta
+        .entries
+        .iter()
+        .find(|e| e.path == first && e.role == "dir")
+        .ok_or_else(|| {
+            Error::BadArg(format!(
+                "`{first}` 不是已登记的内容目录（role = dir）：未登记的散落文件请先 `str sync` 补登"
+            ))
+        })?;
+    let p = v.dir.join(&dir_entry.path).join(&path[first.len() + 1..]);
+    let meta_of = std::fs::metadata(&p).map_err(|e| Error::io(&p, e))?;
+    if !meta_of.is_file() {
+        return Err(Error::BadArg(format!(
+            "`{path}` 不是文件（目录请用 `str ls` 查看）"
+        )));
+    }
+    let size = meta_of.len() as i64;
+    let sha256 = util::sha256_file(&p).ok();
+    let media_type = crate::cmd::media_type_for(path);
+    let role = if media_type.is_some() { "payload" } else { "asset" };
+    Ok(LocatedEntry {
+        dir: v.dir.clone(),
+        rel: v.rel.clone(),
+        branch_id: meta.id.clone(),
+        branch_title: meta.title.clone(),
+        entry: Entry {
+            path: path.to_string(),
+            role: role.into(),
+            media_type,
+            size: Some(size),
+            sha256,
+            ..Default::default()
+        },
+        registered: false,
+    })
+}
+
+/// `str get --info` 的收集段：目标条目的元信息 JSON（含所属分支）。
+pub fn get_info(dir: &Path, uuid: Option<String>, path: &str) -> Result<JValue> {
+    let loc = get_entry(dir, uuid, path)?;
+    Ok(serde_json::json!({
+        "branch": { "path": loc.rel, "id": loc.branch_id, "title": loc.branch_title },
+        "registered": loc.registered,
+        "entry": {
+            "path": loc.entry.path,
+            "role": loc.entry.role,
+            "id": loc.entry.id,
+            "type": loc.entry.r#type,
+            "title": loc.entry.title,
+            "summary": loc.entry.summary,
+            "note": loc.entry.note,
+            "media_type": loc.entry.media_type,
+            "size": loc.entry.size,
+            "sha256": loc.entry.sha256,
+            "count": loc.entry.count,
+            "optional": loc.entry.optional,
+            "schema": loc.entry.schema,
+        },
+    }))
+}
+
+/// `str get` 的收集段：读取目标条目正文（结构类条目一律拒绝并指路）。
+pub fn get_bytes(dir: &Path, uuid: Option<String>, path: &str) -> Result<Vec<u8>> {
+    let loc = get_entry(dir, uuid, path)?;
+    let entry = &loc.entry;
+    if entry.is_branch() {
+        return Err(Error::BadArg(format!(
+            "`{}` 是子分支条目（role = {}）：元信息用 `str show` 查看，正文请对其中的具体条目再 `str get`",
+            entry.path, entry.role
+        )));
+    }
+    if entry.is_link() {
+        return Err(Error::BadArg(format!(
+            "`{}` 是链接条目（role = link）：请对目标分支 `{}` 使用 `str get`",
+            entry.path,
+            entry.target.as_deref().unwrap_or("-")
+        )));
+    }
+    if loc.registered && entry.role == "dir" {
+        return Err(Error::BadArg(format!(
+            "`{0}` 是内容目录（role = dir）：请用 `str ls` 查看其内容，或用多段路径读其中的文件（如 `--path {0}/<文件>`）",
+            entry.path
+        )));
+    }
+    // 两种形态下 entry.path 都是相对分支目录的完整路径（未登记子项为「首段/余段」）
+    let p = loc.dir.join(&entry.path);
+    std::fs::read(&p).map_err(|e| Error::io(&p, e))
+}
+
+/// `str get`：读取一个**已登记**条目的正文（单文件直出 stdout，不展开整树）。
+/// `--info` 只打印该条目的元信息 JSON。
+pub fn get(dir: &Path, uuid: Option<String>, path: &str, info: bool) -> Result<()> {
+    if info {
+        let j = get_info(dir, uuid, path)?;
+        println!("{}", serde_json::to_string_pretty(&j).unwrap_or_default());
+        return Ok(());
+    }
+    let bytes = get_bytes(dir, uuid, path)?;
+    use std::io::Write as _;
+    std::io::stdout()
+        .write_all(&bytes)
+        .map_err(|e| Error::Other(e.to_string()))
+}
+
 // ─────────────────────────── reveal ───────────────────────────
 
 /// 平台适配：macOS 上把 `.str` 目录标记为 bundle，并让 `._meta` 可见。

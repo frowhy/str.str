@@ -30,9 +30,26 @@
 
 ## [Unreleased]
 
-规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.5.0
+规范 1.15.0 · CLI 0.8.0 · 技能包 0.5.0 · GUI 0.5.0
 
 ### 新增
+
+- **查询命令五件套（cli 0.7.2 → 0.8.0，规范 1.14.0 → 1.15.0）**：补齐 AI
+  「定位 → 精读」取数链路，全部**只读**（不推进 `revision`、不写 `._meta`）：
+  `str find`（元数据检索：不区分大小写字面子串 + `--type`/`--tag` 过滤 +
+  `--field`/`--depth`/`--limit`/`--json`）、`str grep`（正文全文检索：
+  字面子串、跳过二进制与非 UTF-8，**缺省覆盖内容文件夹未登记子项与散落文件**
+  （`registered` 标注，`--manifest-only` 退回仅清单口径），命中行附所属分支
+  上下文，`--glob`/`--ignore-case`/`--real-path`/`--limit`/`--json`）、
+  `str tags`（标签词表 + 计数）、`str where`（ROOT → 目标面包屑）、
+  `str get`（精读单个已登记条目正文；**多段路径直读已登记内容目录内的
+  未登记子项**，`--info` 出元信息与 `registered` 标注；结构类条目拒绝并指路）；
+  `find` / `grep` 的 JSON 恒含绝对路径（`path_abs` / `file`），`--real-path`
+  让文本输出可直接管道给其它命令。**检索范围**：`find` / `grep` 缺省 = 当前节点子树
+  （§9 `[uuid]` 缺省规则沿用），`--scope <uuid|rel>` 可显式指定任意子树 ——
+  支持在指定节点 / 指定路径内查找。SPEC.md §8.2 / §9 同步「查询命令
+  的约定」规范条文与 DoD 第 32 项；str-skill 0.5.0 的 Read path 与
+  cli-reference（§3.22–3.26）同步收录。
 
 - **空格键快速查看（gui 0.3.2 → 0.4.0）**：选中内容条目按空格调起 macOS 系统
   Quick Look 预览面板（`QLPreviewPanel`，与 Finder 同款），目标是整个选区

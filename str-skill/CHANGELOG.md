@@ -14,6 +14,36 @@
 
 ---
 
+## [0.5.0] — 2026-09-28
+
+### 变更
+
+- **Read path 补「定位 → 精读」链路**（对应 CLI 0.8.0 / 规范 1.15.0）：
+  `str tags`（导航维度）→ `str find` / `str grep`（元数据 / 正文定位）→
+  `str where`（面包屑）→ `str get`（单条目精读）五条查询命令进入 SKILL.md
+  Read path 表与 Command index —— AI 此前只能全树导出或绕过 CLI 扫目录，
+  现在有正式的取数命令面。`grep` 缺省覆盖**未登记的内容文件夹子项**与
+  散落文件（`registered` 标注）；`find` / `grep` 支持 `--real-path` 输出绝对路径
+  （JSON 恒含绝对路径字段）；`get` 支持多段路径直读已登记内容目录内的
+  未登记子项。
+- **SKILL.md 重构为「取数协议」驱动**（本次优化的核心）：① frontmatter
+  `description` 补 locate→read 协议措辞（宿主以 description 判定触发与相关性）；
+  ② Hard rule 7 从「从 ROOT 渐进下钻」升级为「先定位后精读，禁全树导出」；
+  ③ Read path 章节重写为三步协议（Orient → Locate → Confirm & read precisely），
+  显式给出范围语义（当前节点子树缺省 + `--scope`）、预算纪律（`--limit` /
+  `--depth` / `--budget` / `--json`+`jq`）、`registered` 语义与实测示例块；
+  ④ 反模式表 +3 行（全树导出找东西 / 磁盘裸 grep / 误期望 `[dir]` 为分支目录时
+  返回全 bundle）；⑤ `references/workflows.md` 新增**配方 10 · 定位取数协议**
+  （tags → find → grep → where → get 全链路 + scope 收窄 + 预算控制，
+  全部命令对真实 bundle 端到端实测）。
+- `references/cli-reference.md` 新增 §3.22–3.26 五节（全部实测），
+  实测版本同步 `str 0.8.0`。
+- `requires_cli` 提升至 `>=0.8.0`（新命令自该版本起可用）；
+  `SKILL.md` / `cli-reference.md` / `ensure-str.sh` / `bootstrap-rule.sh`
+  的版本示例同步 `str 0.8.0` / `v0.8.0`。
+
+---
+
 ## [0.4.2] — 2026-09-23
 
 ### 变更

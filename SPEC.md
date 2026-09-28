@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.14.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.15.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-09-28 |
 | 文档定位 | **本文件即规范（唯一真源）**：第 1 章为可直接投喂 AI 开发代理的主提示词（指令主体），第 2~13 章为规范性附录；其中第 3~9 章为格式的 SSOT，实现代码不得偏离，如需偏离必须先修订本文件 |
@@ -29,6 +29,7 @@
 | **v1.12.0** | 2026-09-16 | **保留目录豁免登记（规范 ↔ 实现收口）**：明确 `._meta` / `._schema/` / `._cache/` 属**格式内部保留目录**，**不参与 `entries[]` 清单比对**（§1.3 约束 5、§4.8），消解「§1.3 要求除 `._meta` 外全部登记」与「实现放行保留目录」的落差。连带：`str init`、`scripts/build-example.sh`、§10 示例与官方示例 bundle **不再登记 `._schema`**。`role: schema` / `cache` 保留为**可选的显式登记**（既有已登记的 bundle 仍然合法，无需迁移）。规则是**放宽**，DoD 增补第 28 项。 |
 | **v1.13.0** | 2026-09-18 | **新增忽略名单**：`[policies]` 增加 **`ignore`**（字符串数组，gitignore 语义模式，bundle 内相对路径）与 **`gitignore`**（布尔，默认 `true` = 自动检测并应用 `.gitignore`）。工具在**分支遍历**与**清单比对**（§4.8）中跳过被忽略条目：不报 `E_MANIFEST_MISSING`、不告警、不参与 `str sync` 补登。叠加顺序（由外向内，内层命中覆盖外层）：外层 git 仓库的 `.gitignore` → bundle 根的 `.gitignore` → 分支目录内的 `.gitignore` → `policies.ignore`（显式配置优先级最高）。**`._meta` / `._schema/` / `._cache/` / `.lock` 与 §3.4 豁免清单并入系统级忽略层**（恒为最内层、常开、不可被用户模式取反恢复）。② **CLI 命令面补齐**：新增 `str entry add\|rm`（实体登记 / 移除登记，自动补指纹）、`str ignore add\|rm\|list` 与 `str policies set`（`[policies]` 从此有 CLI 写入路径，「任何字段都必须有 CLI 写入路径」彻底闭合）。规则是**放宽**（缺省行为变更仅影响「散落文件是否报错」，不改任何既有字段语义），DoD 增补第 29、30 项。 |
 | **v1.14.0** | 2026-09-28 | **新增「软连接子分支」`role = "link"`（恢复 v1.1.0 撤回的「引用」能力，但改为**声明式**）**：父分支的 `entries[]` 可登记一行 `role = "link"` + `target = <目标分支 id>`，把**任意 `node` / `branch`**（ROOT 除外）挂载为本分支的子分支，**磁盘上不新建任何目录或文件** —— 数据始终只在目标分支内存在，不复制、不移动。与 v1.0 的「link 目录」差别在于载体：v1.0 是真实目录（因而有 `E_LINK_HAS_PAYLOAD` 等「这个目录里不许放东西」的约束），v1.14.0 是**纯声明**（没有目录 ⇒ 天然不可能承载数据，也就不必再为它豁免清单比对）。语义定案：`link` 是**只读视图**（所有权唯一在目标分支，链接下不得新建子分支或放数据）；目标必须是 `node` / `branch` 且不得是 ROOT；**禁止成环**（含自我挂载）；**删除链接只摘引用**、**删除目标分支时工具 MUST 一并摘除指向它的全部 `link`**（不留悬空）。新增 `E_LINK_NO_TARGET` / `E_LINK_TARGET_INVALID` / `E_LINK_HAS_PAYLOAD` / `E_LINK_CYCLE` / `E_LINK_DUP` 五个错误码与 `str link add\|rm` 两个命令（§9），`entries[].target` 字段、`role` 枚举新增值、三份 Schema 同步，DoD 增补第 31 项。规则是**新增可选能力**，既有 bundle 无需迁移。 |
+| **v1.15.0** | 2026-09-28 | **新增查询命令面（AI 渐进式读取闭环）**：§8 的「按内容定位」此前没有命令支撑 —— AI 只能 `str export` 全树（撑爆上下文）或绕过 CLI 裸 grep（违反 CLI-only 约束）。新增 5 个**只读**查询命令（§9）：`str find`（元数据检索：关键词 / `type` / 标签过滤，命中给出相对路径 + id + 命中字段）、`str grep`（正文全文检索：缺省覆盖磁盘上的未登记内容文件夹子项与散落文件，命中行附所属分支上下文与 `registered` 标注）、`str tags`（标签词表 + 计数）、`str where`（ROOT → 目标面包屑）、`str get`（读取单个**已登记**条目的正文；多段路径可直读已登记内容目录内的未登记子项 / `--info` 元信息）。约定：检索均为**不区分大小写的字面子串**（非正则）；`find` / `grep` / `tags` 支持 `--json`；`find` 的条目字段检索跳过结构类条目（子分支自身会被单独访问，避免重复命中）；`get` 对子分支 / 链接 / 内容目录条目以 `BadArg` 拒绝并指路。全部不推进 `revision`、不写 `._meta`。规则是**纯新增**，DoD 增补第 32 项。 |
 
 ---
 
@@ -646,6 +647,8 @@ A.str/
 
 `str context <bundle> [uuid] --depth 2 --budget 8k` 输出「导图摘要 + 选中分支元信息 + 下级分支摘要 + 关联线」的 Markdown 片段，供直接拼接进模型上下文（`[uuid]` 缺省为 ROOT）。
 
+步骤 2 的「选出目标分支」与步骤 4 的「读具体文件」自 v1.15.0 起有**只读查询命令**直接支撑（§9「查询命令的约定」）：`str tags` 看导航维度 → `str find`（元数据）/ `str grep`（payload 正文）定位 → `str where` 确认面包屑 → `str get` 精读单个条目。AI MUST 优先走这条命令链路取数，而不是全树导出（`str export`）后自行筛选，更不得绕过 CLI 扫目录。
+
 ### 8.3 AI 写入约束
 
 1. **不得**修改或新建 UUID 目录名。
@@ -696,6 +699,11 @@ A.str/
 | `str norm [dir] [uuid]` | 输出**归一化 JSON**（供外部 Schema 工具 / AI 使用） | `--out -` |
 | `str context [dir] [uuid]` | 生成 AI 上下文片段 | `--depth` `--budget` |
 | `str export [dir]` | 导出为单一文件（只读、派生） | `--format json\|toml` `--out -` `--depth` |
+| `str find [dir] [query]` | **元数据检索**：在分支自身字段（`title`/`summary`/`type`/`tags`）与实体条目行字段（`title`/`summary`/`note`/`path`）中做不区分大小写的字面子串匹配，或按 `type` / 标签纯过滤；**检索范围 = 当前节点子树**（`--scope` 可显式指定，见下）；命中按 `(depth, rel)` 排序（只读） | `--type` `--tag` `--field` `--scope` `--depth` `--limit` `--real-path` `--json` |
+| `str grep <PATTERN> [dir]` | **正文全文检索**（字面子串；二进制与非 UTF-8 文件跳过，命中行截断防预算失控）：缺省遍历**检索范围内**各分支目录磁盘上的全部文本文件 —— 覆盖已登记 `payload`/`asset`、**内容文件夹未登记子项**与未登记散落文件（`--manifest-only` 退回仅清单条目口径）；命中行附所属分支（相对路径 + id + 标题）与 `registered` 标注（只读） | `--glob` `--ignore-case` `--manifest-only` `--scope` `--real-path` `--limit` `--json` |
+| `str tags [dir]` | **标签词表**：汇总全 bundle 的分支级标签与使用计数（次数降序，再按名升序），供检索前了解导航维度（只读） | `--json` |
+| `str where [dir] [uuid]` | **面包屑定位**：打印从 ROOT 到目标分支的完整链条（相对路径 + id + 标题 + `type`，目标行标注）（只读） | `--json` |
+| `str get [dir] [uuid] --path <P>` | **精读单个条目**：输出一个**已登记**实体条目的正文（字节直出 stdout）；`--path` 亦接受**多段路径**直读已登记内容目录（`role = "dir"`）内的未登记子项（`--info` 以 `registered: false` 标注、指纹按磁盘实算）；子分支 / 链接条目与其余未登记路径以 `BadArg` 拒绝并指路（只读） | `--path` `--info` |
 | `str reveal [dir]` | 平台适配：macOS 设置 Bundle 位 / 取消 `._meta` 隐藏 | — |
 
 **`[uuid]` 的缺省规则（规范条文）**：
@@ -710,6 +718,17 @@ A.str/
 - `init` 是唯一以「新建目录」为目标的命令：省略 `[dir]` 时以**当前路径**为基准目标，仍按「未以 `.str` 结尾则追加 `.str`」定名 —— 在 `foo/` 里执行 `str init` 创建的是**兄弟目录** `foo.str`；当前目录已以 `.str` 结尾时目标即自身，通常已存在而报错。
 - 位置参数顺序上，可选的 `[dir]` MUST NOT 排在必填位置参数之前（clap 等解析器的硬约束）：`spec set` 因此自本版起写作 `str spec set <VERSION> [dir]`。
 - 新增命令时一律沿用本条：凡取 bundle 为目标的命令，其 `<dir>` 位置参数都应写作 `[dir]` 并缺省当前工作目录。
+
+**查询命令（`find` / `grep` / `tags` / `where` / `get`）的约定**（§8 渐进式读取的命令面，v1.15.0）：
+
+- 五者全部**只读**：MUST NOT 推进 `revision`、MUST NOT 写任何 `._meta`、不参与 `._cache` 基线；
+- 语义上构成「**定位 → 精读**」链路：`tags`（导航维度）→ `find` / `grep`（按元数据 / 正文定位）→ `where`（确认位置）→ `get` / `show`（精读），AI 按需取用即可获得所需结构化数据，**不再需要**全树导出或绕过 CLI 扫目录；
+- `find` 与 `grep` 的检索词都是**不区分大小写的字面子串**（`grep` 大小写敏感为缺省、`--ignore-case` 放宽），MUST NOT 引入正则语义；`grep` MUST 跳过二进制（含 NUL 字节）与非 UTF-8 文件，命中行 MUST 截断（防止单行超长撑爆消费方预算）；
+- `grep` 缺省遍历各分支目录**磁盘上**的全部文本文件：覆盖已登记条目、内容文件夹（`role = "dir"`）的**未登记子项**与未登记散落文件（内容文件夹的子项本就不参与清单比对，§4.8），并以 `registered` 标注来源；`--manifest-only` 退回「仅清单登记条目」口径。遍历 MUST：不进入其它分支目录（含 `._meta` 的目录，各自作为独立 visit）、不进入子 bundle（§3.5）、跳过保留名 / 系统噪声 / `.lock`、应用忽略名单（§4.7，`Scan.ignore` 同源）；
+- `find` 的条目字段检索 MUST 跳过结构类条目行（`role` 为 `node` / `branch` / `link`）：子分支自身会被单独访问，父级行字段再命中只会产生重复；
+- **检索范围**：`find` / `grep` 的缺省范围是**当前节点子树**（沿用 `[uuid]` 缺省规则 —— `[dir]` 为 bundle 根即 ROOT = 全 bundle，指向分支目录即该分支及其全部后代）；`--scope <uuid|rel>` 可从任意位置显式指定范围（接受分支 id 或 bundle 相对路径，MUST NOT 静默回退为全 bundle）——据此可在指定节点 / 指定路径内查找，而不必复制或移动数据；
+- `find` / `grep` / `tags` / `where` MUST 支持 `--json`（机器可读输出，`find` / `grep` 另须支持 `--limit` 预算控制）；`find` / `grep` 的 JSON MUST 携带**绝对路径**字段（`path_abs` / `file`），文本输出经 `--real-path` 切换为绝对路径 —— 供管道与外部命令直接消费；
+- `get` 的 `--path` 接受两种形态：**已登记**实体条目（单段名，与 `entry add|set` 同口径），或**多段路径**直读已登记内容目录（`role = "dir"`）内的未登记子项（首段须为已登记 `dir` 条目，`--info` 以 `registered: false` 标注、指纹按磁盘实算）。未登记的散落文件（不在内容目录内）以 `BadArg` 拒绝并提示先 `ls` / `sync`；子分支 / 链接条目与目录本身 MUST 以 `BadArg` 拒绝并指路，MUST NOT 静默输出别的对象；`--info` 输出该条目的元信息 JSON（含 `size` / `sha256` 等指纹）而不读正文。
 
 **`meta set` / `entry set` / `author add|rm` / `spec set` 的约定**（写入「结构之外」的字段）：
 
@@ -1140,6 +1159,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 29 | **忽略名单** | bundle 根 `.gitignore` 含 `build/` 且磁盘存在未登记的 `build/` → `str validate --strict` **0 errors 0 warnings**；`policies.ignore = ["dist"]` 同样豁免；`!` 取反可恢复登记要求；`policies.gitignore = false` 关闭自动检测；已登记条目被删除 → 仍报 `E_MANIFEST_GHOST`（忽略名单不是删除开关）；`._meta` / `._schema/` / `._cache/` 等系统条目**不可**被 `!` 取反恢复（系统级忽略层） |
 | 30 | **实体与策略写入闭环** | `str entry add` 登记磁盘文件后 `str validate --strict` 0 errors，且 `size`/`sha256` 自动补齐；`entry rm` 只移除登记、磁盘文件保留；`str ignore add` 幂等、写后 `str fmt --check` 返回 0；`str policies set gitignore false` 落盘并生效；非法值（`manifest=bogus` / `gitignore=yes` / `id_version=5`）→ `BadArg` |
 | 31 | **链接完整性（软 / 硬）** | ① `str link add` 挂载 `node` / `branch` 后：父分支多出一条 `role = "link"`，**磁盘不新增目录**，`str validate --strict` 0 errors，目标分支内容可经挂载点读到；② 六类破坏各报对应码且断言精确到码 —— 目标 id 不存在（`E_LINK_NO_TARGET`）、目标为 ROOT（`E_LINK_TARGET_INVALID`）、`link` 行写了 `size`（`E_LINK_HAS_PAYLOAD`）、互相挂载成环与自我挂载（`E_LINK_CYCLE`）、同父重复挂载（`E_LINK_DUP`）、硬链接挂载自己的后代（`E_LINK_TARGET_INVALID`）；③ 删除语义：`str link rm` 对软连接只摘引用（目标与数据仍在），对硬链接连自身目录一并删除（目标与数据不动）；删除目标分支后全 bundle 内指向它的 `link` 被一并摘除，`str validate --strict` 仍 0 errors（无悬空）；④ `mode` 缺省 `"soft"`，显式 `"hard"` / `"soft"` 合法、其它值 `E_SCHEMA_FIELD`，非 `link` 行写 `mode` 报 `E_SCHEMA_FIELD`；⑤ 硬链接自有结构：`str link add --mode hard` 创建自身目录与 `._meta`（`path` = `id`），其下可正常 `branch add` / 挂载；硬链接分支登记内容条目 → `E_LINK_OWN_CONTENT`，缺 `id` → `E_LINK_TARGET_INVALID`，内容面板读到目标内容且目标数据不变 |
+| 32 | **查询命令闭环（只读）** | ① `str find <关键词>` 命中含该词的分支与条目行字段，输出相对路径 + id + 标题 + 命中字段，大小写不敏感；`--type` / `--tag`（交集）过滤正确，`--field` 限定后其它字段不再命中，`--limit` / `--depth` 生效，`--json` 可解析且含 `matched` 数组与 `path_abs` 绝对路径；**检索范围 = 当前节点子树**：`[dir]` 指向分支目录时只搜该子树，`--scope <uuid\|rel>` 显式指定（含 uuid 与相对路径两种形态；无法解析 → `BadArg`）；② `str grep <子串>` 命中正文行并给出 `行号 + 文本 + registered` 标注，按分支分组输出，scope 语义与 `find` 一致；**内容文件夹未登记子项与散落文件缺省参与检索**（`registered: false`，JSON 含 `file` 绝对路径），`--manifest-only` 退回仅清单口径；忽略名单剪中的路径不参与；其它分支目录不被重复遍历；`--ignore-case` 放宽大小写、`--glob` 限定路径、`--limit` 触发「提前停止」标注；含 NUL 的二进制文件不参与检索；③ `str tags` 输出全部分支级标签与计数（次数降序）；④ `str where <uuid>` 输出 ROOT → 目标的面包屑（每级含相对路径 + id + 标题，目标行标注）；⑤ `str get --path <P>` 直出已登记条目正文（字节一致）、`--info` 输出含 `sha256` 的元信息；**多段路径可直读已登记内容目录内的未登记子项**（`registered: false`、指纹按磁盘实算）；未登记散落文件 / 首段非 `dir` / 目录本身 / 子分支条目均 `BadArg` 且不落盘；⑥ 五个命令执行前后整份 bundle 的全部 `._meta` 字节不变（`revision` / `updated_at` 不动） |
 
 ---
 

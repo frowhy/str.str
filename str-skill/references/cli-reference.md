@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `SPEC.md`（规范正文，v1.14.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.7.2`）。
+> 本文以**实现的实际行为**为准，与 `SPEC.md`（规范正文，v1.15.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.8.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -283,6 +283,88 @@ macOS：`SetFile -a B` 设 bundle 位 + `chflags nohidden` 取消各 `._meta` �
 ### 3.21 `str codes`
 
 列出全部 **35** 个错误码（24 个 `E_*` + 11 个 `W_*`，含 `W_MANIFEST_*` 三个 advisory 变体）。规范 §9 未列此命令。
+
+### 3.22 `str find [QUERY] [DIR] [--type T] [--tag t]… [--field F] [--scope S] [--depth N] [--limit N] [--real-path] [--json]` · v0.8.0
+
+**元数据检索**（只读）。**检索范围 = 当前节点子树**（缺省规则见下），在其上匹配：
+
+- 分支自身字段：`title` / `summary` / `type` / `tags`（任一包含关键词即命中，命中字段记为 `title`…`tags`）；
+- 实体条目行字段（`entries[]` 中 `role` **非** `node`/`branch`/`link` 的行）：`title` / `summary` / `note` / `path`（命中字段记为 `entries[].<path>.<field>`；`path` 匹配记为 `path`）。
+- 结构类条目行不参与 —— 子分支自身会被单独访问，避免同一份数据在父级与本命中重复出现。
+
+关键词是**不区分大小写的字面子串**（非正则）。`--type` 精确等于过滤；`--tag` 可重复 / 逗号分隔（须**全部**包含，交集）；`--field` 限定检索字段（`all`（缺省）/ `title` / `summary` / `type` / `tags` / `note` / `path`，非法值 exit 2）；`--depth` 限制 `visit.depth ≤ N`；`--limit` 截断结果数。命中按 `(depth, rel)` 升序。**只给过滤器不给关键词 = 纯过滤**（列出所有匹配 `type` / 标签的分支）。
+
+**检索范围**：缺省为**当前节点子树**（§9 `[uuid]` 缺省规则的沿用）—— `[dir]` 为 bundle 根即全 bundle，指向某分支目录即只搜该分支及其全部后代；`--scope <uuid|rel>` 可从任意位置显式指定（分支 id 或 bundle 相对路径，二者都解析不了 → exit 2，不静默回退全 bundle）。
+
+```sh
+$S find . 跟进                     # 全 bundle（[dir] = 根）
+$S find 客户A.str 跟进             # [dir] 指向分支目录 → 只搜该子树
+$S find . 跟进 --scope 0192…      # 显式按 uuid 限定子树
+$S find . 跟进 --scope 0192…/0192… # 显式按 bundle 相对路径限定子树
+```
+
+- 文本输出一行一条：`<rel>  <id>  <标题>  (<type>)  [tags]  命中: <字段列表>`；无命中输出 `（无命中）`。
+- `--json`：JSON 数组，元素含 `path` / `depth` / `id` / `kind` / `title` / `type` / `summary` / `tags` / `matched`。
+
+```sh
+$S find . 跟进                     # 关键词检索
+$S find . --type crm.customer      # type 纯过滤
+$S find . --tag vip --tag 华东区   # 标签交集
+$S find . 张伟 --field title --limit 5 --json
+```
+
+### 3.23 `str grep <PATTERN> [DIR] [--glob G] [-i] [--manifest-only] [--scope S] [--real-path] [--limit N] [--json]` · v0.8.0
+
+**正文全文检索**（只读）。`<PATTERN>` 是必填位置参数（排在 `[DIR]` 之前，与 `ignore add <PATTERN> [DIR]` 同形）。**检索范围 = 当前节点子树**（同 §3.22：`[dir]` 指向分支目录即只搜该子树；`--scope <uuid|rel>` 显式指定）。
+
+- **缺省遍历检索范围内各分支目录磁盘上的全部文本文件**：覆盖已登记 `payload` / `asset` 条目、**内容文件夹（`role = "dir"`）的未登记子项**与未登记散落文件，按行做**字面子串**匹配（非正则）；命中带 `registered` 标注（`false` = 未登记）。`--manifest-only` 退回「仅清单登记条目」口径；
+- 遍历边界：不进入其它分支目录（含 `._meta` 的目录，各自作为独立 visit）、不进入子 bundle（`.str` 硬边界）、跳过保留名 / 系统噪声 / `.lock`、应用忽略名单（外层 `.gitignore` → bundle `.gitignore` → `policies.ignore`，与校验同源）；
+- 二进制（含 NUL 字节）与非 UTF-8 文件**跳过**；命中行截断到 **200 字符**（`…` 收尾）——防止超长行撑爆消费方预算；
+- `--glob`（如 `*.md`）只检索路径匹配的文件（匹配**分支内相对路径**，含目录段）；`--ignore-case` / `-i` 放宽大小写；`--limit N` 达到后**提前停止**并标注；
+- 文本输出按分支分组：首行 `<rel>  <id>  <标题>`，其后每行 `  <条目路径>:<行号>: <文本>`（`--real-path` 时为绝对路径，可直接管道给其它命令）；`--json`：数组，元素恒含 `branch{path,id,title}` / `entry`（分支内相对路径）/ `file`（**绝对路径**）/ `registered` / `line` / `text`。
+
+```sh
+$S grep 张伟 .                     # 全 bundle 正文检索（含未登记子项）
+$S grep 张伟 客户A.str             # 只搜该分支子树
+$S grep --scope 0192… 张伟 .      # 显式按 uuid 限定子树
+$S grep -i --glob "*.md" todo .    # 只搜 .md 文件、忽略大小写
+$S grep --manifest-only 张伟 .     # 仅清单登记条目（旧口径）
+$S grep --real-path --limit 20 报价 .   # 命中行显示绝对路径，可接 wc/sed 等
+$S grep --json 张伟 . | jq -r '.[].file' | sort -u   # 拿到全部命中文件的绝对路径
+```
+
+### 3.24 `str tags [DIR] [--json]` · v0.8.0
+
+**标签词表**（只读）：汇总全 bundle 的**分支级** `tags`，按使用次数降序、再按标签名升序。文本输出 `count<TAB>tag`；`--json` 输出 `[{"tag": …, "count": …}]`。检索前先看它，是成本最低的导航信号。
+
+### 3.25 `str where [DIR] [UUID] [--json]` · v0.8.0
+
+**面包屑定位**（只读）。目标解析沿用 `[uuid]` 缺省规则（缺省 = 当前节点）。文本输出从 ROOT 到目标的完整链条：每级一行 `<rel>  <id>  <标题>（<type>）`，按层级缩进、`└─` 连接，目标行尾标注 `← 目标`；`--json` 输出 `{bundle, target{path,depth,id,title,type}, chain[…]}`。
+
+```sh
+$S str where demo.str <uuid>
+```
+
+### 3.26 `str get [DIR] [UUID] --path <P> [--info]` · v0.8.0
+
+**精读单个条目**（只读）。`--path` 接受两种形态（路径段不得为空 / `.` / `..`）：
+
+- ① **已登记**实体条目（单段名，与 `entry add|set` 同口径）；
+- ② **内容文件夹子项**（多段路径，如 `reports/r.md`）：首段须是已登记 `role = "dir"` 的条目，其余段为磁盘上的未登记子项（内容文件夹的子项本就不参与清单比对）——正文按磁盘直读，`--info` 以 `registered: false` 标注、`role` 按扩展名推断（`payload`/`asset`）、`size` / `sha256` 按磁盘实算；
+
+其余一律 exit 2 并指路：
+
+- 未登记的**散落文件**（不在内容目录内）→ 提示先 `str ls` / `str sync` 补登；
+- 首段不是已登记 `dir` 条目的多段路径 → 指明「未登记的内容目录」；
+- 子分支（`node`/`branch`）→ 指路 `str show` / 对其中的条目再 `get`；链接（`link`）→ 提示对目标分支操作；内容目录本身 / 磁盘子目录 → 指路 `str ls` 或改用多段路径；
+- 正文为**字节直出 stdout**（不加换行、不做转码），可安全接管道；
+- `--info` 不读正文，输出该条目元信息 JSON：`branch{path,id,title}` + `registered` + `entry{path,role,id,type,title,summary,note,media_type,size,sha256,count,optional,schema}`。
+
+```sh
+$S get demo.str <uuid> --path profile.json                  # 已登记条目，正文直出 stdout
+$S get demo.str <uuid> --path reports/r.md                  # 内容文件夹未登记子项
+$S get --info --path profile.json demo.str <uuid>           # 元信息 JSON
+```
 
 ## 4. `E_REVISION_STALE` 与 `._cache/revisions.json`
 

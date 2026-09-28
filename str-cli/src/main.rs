@@ -212,6 +212,101 @@ enum Cmd {
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
+    /// 元数据检索：按关键词 / 类型 / 标签定位分支（渐进式读取入口）
+    Find {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 关键词（对 title / summary / type / tags 及条目字段做不区分大小写的包含匹配）
+        query: Option<String>,
+        /// 只看 `type` 精确等于该值的分支
+        #[arg(long = "type")]
+        type_: Option<String>,
+        /// 标签过滤（分支须含全部所列标签；可重复 / 逗号分隔）
+        #[arg(long, value_delimiter = ',')]
+        tag: Vec<String>,
+        /// 限定检索字段：all / title / summary / type / tags / note / path
+        #[arg(long)]
+        field: Option<String>,
+        /// 检索范围：分支 id 或 bundle 相对路径（该分支及其全部后代）；缺省为当前节点
+        #[arg(long)]
+        scope: Option<String>,
+        /// 最大下钻深度
+        #[arg(long)]
+        depth: Option<usize>,
+        /// 最多返回的命中数
+        #[arg(long)]
+        limit: Option<usize>,
+        /// 文本输出使用绝对路径（JSON 恒含 `path_abs`）
+        #[arg(long = "real-path")]
+        real_path: bool,
+        /// 输出 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 正文全文检索（命中行附所属分支上下文；覆盖未登记的内容文件夹子项）
+    Grep {
+        /// 检索文本（字面子串，非正则）
+        pattern: String,
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 只检索路径匹配该通配模式的文件（如 `*.md`）
+        #[arg(long)]
+        glob: Option<String>,
+        /// 忽略大小写
+        #[arg(long = "ignore-case", short = 'i')]
+        ignore_case: bool,
+        /// 只检索清单已登记的条目（缺省遍历分支目录磁盘上的全部文本文件）
+        #[arg(long = "manifest-only")]
+        manifest_only: bool,
+        /// 检索范围：分支 id 或 bundle 相对路径（该分支及其全部后代）；缺省为当前节点
+        #[arg(long)]
+        scope: Option<String>,
+        /// 最多返回的命中行数
+        #[arg(long)]
+        limit: Option<usize>,
+        /// 文本输出使用绝对路径（JSON 恒含 `file` 绝对路径）
+        #[arg(long = "real-path")]
+        real_path: bool,
+        /// 输出 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 汇总全 bundle 的标签词表（供导航）
+    Tags {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 输出 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 定位某分支：打印从 ROOT 到目标的链条（面包屑）
+    Where {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 分支 id（缺省为当前节点）
+        uuid: Option<String>,
+        /// 输出 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 读取一个已登记条目的正文（单文件直出，不展开整树）
+    Get {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 条目所在分支 id（缺省为当前节点）
+        uuid: Option<String>,
+        /// 条目路径（单段名，先 `str ls` 查看）
+        #[arg(long = "path")]
+        path: String,
+        /// 只打印该条目的元信息（JSON），不输出正文
+        #[arg(long)]
+        info: bool,
+    },
     /// 列出全部错误码
     Codes,
 }
@@ -818,6 +913,73 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
         }
         Cmd::Reveal { dir } => {
             cmd::reveal(&dir)?;
+            Ok(0)
+        }
+        Cmd::Find {
+            dir,
+            query,
+            type_,
+            tag,
+            field,
+            scope,
+            depth,
+            limit,
+            real_path,
+            json,
+        } => {
+            cmd::find(
+                &dir,
+                query,
+                type_.as_deref(),
+                &tag,
+                field.as_deref(),
+                scope.as_deref(),
+                depth,
+                limit,
+                real_path,
+                json,
+            )?;
+            Ok(0)
+        }
+        Cmd::Grep {
+            dir,
+            pattern,
+            glob,
+            ignore_case,
+            manifest_only,
+            scope,
+            real_path,
+            limit,
+            json,
+        } => {
+            cmd::grep(
+                &dir,
+                &pattern,
+                glob.as_deref(),
+                ignore_case,
+                manifest_only,
+                scope.as_deref(),
+                real_path,
+                limit,
+                json,
+            )?;
+            Ok(0)
+        }
+        Cmd::Tags { dir, json } => {
+            cmd::tags(&dir, json)?;
+            Ok(0)
+        }
+        Cmd::Where { dir, uuid, json } => {
+            cmd::where_(&dir, uuid, json)?;
+            Ok(0)
+        }
+        Cmd::Get {
+            dir,
+            uuid,
+            path,
+            info,
+        } => {
+            cmd::get(&dir, uuid, &path, info)?;
             Ok(0)
         }
         Cmd::Codes => {

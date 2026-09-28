@@ -8,7 +8,7 @@
 用一个**目录树**存储结构化资源，让人类与 AI Agent 在同一份资产上安全地读写、协作与版本控制。
 
 - 格式：`.str` 目录 bundle（形态对标 macOS `.app`）—— 纯目录 + 纯文本，零平台依赖
-- 本 crate：`str` 二进制（20+ 子命令、35 个校验错误码）+ 可复用的纯 Rust 库
+- 本 crate：`str` 二进制（25+ 子命令、35 个校验错误码）+ 可复用的纯 Rust 库
 - 规范正文（唯一真源）、JSON Schema、示例 bundle、Agent 技能包：见
   [frowhy/str.str](https://github.com/frowhy/str.str)
 
@@ -34,6 +34,13 @@ str branch add 我的项目.str [uuid] --type code.docs --title 设计文档
 str tree       我的项目.str --show-refs
 str sync       我的项目.str          # 磁盘实际状态 → 修正 entries（幂等）
 str validate   我的项目.str --strict # 0 errors / 0 warnings 才算交付
+
+# 定位 → 精读（全部只读）
+str tags       我的项目.str                       # 标签词表 + 计数
+str find       我的项目.str 关键词 --limit 10      # 元数据检索
+str grep       "关键词" 我的项目.str --glob "*.md" # payload 正文检索
+str where      我的项目.str [uuid]                # ROOT → 目标面包屑
+str get        我的项目.str [uuid] --path a.md    # 精读单个条目
 ```
 
 作为库使用：
@@ -59,12 +66,12 @@ assert_eq!(report.error_count(), 0);
 
 ## 版本
 
-本 crate 的版本（当前 **0.7.2**）是**独立于格式规范版本**的一条轴：规范定义磁盘上的数据契约，
-crate 定义代码 / 命令契约，两者可各自演进。当前实现对应规范 **v1.13.0**（`str` 主版本 = `1`）；
+本 crate 的版本（当前 **0.8.0**）是**独立于格式规范版本**的一条轴：规范定义磁盘上的数据契约，
+crate 定义代码 / 命令契约，两者可各自演进。当前实现对应规范 **v1.15.0**（`str` 主版本 = `1`）；
 各条轴与发行 tag 的对应关系登记在仓库根 `VERSIONS.toml`。逐版变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ```sh
-str --version     # str 0.7.2
+str --version     # str 0.8.0
 ```
 
 ## 贡献
