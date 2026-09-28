@@ -4,9 +4,9 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.13.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.14.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
-| 文档日期 | 2026-09-18 |
+| 文档日期 | 2026-09-28 |
 | 文档定位 | **本文件即规范（唯一真源）**：第 1 章为可直接投喂 AI 开发代理的主提示词（指令主体），第 2~13 章为规范性附录；其中第 3~9 章为格式的 SSOT，实现代码不得偏离，如需偏离必须先修订本文件 |
 | 目标读者 | AI 开发代理（主）、格式实现者、编辑软件开发者 |
 
@@ -28,6 +28,7 @@
 | **v1.11.0** | 2026-09-14 | **`[uuid]` 缺省目标从 ROOT 细化为「当前节点」**。v1.9.0 的「省略即 ROOT」在 `[dir]` 指向 bundle 内部分支目录时语义缺失（用户在分支目录内操作时仍被迫显式给出 id，或被「ROOT 的直接子分支」误拒）。v1.11.0 规定：`[uuid]` 省略时目标为**当前节点** —— `[dir]` 为 bundle 根即 ROOT，指向分支目录（或其内部子目录）即该分支；工具 MUST 以**整份 bundle** 为扫描视角（`[dir]` 向上解析 bundle 根，不穿越 `.str` 硬边界），保证写操作能同步修复父级 `entries[]`。连带：`node add` 在分支目录下执行时 MUST 带原因拒绝（独立节点只能挂 ROOT）。规则是**放宽 + 寻址细化**，显式给出 `[uuid]` 的旧调用不受影响，DoD 增补第 27 项。 |
 | **v1.12.0** | 2026-09-16 | **保留目录豁免登记（规范 ↔ 实现收口）**：明确 `._meta` / `._schema/` / `._cache/` 属**格式内部保留目录**，**不参与 `entries[]` 清单比对**（§1.3 约束 5、§4.8），消解「§1.3 要求除 `._meta` 外全部登记」与「实现放行保留目录」的落差。连带：`str init`、`scripts/build-example.sh`、§10 示例与官方示例 bundle **不再登记 `._schema`**。`role: schema` / `cache` 保留为**可选的显式登记**（既有已登记的 bundle 仍然合法，无需迁移）。规则是**放宽**，DoD 增补第 28 项。 |
 | **v1.13.0** | 2026-09-18 | **新增忽略名单**：`[policies]` 增加 **`ignore`**（字符串数组，gitignore 语义模式，bundle 内相对路径）与 **`gitignore`**（布尔，默认 `true` = 自动检测并应用 `.gitignore`）。工具在**分支遍历**与**清单比对**（§4.8）中跳过被忽略条目：不报 `E_MANIFEST_MISSING`、不告警、不参与 `str sync` 补登。叠加顺序（由外向内，内层命中覆盖外层）：外层 git 仓库的 `.gitignore` → bundle 根的 `.gitignore` → 分支目录内的 `.gitignore` → `policies.ignore`（显式配置优先级最高）。**`._meta` / `._schema/` / `._cache/` / `.lock` 与 §3.4 豁免清单并入系统级忽略层**（恒为最内层、常开、不可被用户模式取反恢复）。② **CLI 命令面补齐**：新增 `str entry add\|rm`（实体登记 / 移除登记，自动补指纹）、`str ignore add\|rm\|list` 与 `str policies set`（`[policies]` 从此有 CLI 写入路径，「任何字段都必须有 CLI 写入路径」彻底闭合）。规则是**放宽**（缺省行为变更仅影响「散落文件是否报错」，不改任何既有字段语义），DoD 增补第 29、30 项。 |
+| **v1.14.0** | 2026-09-28 | **新增「软连接子分支」`role = "link"`（恢复 v1.1.0 撤回的「引用」能力，但改为**声明式**）**：父分支的 `entries[]` 可登记一行 `role = "link"` + `target = <目标分支 id>`，把**任意 `node` / `branch`**（ROOT 除外）挂载为本分支的子分支，**磁盘上不新建任何目录或文件** —— 数据始终只在目标分支内存在，不复制、不移动。与 v1.0 的「link 目录」差别在于载体：v1.0 是真实目录（因而有 `E_LINK_HAS_PAYLOAD` 等「这个目录里不许放东西」的约束），v1.14.0 是**纯声明**（没有目录 ⇒ 天然不可能承载数据，也就不必再为它豁免清单比对）。语义定案：`link` 是**只读视图**（所有权唯一在目标分支，链接下不得新建子分支或放数据）；目标必须是 `node` / `branch` 且不得是 ROOT；**禁止成环**（含自我挂载）；**删除链接只摘引用**、**删除目标分支时工具 MUST 一并摘除指向它的全部 `link`**（不留悬空）。新增 `E_LINK_NO_TARGET` / `E_LINK_TARGET_INVALID` / `E_LINK_HAS_PAYLOAD` / `E_LINK_CYCLE` / `E_LINK_DUP` 五个错误码与 `str link add\|rm` 两个命令（§9），`entries[].target` 字段、`role` 枚举新增值、三份 Schema 同步，DoD 增补第 31 项。规则是**新增可选能力**，既有 bundle 无需迁移。 |
 
 ---
 
@@ -308,11 +309,12 @@ Entry 字段表：
 | --- | --- | --- | --- | --- |
 | `path` | string | ✅ | 全部 | 相对本目录的**单段路径**（文件名或目录名，不含 `/`）；`entries.path` 不得重复 |
 | `role` | enum | ✅ | 全部 | 见下方 role 表 |
-| `id` | uuid | ✅ | `node`/`branch` | 子分支自身标识，必须与 `path` 一致 |
+| `id` | uuid | ✅ | `node`/`branch` | 子分支自身标识，必须与 `path` 一致（`link` **不得**写 `id`，见 §4.6.1） |
+| `target` | uuid | ✅ | `link` | 软连接指向的目标分支 `id`（见 §4.6.1） |
 | `type` | string | 否 | `node`/`branch` | 子分支类型（便于只读父级 `._meta` 就完成路由） |
-| `title` | string | 否 | `node`/`branch` | 展示名 |
-| `summary` | string | 否 | `node`/`branch` | 子分支摘要，便于免递归检索 |
-| `order` | integer ≥ 0 | 建议 | `node`/`branch` | 同层排序键；缺省按 `path` 字典序 |
+| `title` | string | 否 | `node`/`branch`/`link` | 展示名（`link` 上写作**挂载点别名**，覆盖目标标题） |
+| `summary` | string | 否 | `node`/`branch`/`link` | 子分支摘要，便于免递归检索 |
+| `order` | integer ≥ 0 | 建议 | `node`/`branch`/`link` | 同层排序键；缺省按 `path` 字典序 |
 | `media_type` | string | 建议 | `payload`/`asset` | IANA 媒体类型 |
 | `size` | integer ≥ 0 | ✅ | `payload`/`asset` | 字节数（强制，强度由 `policies.sha256` 控制） |
 | `sha256` | string(64 hex) | ✅ | `payload`/`asset` | 内容指纹（强制），协作期变更检测的基础 |
@@ -329,6 +331,7 @@ Entry 字段表：
 | --- | --- | --- |
 | `node` | 独立节点子目录（深度 1；仅出现在 ROOT 的 entries 中） | ✅ 是（即「子分支」） |
 | `branch` | 关联分支子目录（深度 ≥2） | ✅ 是（即「孙分支及更深层级」） |
+| `link` | **软连接子分支**：声明式挂载的目标分支（磁盘上无对应目录），见 §4.6.1 | ✅ 是（以「挂载进来的子分支」身份出现在分支结构中） |
 | `payload` | 承载结构化数据的文件（由本分支「拥有」） | ❌ |
 | `asset` | 附属素材文件（图片/PDF/音视频等） | ❌ |
 | `dir` | 普通子目录（纯内容容器，不含 `._meta`，因而不是分支） | ❌ |
@@ -341,6 +344,39 @@ Entry 字段表：
 > **不存在「素材目录」这一独立概念**：节点/分支目录**本身就是素材目录** —— 图片、PDF、附件等直接放在分支目录内即可，**无需**为存放素材而额外建目录。子目录只是纯内容容器，不承担任何特殊语义（不因「装素材」而获得角色）。
 >
 > **ROOT 元数据记录分支结构** = ROOT 的 `entries[]` 中所有 `role = node` 的条目（含 `title`/`type`/`order`/`summary`），编辑软件**无需递归即可渲染第一层导图**。
+
+### 4.6.1 `role = "link"`：软连接子分支（可选）
+
+**语义**：把另一个分支**挂载**为本分支的子分支（类比文件系统 symlink）：在结构树 / 导图里它就是一个子分支，可展开、可下钻、可看内容；但**数据始终只存在于目标分支内** —— 不复制、不移动、不产生第二份 `._meta`。
+
+| 字段 | 要求 |
+| --- | --- |
+| `path` | ✅ 必填，**等于目标分支的 id**（与 `role = branch` 同构：`path` 即「子目录名」，只是该目录不在本分支下） |
+| `target` | ✅ 必填，目标分支的 `id` |
+| `mode` | 否，`"soft"`（默认）｜`"hard"`，见下方两种形态 |
+| `id` | ❌ **不得写**（`id` = 「本分支拥有的身份」，链接不拥有身份；写了会让同一 id 在 bundle 内出现两次 ⇒ `E_ID_DUP`） |
+| `title` | 否，挂载点别名（覆盖目标标题显示） |
+| `summary` / `order` / `note` | 否 |
+| `size` / `sha256` / `count` / `media_type` / `schema` | ❌ **不得写**（`E_LINK_HAS_PAYLOAD`） |
+
+**两种形态**：
+
+- **软连接（`mode = "soft"`，缺省）**：目标的**完整视图** —— 结构树 / 导图渲染目标的整棵子树（分支 + 内容），身份 = 目标分支（点挂载行 = 选中真身，展开态与真身共享）。同一目标可被多处挂载 ⇒ DAG；允许挂载自己的后代（子树多处可见，渲染按目标身份记账并去重）。
+- **硬链接（`mode = "hard"`）**：**内容引用 + 自有结构** —— 是一条**有身份的真实分支**：必写 `id` 且 `path = id`（自身目录名，目录真实存在于挂载父分支目录下、含自有 `._meta`，**参与清单比对**）；`target` 指向内容来源分支，内容面板显示**目标分支的内容条目**（payload / asset / dir，文件仍在目标分支目录里，只有一份）且**只读**（增删 / 登记 / 粘贴必须到目标分支操作）；**目标的分支结构不跟过来**（树 / 导图不渲染目标的子分支），自身 `entries[]` 只允许登记**子分支**（`branch` / `node`）—— 登记内容条目即 `E_LINK_OWN_CONTENT`。**不得挂载自己的后代**（内容自嵌套无意义 ⇒ `E_LINK_TARGET_INVALID`）。链接行**不出现在内容条目列表里**（它是结构声明，已在结构树 / 导图呈现：软连接「⤷」、硬链接「→」）。
+
+规则：
+
+1. **声明式，磁盘上无对应目录**：`link` 只是一条声明，**不参与清单比对**（§4.8）—— 不得因「磁盘上没有 `path` 对应的目录」报 `E_MANIFEST_GHOST`，也不得把目标分支目录当本目录条目重复登记。
+2. **同一父下同一目标只能挂一次**：`entries.path` 不得重复，故同一目标在同一父分支内重复挂载即 `E_LINK_DUP`（不同父分支各挂一次是合法的）。
+3. **目标必须是 `node` 或 `branch`，不得是 ROOT**：目标须在本 bundle 内可解析（否则 `E_LINK_NO_TARGET`）；解析到 ROOT、或解析结果不是可挂载的分支 ⇒ `E_LINK_TARGET_INVALID`。
+4. **只读视图（所有权唯一）**：工具 MUST NOT 在链接「之下」新建子分支或写入内容 —— 要改就改目标分支本身。链接只是「进得去」的入口，不是第二份所有权。
+5. **禁止成环**：图的边集 = **真实父子边**（父 → 子）∪ **挂载边**（挂载点 → 目标）；沿这个图从任一分支出发能回到自己（**含自我挂载、互相挂载、挂进自己的祖先**）即 `E_LINK_CYCLE`。注意「挂进自己的**后代**」不是环 —— 那是合法的 DAG（同一子树多处可见），但渲染必须按目标分支身份记账并去重，否则同一子树会被重复展开。
+6. **删除语义**：
+   - 删除 `link` ⇒ **只摘引用**，目标分支与其数据不受影响；
+   - 删除**目标分支（真身）** ⇒ 工具 MUST 一并摘除全 bundle 内指向它的全部 `link`，**不得留下悬空**（这是软连接最容易出事故的地方，故写成 MUST 而非「建议」）。
+7. **呈现**：同一目标可被多个父分支挂载 ⇒ 分支结构由「树」变为 **DAG**。展开 / 选中等视图状态应以**目标分支的身份**记账（打开任一挂载点 = 打开同一份数据）；渲染时须靠规则 5 的环检测兜住无限递归。
+
+> **与 `refs[]`（§4.5）的区别**：`refs[]` 是**关系标注**（不改变结构，只画一条线）；`link` 是**挂载**（改变结构，多出一个孩子）。二者可并存 —— 先把分支 `link` 挂进来，再用 `refs[]` 标注它与其他分支的语义关系。
 
 ### 4.7 `policies`（仅 root，可选，工具缺省值见括号）
 
@@ -494,6 +530,12 @@ A.str/
 | `E_REF_NO_TARGET` | error | `refs[].target` 无法在本 bundle 内解析 |
 | `E_REF_SELF` | error | `refs[].target` 等于自身 `id` |
 | `E_REF_CYCLE` | error | `refs` 关联图成环 |
+| `E_LINK_NO_TARGET` | error | `entries[role=link].target` 无法在本 bundle 内解析（§4.6.1 规则 3） |
+| `E_LINK_TARGET_INVALID` | error | 链接的目标是 ROOT，或不是可挂载的 `node` / `branch`；硬链接（`mode = "hard"`）不得挂载自己的后代、必须写 `id` 且 `path = id` |
+| `E_LINK_HAS_PAYLOAD` | error | `role = "link"` 的条目携带了 `id` / `size` / `sha256` / `count` / `media_type` / `schema`（软连接是只读视图，不承载数据、不持有身份） |
+| `E_LINK_CYCLE` | error | 软连接挂载图成环（含自我挂载） |
+| `E_LINK_DUP` | error | 同一父分支内重复挂载同一目标（`entries[].path` 重复的软连接形态） |
+| `E_LINK_OWN_CONTENT` | error | 硬链接分支的自有 `entries[]` 登记了内容条目（`payload` / `asset` / `dir`；内容所有权唯一在目标分支，自有 entries 只允许子分支） |
 | `E_DEPTH_EXCEEDED` | error | 分支树深度超过 `max_depth` |
 | `E_MANIFEST_MISSING` | error | 磁盘存在但 `entries` 未登记 |
 | `E_MANIFEST_GHOST` | error | `entries` 登记但磁盘不存在（且 `optional` 非真） |
@@ -636,6 +678,8 @@ A.str/
 | `str branch rm [dir] [uuid]` | 删除关联分支（含其全部下级） | `--force` `--recursive` |
 | `str ref add [dir] [uuid] --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
 | `str ref rm [dir] <ref-uuid>` | 删除关联线（源分支由工具定位，也可用 `--uuid` 指定） | — |
+| `str link add [dir] [uuid] --target <uuid>` | 在指定分支下**挂载**一个链接子分支（`role = "link"`，磁盘不新建任何东西；`mode = "soft"` 完整视图 / `"hard"` 仅内容关联且只读） | `--mode` `--title` `--order` `--note` |
+| `str link rm [dir] [uuid] --target <uuid>` | 摘除一条链接：软连接**只摘引用**；硬链接连自身目录一并删除（目标分支与数据不动） | — |
 | `str meta set [dir] [uuid]` | 写入**分支自身**的元信息字段 | `--type` `--title` `--summary` `--name` `--tags` |
 | `str entry add [dir] [uuid]` | 向 `entries[]` **登记一个实体条目**（自动补 `size`/`sha256`/`count`，`role` 缺省按磁盘对象推断） | `--path` `--role` `--type` `--title` `--summary` `--note` `--order` `--media-type` `--optional` |
 | `str entry rm [dir] [uuid]` | 移除一条登记（**不删除磁盘文件**） | `--path` |
@@ -1095,6 +1139,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 28 | **保留目录免登记** | bundle 根含 `._schema/` / `._cache/` 而 `entries[]` 未登记 → `str validate --strict` **0 errors 0 warnings**；显式登记为 `role` = `schema` / `cache` 亦不报错（可选声明）；`str init` 与 §10 示例产物**不含** `._schema` 条目 |
 | 29 | **忽略名单** | bundle 根 `.gitignore` 含 `build/` 且磁盘存在未登记的 `build/` → `str validate --strict` **0 errors 0 warnings**；`policies.ignore = ["dist"]` 同样豁免；`!` 取反可恢复登记要求；`policies.gitignore = false` 关闭自动检测；已登记条目被删除 → 仍报 `E_MANIFEST_GHOST`（忽略名单不是删除开关）；`._meta` / `._schema/` / `._cache/` 等系统条目**不可**被 `!` 取反恢复（系统级忽略层） |
 | 30 | **实体与策略写入闭环** | `str entry add` 登记磁盘文件后 `str validate --strict` 0 errors，且 `size`/`sha256` 自动补齐；`entry rm` 只移除登记、磁盘文件保留；`str ignore add` 幂等、写后 `str fmt --check` 返回 0；`str policies set gitignore false` 落盘并生效；非法值（`manifest=bogus` / `gitignore=yes` / `id_version=5`）→ `BadArg` |
+| 31 | **链接完整性（软 / 硬）** | ① `str link add` 挂载 `node` / `branch` 后：父分支多出一条 `role = "link"`，**磁盘不新增目录**，`str validate --strict` 0 errors，目标分支内容可经挂载点读到；② 六类破坏各报对应码且断言精确到码 —— 目标 id 不存在（`E_LINK_NO_TARGET`）、目标为 ROOT（`E_LINK_TARGET_INVALID`）、`link` 行写了 `size`（`E_LINK_HAS_PAYLOAD`）、互相挂载成环与自我挂载（`E_LINK_CYCLE`）、同父重复挂载（`E_LINK_DUP`）、硬链接挂载自己的后代（`E_LINK_TARGET_INVALID`）；③ 删除语义：`str link rm` 对软连接只摘引用（目标与数据仍在），对硬链接连自身目录一并删除（目标与数据不动）；删除目标分支后全 bundle 内指向它的 `link` 被一并摘除，`str validate --strict` 仍 0 errors（无悬空）；④ `mode` 缺省 `"soft"`，显式 `"hard"` / `"soft"` 合法、其它值 `E_SCHEMA_FIELD`，非 `link` 行写 `mode` 报 `E_SCHEMA_FIELD`；⑤ 硬链接自有结构：`str link add --mode hard` 创建自身目录与 `._meta`（`path` = `id`），其下可正常 `branch add` / 挂载；硬链接分支登记内容条目 → `E_LINK_OWN_CONTENT`，缺 `id` → `E_LINK_TARGET_INVALID`，内容面板读到目标内容且目标数据不变 |
 
 ---
 

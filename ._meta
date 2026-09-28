@@ -2,16 +2,16 @@
 # ROOT 的 [[entries]] 中 role = "node" 的条目才是「分支」；
 # 其余 role（payload / dir / bundle / cache）是 ROOT 的内容。
 str = 1
-spec = "1.13.0"
+spec = "1.14.0"
 kind = "root"
 id = "01a09bce-bd18-7305-89bf-d45e87e64fee"
 name = "str"
 title = "STR 结构化树资源格式 · 规范与参考实现"
 summary = "STR 格式的规范正文、三份档位 JSON Schema、示例 bundle、Rust 参考实现与 AI Agent 技能包；本仓库自身即一个 .str bundle（自举）。"
 tags = ["str", "format", "self-hosted"]
-revision = 95
+revision = 105
 created_at = 2026-09-14T01:26:52+08:00
-updated_at = 2026-09-28T03:05:01+00:00
+updated_at = 2026-09-28T13:26:30+00:00
 
 [policies]
 id_version = 7
@@ -31,8 +31,8 @@ at = 2026-09-14T01:26:52+08:00
 path = "CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 39726
-sha256 = "ed59eb88029d7bec15f953e7f19cef01fcc5afcbdc0bcc3cbcadc08555c956ef"
+size = 42349
+sha256 = "aeee4db8c9927b632a1856340ae73bbd7684bc91b7b71fa4c882eb29062824d7"
 
 [[entries]]
 path = "LICENSE-APACHE"
@@ -53,29 +53,29 @@ path = "README.md"
 role = "payload"
 media_type = "text/markdown"
 size = 21713
-sha256 = "1028da5202cdeb078ed33b1c53fa8ed1cfb1f8373a02af71aaf7aba4b26c04d7"
+sha256 = "d525db24f1670f0cb8df2c551d7340270edfa4665c54fd3f161e2051efd56ece"
 
 [[entries]]
 path = "SPEC-CHANGELOG.md"
 role = "payload"
 media_type = "text/markdown"
-size = 5378
-sha256 = "3946af6094b7d327dbc3c1a3d038992bd42261c11e0888eef7feb4895ed6874b"
+size = 6533
+sha256 = "db3d57415ee5b5afce9d5f4a31248bf7c9cd5610d984d40b0f5fade33220adb5"
 
 [[entries]]
 path = "SPEC.md"
 role = "payload"
 title = "规范正文（唯一真源）"
 media_type = "text/markdown"
-size = 86586
-sha256 = "6031b17c096d22da22c2f4cecf26ad2d27d5c9b87b1f1abb473f8ea0f3095bd5"
+size = 95679
+sha256 = "781c3770c4cc31ce3061e194c465b8816bfbe425927588b8d989d06a48b31502"
 
 [[entries]]
 path = "VERSIONS.toml"
 role = "payload"
 media_type = "application/toml"
 size = 5192
-sha256 = "be41014ab68b015dad971ea804ff32cd9ef675bfb7e3b69208c5fa69577eb447"
+sha256 = "72daec8d84a0c89532eff1da313b9525d49a520c18b4fd9c83f8f85984560b12"
 
 [[entries]]
 path = "examples"

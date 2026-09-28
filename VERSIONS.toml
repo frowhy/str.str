@@ -41,7 +41,7 @@ last_published = "v0.7.2"
 #   SPEC.md 头部表、仓库根 ._meta 的 `spec`、str-cli/src/lib.rs 的
 #   SPEC_VERSION、README.md 的「规范版本」、._schema/*.json 的 description、
 #   scripts/build-example.sh 的生成模板、examples/客户运营.str 的 ._meta。
-version = "1.13.0"
+version = "1.14.0"
 # 格式主版本：写入每份 `._meta` 的 `str` 字段。工具只强校验这一个值（规范 §13 规则 1），
 # `spec` 仅供人类追溯。
 major = 1
@@ -73,7 +73,7 @@ displayName = "STR 资源树"
 # **与 release.tag 无绑定关系**：不单独打 tag，版本随发行矩阵冻结；
 # 只在 GUI 自身内容变化时升版，因此常与 cli.version 不相等 —— 这是设计，不是漂移。
 # 必须同时等于：str-gui/Cargo.toml、str-gui/Cargo.lock。
-version = "0.4.1"
+version = "0.5.0"
 # GUI 随附（链接）的 str-format 库最低版本：写操作与校验走同一代码路径，
 # 新增 CLI 命令 / 修复指纹逻辑后应同步升此约束。
 uses_cli_format = ">=0.6.0"

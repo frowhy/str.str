@@ -28,6 +28,11 @@ pub struct Visit {
     pub parent: Option<usize>,
     /// 原始 `._meta` 文本是否读取成功。
     pub readable: bool,
+    /// 硬链接分支（规范 §4.6.1 `mode = "hard"`）：内容来源目标分支的 id。
+    /// 硬链接是有身份的真实分支（`path = id` = 自身目录），内容面板显示目标的
+    /// 内容条目且只读、目标的分支结构不跟过来；自有 `entries` 只允许子分支。
+    /// 普通分支与软连接挂载视图为 `None`。
+    pub hard_link_to: Option<String>,
 }
 
 /// 一次完整扫描的结果。
@@ -280,6 +285,7 @@ impl Bundle {
             meta: root_parsed,
             parent: None,
             readable: true,
+            hard_link_to: None,
         });
 
         let mut queue: VecDeque<usize> = VecDeque::from([0usize]);
@@ -337,6 +343,19 @@ impl Bundle {
                         by_id.entry(id.clone()).or_default().push(idx);
                     }
                 }
+                // 硬链接分支识别：父分支 `entries` 里 `role = "link"` 且
+                // `mode = "hard"` 且 `path` = 本目录名 → 内容来源 = 其 `target`。
+                let hard_link_to = visits[cur]
+                    .meta
+                    .as_ref()
+                    .and_then(|m| {
+                        m.entries.iter().find(|e| {
+                            e.is_link()
+                                && e.mode.as_deref() == Some("hard")
+                                && e.path == name
+                        })
+                    })
+                    .and_then(|e| e.target.clone());
                 visits.push(Visit {
                     dir: child.clone(),
                     rel,
@@ -344,6 +363,7 @@ impl Bundle {
                     meta: parsed,
                     parent: Some(cur),
                     readable: true,
+                    hard_link_to,
                 });
                 max_depth = max_depth.max(d);
                 queue.push_back(idx);

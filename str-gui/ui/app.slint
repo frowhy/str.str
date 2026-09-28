@@ -226,6 +226,23 @@ export struct BranchRow {
     has-children: bool,
     // 是否含内容条目（`node`/`branch` 之外）：控制「展开 / 收起内容」菜单项可用性。
     has-entries: bool,
+    // 链接行（`role = "link"`，规范 §4.6.1）：`mounted` = 软连接视图（身份 = 目标
+    // 分支，点它 = 选中真身；`mount-parent` = 挂载点分支，供「移除挂载」定位）；
+    // `hard` = 硬链接（表现与软连接一致：身份 / 信息 / 内容 = 目标且内容只读，
+    // 标题带「≠」），额外渲染自有子分支 —— `link-visit` = 自身分支 visit
+    //（「新建子分支」的落点），软连接为 -1。
+    mounted: bool,
+    hard: bool,
+    mount-parent: int,
+    link-visit: int,
+    // 挂载选择器自己的展开状态（与 `expanded` 互相独立，见 `pick_expanded`）。
+    // 挂载对话框复用本模型时的**逐行可选标记**：该行能否作为挂载目标
+    // （ROOT / 自身 / 祖先 / 硬链接时的后代 / id 重复者 = false，置灰仅展示）。
+    // 由 Rust 在 sync_ui 里按当前对话框形态算好；对话框外无人读取。
+    pickable: bool,
+    // 注意：选择器用的是**另一份行模型** `pick-rows`（展开状态独立），但行
+    // 结构与本 struct 完全一致 —— 同一种渲染，两份数据；选择器的展开态直接
+    // 读 `expanded`（pick-rows 是按选择器自己的展开集合建的）。
 }
 
 /// 批量操作汇总的一行：`status` = "✓" 成功 / "✗" 失败（汇总对话框逐行展示）。
@@ -251,14 +268,6 @@ export struct EntryRow {
     expanded: bool,
     // 多选（Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选）标记。
     in-multi: bool,
-}
-
-export struct RefRow {
-    ref-id: string,
-    target: string,
-    target-title: string,
-    rel: string,
-    title: string,
 }
 
 /// 「快捷键一览」的一行（内容表在 Rust 侧，修饰键字形按平台切换）：
@@ -298,6 +307,13 @@ export struct MindNode {
     // 子树是否展开（控制行首 ›/⌄ 箭头）。
     children-expanded: bool,
     has-children: bool,
+    // 链接节点（规范 §4.6.1）：`mounted` = 软连接视图（⤷ 标记，身份 = 目标）；
+    // `hard` = 硬链接（表现与软连接一致 + 内容只读，标题带「≠」），自有子分支
+    // 渲染在其下 —— `link-visit` = 自身分支 visit（「新建子分支」落点）。
+    mounted: bool,
+    hard: bool,
+    mount-parent: int,
+    link-visit: int,
     // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
     has-entries: bool,
     entry-rows: [EntryRow],
@@ -1325,11 +1341,18 @@ export component AppWindow inherits Window {
     in-out property <string> a-path;
     in-out property <int> a-role-index: 0;
 
-    // ── 关联 refs[]（暂时隐藏该功能，属性保留以备后续启用）──
-    in property <[RefRow]> refs;
-    in-out property <string> r-target;
-    in-out property <string> r-rel;
-    in-out property <string> r-title;
+    // ── 软 / 硬链接（`role = "link"`，规范 §4.6.1）──
+    // 挂载目标选择器：行渲染复用 `BranchRow`，但数据是**独立模型** `pick-rows`
+    // （展开状态按 `pick-toggle-expand` 走自己的集合，打开时以树现状为起点、
+    // 不回写树）；逐行可选标记在 Rust 侧算进 `BranchRow.pickable`。选中按
+    // **visit 下标**记账 —— 展开收起会增删行、行下标漂移，visit 稳定。
+    in property <[BranchRow]> pick-rows;
+    in-out property <int> branch-pick-visit: -1;
+    in-out property <bool> branch-pick-ok: false;
+    // 链接形态：0 = 软连接（目标完整视图，缺省）；1 = 硬链接（仅内容关联、只读）。
+    in-out property <int> m-mode-index: 0;
+    in-out property <bool> mount-dialog-visible: false;
+    in-out property <string> m-title;
 
     // ── 思维导图 ──
     // 无限画布：内容画在超大画布中央，四周留白可自由平移（Flickable 边界几乎不可达）。
@@ -1446,6 +1469,13 @@ export component AppWindow inherits Window {
 
     // ── 状态栏 ──
     in property <string> status: "打开或新建一个 .str bundle 开始编辑。";
+    // 导图节点点击时置位：选中是否经由硬链接节点进入（内容只读，Rust 侧守卫读取）。
+    in-out property <bool> sel-hard: false;
+    // 右键菜单对**硬链接行 / 节点**操作时的落点流转（Rust 侧消费后复位）：
+    // child-parent-visit = 新建子分支的落点（硬链接自身分支）；op-visit = 删除
+    // （移除挂载）的目标（自身分支）。-1 = 常规流程（当前选中分支）。
+    in-out property <int> child-parent-visit: -1;
+    in-out property <int> op-visit: -1;
 
     // ── 菜单栏「分支」项的可用性（由 Rust 随选中态维护）──
     in property <bool> sel-has-children: false;
@@ -1539,8 +1569,14 @@ export component AppWindow inherits Window {
     callback child-dialog-cancel();
     callback rename-confirm();
     callback rename-cancel();
-    callback add-ref();
-    callback delete-ref(int);
+    callback mount-dialog-open();
+    // 挂载选择器自己的展开 / 收起：状态与结构树独立（打开时以树现状为起点，
+    // 对话框内的变化不回写树，见 Rust 侧 pick_expanded）。
+    callback pick-toggle-expand(int);
+    callback mount-dialog-close();
+    callback mount-mode-changed(int);
+    callback mount-create();
+    callback unmount(int);
     callback dialog-browse();
     callback dialog-create();
     callback dialog-cancel();
@@ -1674,6 +1710,7 @@ export component AppWindow inherits Window {
         Menu {
             title: "分支";
             MenuItem {
+                // 硬链接视图下也允许建子分支（硬链接有自有结构，内容才只读）。
                 title: "新建子分支…";
                 shortcut: @keys(Control + Shift + N);
                 enabled: root.has-selection;
@@ -1689,6 +1726,14 @@ export component AppWindow inherits Window {
                 title: "重命名分支…";
                 enabled: root.has-selection;
                 activated => { root.branch-rename-open(); }
+            }
+            MenuItem {
+                // 把别的分支挂载到本分支下：软连接（声明式，磁盘不新建目录）或
+                // 硬链接（自有目录 + 内容来自目标）。硬链接视图下同样可用
+                //（硬链接有自有结构，挂载行落进它自己的 entries）。
+                title: "挂载已有分支…";
+                enabled: root.has-selection;
+                activated => { root.mount-dialog-open(); }
             }
             MenuSeparator { }
             MenuItem {
@@ -1925,12 +1970,21 @@ export component AppWindow inherits Window {
                                 treectx := ContextMenuArea {
                                     Menu {
                                         MenuItem {
+                                            // 硬链接行：子分支落**自有结构**（link-visit）；
+                                            // 其余行 link-visit = -1，落当前选中分支。
                                             title: "新建子分支…";
-                                            activated => { root.child-dialog-open(); }
+                                            activated => {
+                                                root.child-parent-visit = row.link-visit;
+                                                root.child-dialog-open();
+                                            }
                                         }
                                         MenuItem {
                                             title: "重命名分支…";
                                             activated => { root.branch-rename-open(); }
+                                        }
+                                        MenuItem {
+                                            title: "挂载已有分支…";
+                                            activated => { root.mount-dialog-open(); }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
@@ -1952,14 +2006,28 @@ export component AppWindow inherits Window {
                                             activated => { root.branch-reveal-terminal(); }
                                         }
                                         MenuItem {
+                                            // 硬链接行内容只读：粘贴（导入内容）禁用。
                                             title: "粘贴";
+                                            enabled: !row.hard;
                                             activated => { EntryApi.paste(); }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
-                                            title: "删除分支";
-                                            enabled: row.kind != "root";
-                                            activated => { root.delete-branch(); }
+                                            // 软 / 硬链接行「删除」= 移除挂载：软只摘引用；
+                                            // 硬摘引用 + 删自有目录（含自有子分支）——
+                                            // 目标分支与数据都不动。真实行才是删除分支。
+                                            title: row.mounted || row.hard ? "移除挂载" : "删除分支";
+                                            enabled: row.mounted || row.hard || row.kind != "root";
+                                            activated => {
+                                                if (row.mounted) {
+                                                    root.unmount(row.mount-parent);
+                                                } else if (row.hard) {
+                                                    root.op-visit = row.link-visit;
+                                                    root.delete-branch();
+                                                } else {
+                                                    root.delete-branch();
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2095,6 +2163,10 @@ export component AppWindow inherits Window {
                                         clicked => { root.toggle-expand(index); }
                                     }
                                     Text {
+                                        // 挂载行标题的识别标识（⤷ / ≠）由 Rust 侧
+                                        // 统一加进行标题（emit_branch / mind_dfs），
+                                        // 这里不再叠加，避免出现双符号。
+                                        // 数据在真身处 —— 点行 = 选中真身（symlink 语义）。
                                         text: row.title;
                                         vertical-alignment: center;
                                         overflow: elide;
@@ -2519,9 +2591,10 @@ export component AppWindow inherits Window {
                                 nodectx := ContextMenuArea {
                                     Menu {
                                         MenuItem {
+                                            // 硬链接节点：子分支落**自有结构**（link-visit）。
                                             title: "新建子分支…";
                                             activated => {
-                                                root.select-visit(node.visit);
+                                                root.child-parent-visit = node.link-visit;
                                                 root.child-dialog-open();
                                             }
                                         }
@@ -2530,6 +2603,13 @@ export component AppWindow inherits Window {
                                             activated => {
                                                 root.select-visit(node.visit);
                                                 root.branch-rename-open();
+                                            }
+                                        }
+                                        MenuItem {
+                                            title: "挂载已有分支…";
+                                            activated => {
+                                                root.select-visit(node.visit);
+                                                root.mount-dialog-open();
                                             }
                                         }
                                         MenuSeparator { }
@@ -2566,7 +2646,9 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                         MenuItem {
+                                            // 硬链接节点内容只读：粘贴禁用。
                                             title: "粘贴";
+                                            enabled: !node.hard;
                                             activated => {
                                                 root.select-visit(node.visit);
                                                 EntryApi.paste();
@@ -2574,11 +2656,19 @@ export component AppWindow inherits Window {
                                         }
                                         MenuSeparator { }
                                         MenuItem {
-                                            title: "删除分支";
-                                            enabled: !node.is-root;
+                                            // 软 / 硬链接节点「删除」= 移除挂载（语义见结构树）。
+                                            title: node.mounted || node.hard ? "移除挂载" : "删除分支";
+                                            enabled: node.mounted || node.hard || !node.is-root;
                                             activated => {
                                                 root.select-visit(node.visit);
-                                                root.delete-branch();
+                                                if (node.mounted) {
+                                                    root.unmount(node.mount-parent);
+                                                } else if (node.hard) {
+                                                    root.op-visit = node.link-visit;
+                                                    root.delete-branch();
+                                                } else {
+                                                    root.delete-branch();
+                                                }
                                             }
                                         }
                                     }
@@ -2611,6 +2701,8 @@ export component AppWindow inherits Window {
                                             && event.kind == PointerEventKind.up) {
                                             // 左键：标题行内 = 选中该节点；其余 = 取消激活。
                                             if (self.mouse-y <= root.node-title-h) {
+                                                // 硬链接节点 = 只读内容视图（Rust 侧守卫读取）。
+                                                root.sel-hard = node.hard;
                                                 root.select-visit(node.visit);
                                             } else {
                                                 root.clear-activation();
@@ -2631,6 +2723,7 @@ export component AppWindow inherits Window {
                                         spacing: 4px;
 
                                         Text {
+                                            // 识别标识由 Rust 侧统一加（见结构树行）。
                                             text: node.title;
                                             font-size: 12px;
                                             font-weight: node.is-root || node.is-selected ? 700 : 500;
@@ -3395,6 +3488,151 @@ export component AppWindow inherits Window {
                             text: "创建";
                             enabled: root.bc-title != "";
                             clicked => { root.child-dialog-create(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 挂载已有分支（软 / 硬链接）对话框 ──
+    // 入口三处：分支菜单「挂载已有分支…」/ 结构树行右键 / 导图节点右键。
+    // 目标**只能从分支树里挑**（不可选者置灰仅展示：ROOT / 自身 / 祖先 / 硬链接时
+    // 的后代 / id 重复者），不手输 UUID。
+    if root.mount-dialog-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        // Esc 关闭（焦点在输入框内时按键沿父链冒泡到此）。
+        FocusScope {
+            width: 100%;
+            height: 100%;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                if (event.text == "\u{1b}") {
+                    root.mount-dialog-close();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+            Rectangle {
+                width: 500px;
+                height: 430px;
+                background: c-panel;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 20px;
+                    spacing: 8px;
+                    Text {
+                        text: "挂载已有分支";
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: c-text;
+                        vertical-stretch: 0;
+                    }
+                    ComboBox {
+                        // 链接形态（规范 §4.6.1）：soft = 目标完整视图；hard = 仅内容关联。
+                        model: ["软连接（完整视图，可挂后代）", "硬链接（仅内容关联，只读）"];
+                        current-index <=> root.m-mode-index;
+                        selected => { root.mount-mode-changed(self.current-index); }
+                        vertical-stretch: 0;
+                    }
+                    Text {
+                        text: "选择要挂载的分支（置灰者不可选）";
+                        font-size: 12px;
+                        color: c-sub;
+                        vertical-stretch: 0;
+                    }
+                    // 候选以**分支树**展示：按 depth 缩进，替代平铺下拉。
+                    // 行样式对齐结构树（Finder 语义）：20px 行高、内缩 4px 的
+                    // 圆角色块（选中 c-row-sel / 奇偶斑马 c-row-bg）、选中文字
+                    // c-on-accent；不可选者置灰仅展示。
+                    Rectangle {
+                        width: 100%;
+                        height: 190px;
+                        border-width: 1px;
+                        border-color: c-line;
+                        border-radius: 6px;
+                        vertical-stretch: 0;
+                        clip: true;
+                        // 行样式与交互**完全复用结构树**：同一份 rows、同一个
+                        // RowChevron、同一个 toggle-expand（展开状态共享，对话框里
+                        // 收起 / 展开找目标，关闭后树保持同一展开状态）；仅去掉了
+                        // 拖拽与右键菜单。不可选行置灰 +「不可选」角标。
+                        ListView {
+                            width: 100%;
+                            height: 100%;
+                            for row[index] in root.pick-rows: Rectangle {
+                                height: 20px;
+                                // 行底：Finder 式圆角内缩色块（与结构树同形状/同尺寸）。
+                                Rectangle {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: parent.height;
+                                    border-radius: 6px;
+                                    background: row.visit == root.branch-pick-visit
+                                        ? c-row-sel
+                                        : (mod(index, 2) == 0 ? transparent : c-row-bg);
+                                }
+                                // 行级 TouchArea 必须先声明，否则会盖住展开箭头的
+                                // 点击区（同结构树；箭头在后，天然行内最上层）。
+                                TouchArea {
+                                    clicked => {
+                                        if (row.pickable) {
+                                            root.branch-pick-visit = row.visit;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    y: row.latin ? 1.5px : 0px;
+                                    height: 100%;
+                                    padding-left: 8px + row.depth * 14px;
+                                    padding-right: 8px;
+                                    spacing: 4px;
+                                    RowChevron {
+                                        expandable: row.has-children;
+                                        expanded: row.expanded;
+                                        fg: row.visit == root.branch-pick-visit
+                                            && row.pickable ? c-on-accent : c-sub;
+                                        clicked => { root.pick-toggle-expand(index); }
+                                    }
+                                    Text {
+                                        text: row.title;
+                                        color: !row.pickable
+                                            ? c-sub
+                                            : (row.visit == root.branch-pick-visit
+                                                ? c-on-accent : c-text);
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: row.pickable ? "" : "不可选";
+                                        color: c-sub;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                        visible: !row.pickable;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    LineEdit {
+                        placeholder-text: "挂载点别名（可选，留空显示目标标题）";
+                        text <=> root.m-title;
+                        vertical-stretch: 0;
+                        accepted(text) => { root.mount-create(); }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        vertical-stretch: 0;
+                        Button { text: "取消"; clicked => { root.mount-dialog-close(); } }
+                        Button {
+                            text: "挂载";
+                            enabled: root.branch-pick-ok;
+                            clicked => { root.mount-create(); }
                         }
                     }
                 }

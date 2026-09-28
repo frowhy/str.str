@@ -121,6 +121,12 @@ pub fn entry_to_table(e: &Entry) -> Table {
     if let Some(v) = &e.id {
         t.insert("id", value(v.clone()));
     }
+    if let Some(v) = &e.target {
+        t.insert("target", value(v.clone()));
+    }
+    if let Some(v) = &e.mode {
+        t.insert("mode", value(v.clone()));
+    }
     if let Some(v) = &e.r#type {
         t.insert("type", value(v.clone()));
     }

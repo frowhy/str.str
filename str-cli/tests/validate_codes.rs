@@ -12,6 +12,8 @@ use str_format::validate::validate;
 const ROOT_ID: &str = "01928f3a-7c4b-7000-8000-000000000000";
 const A: &str = "01928f3a-7c4b-7001-8a01-000000000001";
 const B: &str = "01928f3a-7c4b-7002-8a02-000000000002";
+/// 硬链接分支自身的 id（= 目录名；C1 语义下硬链接是有身份的真实分支）。
+const HARD_LID: &str = "01928f3a-7c4b-7003-8a03-000000000003";
 /// 合法 UUID 但版本为 4（用于 `E_ID_VERSION`）。
 const V4: &str = "01928f3a-7c4b-4001-8a01-000000000004";
 
@@ -55,6 +57,43 @@ fn node_entry(path: &str, extra: &str) -> String {
 
 fn branch_entry(path: &str, extra: &str) -> String {
     format!("[[entries]]\npath = \"{path}\"\nrole = \"branch\"\nid = \"{path}\"\n{extra}\n")
+}
+
+/// 链接条目（`role = "link"`）：`path` = 目标 id，**不带 id**（规范 §4.6.1）。
+/// `mode_extra` 可传 `mode = "hard"` 之类。
+fn link_entry(path: &str, extra: &str) -> String {
+    format!(
+        "[[entries]]\npath = \"{path}\"\nrole = \"link\"\ntarget = \"{path}\"\n{extra}\n"
+    )
+}
+
+/// ROOT + 两个独立节点 A / B（挂载用例需要第二个分支当目标）。
+fn two_nodes(name: &str) -> PathBuf {
+    let root = baseline(name);
+    let body = "{\"b\":2}\n";
+    let root_meta = std::fs::read_to_string(root.join("._meta")).unwrap();
+    // B 与 A 同属 ROOT 的 entries（插入点就在 A 那条之前，避免误嵌进 `[policies]`）
+    let node_b = node_entry(B, "type = \"crm.tag\"\nsummary = \"s\"");
+    w(&root, "._meta", &root_meta.replace(&node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""), &format!("{node_b}{}", node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""))).as_str());
+    w(
+        &root,
+        &format!("{B}/._meta"),
+        &meta_text(
+            "node",
+            B,
+            "type = \"crm.tag\"\nsummary = \"s\"",
+            &payload_entry("b.json", body, "application/json"),
+        ),
+    );
+    w(&root, &format!("{B}/b.json"), body);
+    root
+}
+
+/// 往某分支的 `._meta` 末尾追加一段 `[[entries]]`（该分支的表区只有 entries，安全）。
+fn append_entries(root: &Path, branch: &str, extra: &str) {
+    let p = root.join(branch).join("._meta");
+    let text = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, format!("{text}{extra}\n")).unwrap();
 }
 
 fn payload_entry(path: &str, body: &str, media: &str) -> String {
@@ -870,6 +909,169 @@ fn dod_any_depth_can_hold_data() {
     );
     w(&root, &format!("{A}/{l1}/{l2}/f2.json"), body);
     assert_clean(&root);
+}
+
+// ─────────────────────────── 软连接（`role = "link"`，规范 §4.6.1）──────────────────────────
+
+/// 合法挂载：B 挂到 A 下 —— 磁盘上**没有**对应目录，但不报 `E_MANIFEST_GHOST`
+/// （软连接不参与清单比对），数据也不移动。
+#[test]
+fn link_mount_is_clean_and_keeps_data_in_place() {
+    let root = two_nodes("linkok");
+    append_entries(&root, A, &link_entry(B, ""));
+    assert_clean(&root);
+    // 目标分支仍在 ROOT 之下（挂载是视图，不是搬家）。
+    assert!(root.join(B).join("b.json").exists());
+}
+
+#[test]
+fn e_link_no_target() {
+    let root = two_nodes("linknotarget");
+    append_entries(
+        &root,
+        A,
+        &link_entry("01928f3a-7c4b-4fff-8fff-000000000009", ""),
+    );
+    assert_code(&root, "E_LINK_NO_TARGET");
+}
+
+#[test]
+fn e_link_target_invalid_root() {
+    let root = two_nodes("linkroot");
+    append_entries(&root, A, &link_entry(ROOT_ID, ""));
+    assert_code(&root, "E_LINK_TARGET_INVALID");
+}
+
+/// 软连接是只读视图：不得携带 `id` / `size` / `sha256` 等身份或数据语义。
+#[test]
+fn e_link_has_payload() {
+    let root = two_nodes("linkpayload");
+    append_entries(&root, A, &link_entry(B, "size = 12\n"));
+    assert_code(&root, "E_LINK_HAS_PAYLOAD");
+}
+
+/// 互相挂载成环 + 自我挂载 + 挂进自己的祖先（同一码：都会无限递归）。
+#[test]
+fn e_link_cycle_and_self_and_ancestor() {
+    let root = two_nodes("linkcycle");
+    append_entries(&root, A, &link_entry(B, ""));
+    append_entries(&root, B, &link_entry(A, ""));
+    assert_code(&root, "E_LINK_CYCLE");
+
+    let root = two_nodes("linkself");
+    append_entries(&root, A, &link_entry(A, ""));
+    assert_code(&root, "E_LINK_CYCLE");
+
+    // 挂进自己的祖先：A 下有子分支 C（深度 2），C 里挂载 A —— 沿真实父子边
+    // A → C 与挂载边 C → A 闭合成环，渲染 C 的子树会无限递归。
+    // （两层 bundle 里唯一的祖先是 ROOT，而 ROOT 不可挂，故需三层构造。）
+    let root = baseline("linkancestor");
+    let c = "01928f3a-7c4b-4003-8a03-000000000006";
+    let body = "{\"c\":3}\n";
+    append_entries(
+        &root,
+        A,
+        &format!("[[entries]]\npath = \"{c}\"\nrole = \"branch\"\nid = \"{c}\"\n"),
+    );
+    w(
+        &root,
+        &format!("{A}/{c}/._meta"),
+        &meta_text(
+            "branch",
+            c,
+            "",
+            &format!(
+                "{}{}",
+                payload_entry("c.json", body, "application/json"),
+                link_entry(A, "")
+            ),
+        ),
+    );
+    w(&root, &format!("{A}/{c}/c.json"), body);
+    assert_code(&root, "E_LINK_CYCLE");
+}
+
+#[test]
+fn e_link_dup() {
+    let root = two_nodes("linkdup");
+    append_entries(&root, A, &format!("{}{}", link_entry(B, ""), link_entry(B, "")));
+    assert_code(&root, "E_LINK_DUP");
+}
+
+/// 硬链接（`mode = "hard"`）：合法挂载干净；挂自己的后代被拒；
+/// `mode` 非法值与非链接行写 `mode` 都报 `E_SCHEMA_FIELD`。
+/// 在 `parent` 分支下创建一个合法的硬链接分支（C1 语义：`path` = `id` = 自身
+/// 目录名，目录 + 自有 `._meta` 存在，自有 entries 只有子分支 / 空），并在父
+/// 分支 `entries` 追加对应 `role = "link"` 行。
+fn hard_link_branch(root: &Path, parent: &str, lid: &str, target: &str, extra: &str) {
+    let parent_rel = if parent == "." { String::new() } else { format!("{parent}/") };
+    std::fs::create_dir_all(root.join(&parent_rel).join(lid)).unwrap();
+    let kind = if parent == "." { "node" } else { "branch" };
+    w(
+        root,
+        &format!("{parent_rel}{lid}/._meta"),
+        &meta_text(
+            kind,
+            lid,
+            "type = \"link.view\"\nsummary = \"硬链接视图\"\ntitle = \"硬链接视图\"",
+            "",
+        ),
+    );
+    append_entries(
+        root,
+        parent,
+        &format!(
+            "[[entries]]\npath = \"{lid}\"\nrole = \"link\"\nid = \"{lid}\"\ntarget = \"{target}\"\n{extra}"
+        ),
+    );
+}
+
+#[test]
+fn link_hard_mode_rules() {
+    // 合法：硬链接 = 有身份的真实分支（目录 + 自有 meta 存在，内容来自目标）。
+    let root = two_nodes("linkhardok");
+    hard_link_branch(&root, A, HARD_LID, B, "mode = \"hard\"\n");
+    assert_clean(&root);
+
+    // 硬链接挂自己的后代：ROOT 硬链接 A（A 是 ROOT 的子分支）⇒ 拒绝。
+    // （「挂自己的祖先」由成环判定 E_LINK_CYCLE 覆盖，见 e_link_cycle_and_self_and_ancestor。）
+    let root = two_nodes("linkharddesc");
+    hard_link_branch(&root, ".", HARD_LID, A, "mode = \"hard\"\n");
+    assert_code(&root, "E_LINK_TARGET_INVALID");
+
+    // 硬链接缺 `id`（有身份的真实分支必须写 id）
+    let root = two_nodes("linkhardnoid");
+    hard_link_branch(&root, A, HARD_LID, B, "mode = \"hard\"\n");
+    let p = root.join(A).join("._meta");
+    let text = std::fs::read_to_string(&p).unwrap().replace(
+        &format!("[[entries]]\npath = \"{HARD_LID}\"\nrole = \"link\"\nid = \"{HARD_LID}\""),
+        &format!("[[entries]]\npath = \"{HARD_LID}\"\nrole = \"link\""),
+    );
+    std::fs::write(&p, text).unwrap();
+    assert_code(&root, "E_LINK_TARGET_INVALID");
+
+    // 硬链接分支登记内容条目 → E_LINK_OWN_CONTENT（内容所有权唯一在目标分支）。
+    let root = two_nodes("linkhardown");
+    hard_link_branch(&root, A, HARD_LID, B, "mode = \"hard\"\n");
+    let body = "own\n";
+    append_entries(
+        &root,
+        &format!("{A}/{HARD_LID}"),
+        &payload_entry("own.json", body, "application/json"),
+    );
+    w(&root, &format!("{A}/{HARD_LID}/own.json"), body);
+    assert_code(&root, "E_LINK_OWN_CONTENT");
+
+    // mode 非法值
+    let root = two_nodes("linkbadmode");
+    append_entries(&root, A, &link_entry(B, "mode = \"sym\"\n"));
+    assert_code(&root, "E_SCHEMA_FIELD");
+
+    // 非 link 行写 mode
+    let root = baseline("linkmodeonbranch");
+    append_entries(&root, A, &format!("[[entries]]\npath = \"x.json\"\nrole = \"payload\"\nmode = \"hard\"\nsize = 2\nsha256 = \"{}\"\n", util::sha256_bytes(b"hi")));
+    w(&root, &format!("{A}/x.json"), "hi");
+    assert_code(&root, "E_SCHEMA_FIELD");
 }
 
 #[test]

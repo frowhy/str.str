@@ -7,7 +7,7 @@
 > 完整变更摘要，§13「版本演进策略」定义哪类改动升哪一位。本文件**不复制**那些细节，只维护
 > **兼容矩阵**与**迁移动作**。两份文档冲突时，以 `SPEC.md` 为准。
 
-- 当前版本：**1.13.0**（`str` 主版本 = `1`）
+- 当前版本：**1.14.0**（`str` 主版本 = `1`）
 - 版本号真源：[`VERSIONS.toml`](VERSIONS.toml)
 - 版本位规则（规范 §13）：新增可选字段 / 新增 `role`、`rel` 枚举值 → **minor**；
   收紧校验、语义变更 → **major**（须提供 `str migrate --to N`）；修正措辞、补示例 → **patch**
@@ -17,6 +17,7 @@
 
 | spec | 变更类型 | 已有实现需要做什么 |
 | --- | --- | --- |
+| **1.14.0** | 纯新增（可选能力） | `entries[].role` 新增可选值 **`link`** 与字段 `entries[].target` / `entries[].mode`（`"soft"` 缺省 ｜ `"hard"`）：**链接子分支**。软连接 = 目标完整视图（声明式，磁盘不新建目录、`path` = `target`、不参与清单比对，DAG 合法）；硬链接 = **内容引用 + 自有结构**（有身份的真实分支：必写 `id` 且 `path = id` = 自身目录，参与清单比对，自有 entries 只允许子分支 ⇒ `E_LINK_OWN_CONTENT`；内容面板显示目标内容条目、只读，目标的分支结构不跟过来），且不得挂载自己的后代。目标必须是 `node` / `branch` 且不得是 ROOT；新增 `E_LINK_NO_TARGET` / `E_LINK_TARGET_INVALID` / `E_LINK_HAS_PAYLOAD` / `E_LINK_CYCLE` / `E_LINK_DUP` / `E_LINK_OWN_CONTENT` 六个错误码与 `str link add\|rm` 两个命令。旧实现若尚未支持：读到软连接行时**不得**因磁盘无对应目录报 `E_MANIFEST_GHOST`（它不参与清单比对，§4.6.1 规则 1）；不支持挂载的工具可把它当普通未知条目忽略渲染。**无需迁移**，既有 bundle 不含 `link` |
 | **1.13.0** | 纯放宽 | 新增 `policies.ignore`（忽略名单）与 `policies.gitignore`（默认 `true` = 自动应用 `.gitignore`）；被忽略条目不参与清单比对、`sync` 不补登、遍历剪枝。缺省行为变更仅影响「散落文件是否报错」，**无需迁移**；不实现这两个字段的旧工具仍可正常读 bundle（`additionalProperties: false` 的 Schema 由新版同步） |
 | **1.12.0** | 纯放宽 | 保留目录（`._meta` / `._schema/` / `._cache/`）**免登记**、不参与 `entries[]` 清单比对；`str init` 与官方示例不再登记 `._schema`。显式登记仍合法，**无需迁移** |
 | **1.11.0** | 放宽 + 寻址细化 | `[uuid]` 省略时的目标从 ROOT 细化为当前节点（`[dir]` 为 bundle 根即 ROOT，指向分支目录即该分支）；工具须以整份 bundle 为扫描视角（向上解析 `[dir]`，不穿越 `.str` 硬边界）；`node add` 在分支目录下给出带原因的拒绝。显式 `[uuid]` 的旧调用全部仍合法，**无需迁移** |

@@ -55,6 +55,10 @@ pub const ENTRY_KEYS: &[&str] = &[
     "path",
     "role",
     "id",
+    // `target`：链接（`role = "link"`）的目标分支 id（规范 §4.6.1）。
+    "target",
+    // `mode`：链接形态（soft / hard，规范 §4.6.1）。
+    "mode",
     "type",
     "title",
     "summary",
@@ -217,6 +221,11 @@ pub struct Entry {
     pub role: String,
     /// 子分支 id（`node` / `branch`）。
     pub id: Option<String>,
+    /// 软连接目标分支 id（`role = "link"`，规范 §4.6.1）。
+    pub target: Option<String>,
+    /// 链接形态（仅 `role = "link"`）：`"soft"`（缺省，目标完整视图）｜
+    /// `"hard"`（仅内容关联，只读，不渲染目标的子分支）。
+    pub mode: Option<String>,
     /// 子分支类型。
     pub r#type: Option<String>,
     /// 展示名。
@@ -245,6 +254,11 @@ impl Entry {
     /// 是否为分支条目（`node` / `branch`）。
     pub fn is_branch(&self) -> bool {
         self.role == "node" || self.role == "branch"
+    }
+
+    /// 是否为软连接子分支（`role = "link"`）：声明式挂载，**磁盘上无对应目录**。
+    pub fn is_link(&self) -> bool {
+        self.role == "link"
     }
 
     /// 是否为文件类条目（需要指纹）。
@@ -521,6 +535,8 @@ pub fn extract(doc: DocumentMut, rel: &str) -> (Meta, Vec<Issue>) {
                 path,
                 role,
                 id: cx.opt_str(t, "id"),
+                target: cx.opt_str(t, "target"),
+                mode: cx.opt_str(t, "mode"),
                 r#type: cx.opt_str(t, "type"),
                 title: cx.opt_str(t, "title"),
                 summary: cx.opt_str(t, "summary"),

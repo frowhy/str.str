@@ -63,6 +63,20 @@ pub mod code {
     /// `refs` 关联图成环。
     pub const REF_CYCLE: &str = "E_REF_CYCLE";
 
+    // ── 软连接（`role = "link"`，规范 §4.6.1）────────────────────
+    /// `entries[role=link].target` 无法在本 bundle 内解析。
+    pub const LINK_NO_TARGET: &str = "E_LINK_NO_TARGET";
+    /// 软连接的目标是 ROOT，或不是可挂载的 `node` / `branch`。
+    pub const LINK_TARGET_INVALID: &str = "E_LINK_TARGET_INVALID";
+    /// 软连接条目携带了 `id` / `size` / `sha256` / `count` / `media_type` / `schema`。
+    pub const LINK_HAS_PAYLOAD: &str = "E_LINK_HAS_PAYLOAD";
+    /// 软连接挂载图成环（含自我挂载）。
+    pub const LINK_CYCLE: &str = "E_LINK_CYCLE";
+    /// 同一父分支内重复挂载同一目标。
+    pub const LINK_DUP: &str = "E_LINK_DUP";
+    /// 硬链接分支登记了内容条目（内容所有权唯一在目标分支，自有 entries 只允许子分支）。
+    pub const LINK_OWN_CONTENT: &str = "E_LINK_OWN_CONTENT";
+
     // ── 清单 ────────────────────────────────────────────────
     /// 磁盘存在但 `entries` 未登记。
     pub const MANIFEST_MISSING: &str = "E_MANIFEST_MISSING";

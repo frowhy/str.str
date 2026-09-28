@@ -110,6 +110,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RefCmd,
     },
+    /// 软连接子分支操作（声明式挂载，磁盘不新建目录；规范 §4.6.1）
+    Link {
+        #[command(subcommand)]
+        cmd: LinkCmd,
+    },
     /// 分支自身元信息字段（`type` / `title` / `summary` / `name` / `tags`）
     Meta {
         #[command(subcommand)]
@@ -303,6 +308,44 @@ enum RefCmd {
         /// 关联线 id 的选项形式（等价于位置参数，保留兼容）
         #[arg(long = "ref", conflicts_with = "ref_id")]
         ref_opt: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinkCmd {
+    /// 在本分支下挂载一个软连接子分支
+    Add {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 挂载位置（父分支 id，缺省为当前节点）
+        uuid: Option<String>,
+        /// 目标分支 id（`node` / `branch`，不得是 ROOT）
+        #[arg(long)]
+        target: String,
+        /// 链接形态：soft = 目标完整视图（缺省）；hard = 仅内容关联（只读，不得挂自己的后代）
+        #[arg(long, default_value = "soft")]
+        mode: String,
+        /// 挂载点别名（覆盖目标标题显示）
+        #[arg(long)]
+        title: Option<String>,
+        /// 排序键
+        #[arg(long)]
+        order: Option<i64>,
+        /// 备注
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// 摘除一条软连接（只摘引用，目标分支与数据不动）
+    Rm {
+        /// bundle 目录（缺省为当前目录）
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// 父分支 id（缺省为当前节点）
+        uuid: Option<String>,
+        /// 目标分支 id
+        #[arg(long)]
+        target: String,
     },
 }
 
@@ -600,6 +643,24 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                     Error::BadArg("缺少关联线 id（位置参数 `<REF_ID>` 或 `--ref <REF_ID>`）".into())
                 })?;
                 cmd::ref_rm(&dir, uuid, &ref_id)?;
+                Ok(0)
+            }
+        },
+        Cmd::Link { cmd } => match cmd {
+            LinkCmd::Add {
+                dir,
+                uuid,
+                target,
+                mode,
+                title,
+                order,
+                note,
+            } => {
+                cmd::link_add(&dir, uuid, &target, &mode, title, order, note)?;
+                Ok(0)
+            }
+            LinkCmd::Rm { dir, uuid, target } => {
+                cmd::link_rm(&dir, uuid, &target)?;
                 Ok(0)
             }
         },

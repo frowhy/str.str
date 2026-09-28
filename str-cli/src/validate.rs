@@ -146,6 +146,7 @@ impl<'a> Checker<'a> {
         }
 
         self.check_ref_cycles();
+        self.check_link_cycles();
         self.check_meta_schemas();
     }
 
@@ -286,8 +287,172 @@ impl<'a> Checker<'a> {
             );
         }
 
+        // 软连接子分支（规范 §4.6.1）
+        self.check_links(idx);
+
+        // 硬链接分支（§4.6.1 `mode = "hard"`）：内容所有权唯一在目标分支 ——
+        // 自有 `entries` 只允许子分支（结构），登记内容条目即 `E_LINK_OWN_CONTENT`。
+        // （磁盘上未登记的内容文件由清单比对按 ghost 拦，双重兜底。）
+        if v.hard_link_to.is_some() {
+            for (n, e) in meta.entries.iter().enumerate() {
+                if matches!(e.role.as_str(), "payload" | "asset" | "dir") {
+                    self.err(
+                        code::LINK_OWN_CONTENT,
+                        format!("{rel} #entries[{n}]"),
+                        format!(
+                            "硬链接分支不得登记内容条目（`role = {:?}`）：内容所有权唯一在目标分支，仅允许子分支",
+                            e.role
+                        ),
+                    );
+                }
+            }
+        }
+
         // 清单
         self.check_manifest(idx);
+    }
+
+    /// 链接条目（`role = "link"`，软 / 硬）的单条自守（规范 §4.6.1）。
+    ///
+    /// 成环是全图判定（见 `check_link_cycles`，仅软连接的 target 引用参与），
+    /// 这里只问「这一条本身是否合法」：
+    /// - **软连接**：声明式（无 id、无目录、不参与清单比对），`path` = `target`；
+    /// - **硬链接**：有身份的真实分支 —— 必写 `id` 且 `path = id` = 自身目录名
+    ///   （参与清单比对），内容所有权唯一在目标分支（自有 entries 只允许子分支，
+    ///   由 `check_branch` 按 `E_LINK_OWN_CONTENT` 把关）；不得挂自己的后代。
+    fn check_links(&mut self, idx: usize) {
+        let scan = self.scan;
+        let v: &Visit = &scan.visits[idx];
+        let rel = v.rel.clone();
+        let Some(meta) = v.meta.as_ref() else {
+            return;
+        };
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (n, e) in meta.entries.iter().enumerate() {
+            if !e.is_link() {
+                // `mode` 仅在链接行上有意义
+                if e.mode.is_some() {
+                    self.err(
+                        code::SCHEMA_FIELD,
+                        format!("{rel} #entries[{n}]"),
+                        "`mode` 仅适用于 `role = \"link\"` 的条目",
+                    );
+                }
+                continue;
+            }
+            let ep = format!("{rel} #entries[{n}]");
+
+            // 同父重复挂载（重复path 由 LINK_DUP 报，不再走通用的 MANIFEST_DUP）
+            if !seen.insert(e.path.as_str()) {
+                self.err(
+                    code::LINK_DUP,
+                    ep.clone(),
+                    format!("同一父分支内重复挂载目标 `{path}`", path = e.path),
+                );
+            }
+
+            // mode 取值（缺省 soft）
+            let hard = match e.mode.as_deref() {
+                None => false,
+                Some("soft") => false,
+                Some("hard") => true,
+                Some(other) => {
+                    self.err(
+                        code::SCHEMA_FIELD,
+                        ep.clone(),
+                        format!("`mode` = {other:?} 非法（只允许 \"soft\" / \"hard\"）"),
+                    );
+                    continue;
+                }
+            };
+
+            // 只读视图：链接不承载数据。soft 另禁 `id`（身份由 target 给出）；
+            // hard 必写 `id`（自身目录名，见下）。
+            let mut payload: Vec<&str> = Vec::new();
+            if e.id.is_some() && !hard {
+                payload.push("id");
+            }
+            if e.size.is_some() {
+                payload.push("size");
+            }
+            if e.sha256.is_some() {
+                payload.push("sha256");
+            }
+            if e.count.is_some() {
+                payload.push("count");
+            }
+            if e.media_type.is_some() {
+                payload.push("media_type");
+            }
+            if e.schema.is_some() {
+                payload.push("schema");
+            }
+            if !payload.is_empty() {
+                self.err(
+                    code::LINK_HAS_PAYLOAD,
+                    ep.clone(),
+                    format!(
+                        "链接是只读视图，不得携带 {}（所有权唯一在目标分支）",
+                        payload.join(" / ")
+                    ),
+                );
+            }
+
+            let Some(target) = e.target.clone() else {
+                self.err(
+                    code::LINK_NO_TARGET,
+                    ep.clone(),
+                    "`role = \"link\"` 缺少必填字段 `target`",
+                );
+                continue;
+            };
+            if hard {
+                // 硬链接：有身份的真实分支，`path` = `id` = 自身目录名。
+                match e.id.as_deref() {
+                    None => self.err(
+                        code::LINK_TARGET_INVALID,
+                        ep.clone(),
+                        "硬链接（`mode = \"hard\"`）必须写 `id`（= 自身目录名，参与清单比对）",
+                    ),
+                    Some(id) if e.path != id => self.err(
+                        code::LINK_TARGET_INVALID,
+                        ep.clone(),
+                        format!("硬链接的 `path` 必须等于 `id`（{id:?}），实为 {p:?}", p = e.path),
+                    ),
+                    _ => {}
+                }
+            } else if e.path != target {
+                self.err(
+                    code::LINK_TARGET_INVALID,
+                    ep.clone(),
+                    format!("软连接的 `path` 必须等于 `target`（{target:?}），实为 {p:?}", p = e.path),
+                );
+            }
+            let Some(dst) = scan.resolve(&target) else {
+                self.err(
+                    code::LINK_NO_TARGET,
+                    ep.clone(),
+                    format!("`target` = {target:?} 无法在本 bundle 内解析到任何分支"),
+                );
+                continue;
+            };
+            if scan.visits[dst].depth == 0 {
+                self.err(
+                    code::LINK_TARGET_INVALID,
+                    ep.clone(),
+                    "链接的目标不得是 ROOT（可挂载对象只有 `node` / `branch`）",
+                );
+                continue;
+            }
+            // 硬链接仅内容关联：挂自己的后代 = 内容自嵌套，无意义，禁止。
+            if hard && scan.ancestors(dst).contains(&idx) {
+                self.err(
+                    code::LINK_TARGET_INVALID,
+                    ep,
+                    "硬链接不得挂载自己的后代（仅内容关联，内容自嵌套无意义）",
+                );
+            }
+        }
     }
 
     /// 清单一致性（规范 4.8）与角色 / 深度一致性。
@@ -307,6 +472,11 @@ impl<'a> Checker<'a> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut dups: Vec<String> = Vec::new();
         for e in &entries {
+            // 软连接的重复挂载由 `check_links` 以 `E_LINK_DUP` 报出（更精确），此处不重复报；
+            // 硬链接是真实分支行（path = 自身 id），参与通用重复检查。
+            if e.is_link() && e.mode.as_deref() != Some("hard") {
+                continue;
+            }
             if !seen.insert(e.path.clone()) {
                 dups.push(e.path.clone());
             }
@@ -395,6 +565,12 @@ impl<'a> Checker<'a> {
         // 声明侧 → 幽灵条目
         let mut ghosts: Vec<(String, bool)> = Vec::new();
         for e in &entries {
+            // 软连接在磁盘上**没有对应目录**（声明式挂载，规范 §4.6.1 规则 1）：
+            // 不参与清单比对，故不得报 `E_MANIFEST_GHOST`。硬链接是有身份的真实
+            // 分支（目录必须存在），参与比对 —— 目录缺失照报 ghost。
+            if e.is_link() && e.mode.as_deref() != Some("hard") {
+                continue;
+            }
             let path: PathBuf = dir.join(&e.path);
             if path.exists() {
                 continue;
@@ -433,6 +609,21 @@ impl<'a> Checker<'a> {
         let path: PathBuf = dir.join(&e.path);
 
         match e.role.as_str() {
+            "link" => {
+                // 硬链接（`mode = "hard"`）有真实目录：必须是含 `._meta` 的分支目录。
+                // 软连接是声明行、磁盘无目录，不会作为磁盘侧命中走到这里。
+                if !is_dir {
+                    self.err(
+                        code::ENTRY_ROLE_DEPTH,
+                        ep,
+                        "`role = \"link\"`（硬链接）要求目录，但磁盘上是文件",
+                    );
+                    return;
+                }
+                if !bundle.has_meta(&path) {
+                    self.err(code::META_MISSING, ep, "硬链接目录内缺少 `._meta`");
+                }
+            }
             "node" | "branch" | "dir" => {
                 if !is_dir {
                     self.err(
@@ -722,6 +913,76 @@ impl<'a> Checker<'a> {
                 code::REF_CYCLE,
                 path,
                 "`refs` 关联图成环（追踪终点回到链上已有分支）",
+            );
+        }
+    }
+
+    /// 软连接挂载图成环检测（规范 §4.6.1 规则 5，迭代式 DFS，与 `check_ref_cycles` 同法）。
+    ///
+    /// 图的边集 = **真实父子边**（父 → 子）∪ **挂载边**（挂载点 → 目标）：沿这个图从
+    /// 任一分支出发能回到自己 ⇒ 按挂载点递归渲染就是无限展开。「挂进自己的祖先」
+    /// 正因此而按环拒绝（祖先 → 自己是真实边）；「挂进自己的后代」不是环（DAG，
+    /// 子树多处可见）。必须在校验期拦住，否则 GUI / `tree` 渲染会无限递归。
+    fn check_link_cycles(&mut self) {
+        let scan = self.scan;
+        let n = scan.visits.len();
+        let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, v) in scan.visits.iter().enumerate() {
+            if let Some(p) = v.parent {
+                edges[p].push(i);
+            }
+            if let Some(m) = &v.meta {
+                for e in &m.entries {
+                    // 硬链接的 target 是**内容来源**（只读内容视图，目标的分支结构
+                    // 不跟过来）——不构成渲染递归，不参与挂载环判定；其「不得挂
+                    // 自己的后代」由 `check_links` 的 ancestors 检查单独把关。
+                    if !e.is_link() || e.mode.as_deref() == Some("hard") {
+                        continue;
+                    }
+                    if let Some(t) = &e.target {
+                        if let Some(j) = scan.resolve(t) {
+                            edges[i].push(j);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut color = vec![0u8; n]; // 0 未访问 / 1 在栈 / 2 已完成
+        let mut hits: Vec<String> = Vec::new();
+        for start in 0..n {
+            if color[start] != 0 {
+                continue;
+            }
+            let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+            color[start] = 1;
+            while !stack.is_empty() {
+                let top = stack.len() - 1;
+                let (node, k) = stack[top];
+                if k < edges[node].len() {
+                    let next = edges[node][k];
+                    stack[top].1 += 1;
+                    match color[next] {
+                        0 => {
+                            color[next] = 1;
+                            stack.push((next, 0));
+                        }
+                        1 => hits.push(scan.visits[next].rel.clone()),
+                        _ => {}
+                    }
+                } else {
+                    color[node] = 2;
+                    stack.pop();
+                }
+            }
+        }
+        hits.sort();
+        hits.dedup();
+        for path in hits {
+            self.err(
+                code::LINK_CYCLE,
+                path,
+                "软连接挂载图成环（沿挂载链可回到本分支，含自我挂载）",
             );
         }
     }

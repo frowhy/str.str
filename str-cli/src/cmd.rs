@@ -646,6 +646,16 @@ pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
     let target = v.dir.clone();
     let rel = v.rel.clone();
     let parent_idx = v.parent;
+    // 规范 §4.6.1 规则 6：删除真身 MUST 一并摘除全 bundle 内指向它的软连接
+    // （含其全部后代），不得留下悬空。必须在删目录**之前**算好目标集合。
+    let prefix = format!("{}/", v.rel);
+    let doomed: std::collections::HashSet<String> = scan
+        .visits
+        .iter()
+        .filter(|x| x.rel == v.rel || x.rel.starts_with(&prefix))
+        .filter_map(|x| x.meta.as_ref()?.id.clone())
+        .collect();
+    let purged = purge_links_to(&bundle, &scan, &doomed)?;
     std::fs::remove_dir_all(&target).map_err(|e| Error::io(&target, e))?;
 
     if let Some(pi) = parent_idx {
@@ -666,7 +676,246 @@ pub fn branch_rm(dir: &Path, uuid: Option<String>, force: bool) -> Result<()> {
     if let Ok(after) = bundle.scan() {
         crate::baseline::record_scan(&bundle, &after);
     }
-    println!("已删除 {rel}");
+    if purged == 0 {
+        println!("已删除 {rel}");
+    } else {
+        println!("已删除 {rel}（并移除 {purged} 条指向它的软连接）");
+    }
+    Ok(())
+}
+
+/// 摘除全 bundle 内指向 `doomed` 中任一分支 id 的软连接（删除真身时的收尾）。
+fn purge_links_to(
+    bundle: &Bundle,
+    scan: &Scan,
+    doomed: &std::collections::HashSet<String>,
+) -> Result<usize> {
+    let mut removed = 0usize;
+    for v in &scan.visits {
+        let Some(meta) = v.meta.as_ref() else {
+            continue;
+        };
+        let hits: Vec<String> = meta
+            .entries
+            .iter()
+            .filter(|e| e.is_link() && e.target.as_deref().is_some_and(|t| doomed.contains(t)))
+            .map(|e| e.path.clone())
+            .collect();
+        if hits.is_empty() {
+            continue;
+        }
+        let mut m = match bundle.read_meta(&v.dir)? {
+            MetaLoad::Ok(m, _) => m,
+            MetaLoad::Failed(_) => continue,
+        };
+        for p in &hits {
+            m.remove_entry_path(p);
+        }
+        m.touch();
+        save_meta(bundle, &v.dir, &m)?;
+        removed += hits.len();
+    }
+    Ok(removed)
+}
+
+// ─────────────────────────── link ───────────────────────────
+
+/// 软连接成环预检（与 `check_link_cycles` 同源）：图的边集 = 真实父子边 ∪ 挂载边，
+/// 从 dst 出发能回到 src 即成环 —— 「挂进自己的祖先」因此而按环拒绝。
+fn link_would_cycle(scan: &Scan, src: usize, dst: usize) -> bool {
+    if src == dst {
+        return true;
+    }
+    let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); scan.visits.len()];
+    for (i, v) in scan.visits.iter().enumerate() {
+        if let Some(p) = v.parent {
+            out_edges[p].push(i);
+        }
+        if let Some(meta) = v.meta.as_ref() {
+            for e in &meta.entries {
+                if !e.is_link() {
+                    continue;
+                }
+                if let Some(t) = &e.target {
+                    if let Some(j) = scan.resolve(t) {
+                        out_edges[i].push(j);
+                    }
+                }
+            }
+        }
+    }
+    let mut stack = vec![dst];
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while let Some(i) = stack.pop() {
+        if i == src {
+            return true;
+        }
+        if !seen.insert(i) {
+            continue;
+        }
+        if let Some(next) = out_edges.get(i) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    false
+}
+
+/// 挂载一个链接子分支（规范 §4.6.1）：`role = "link"` + `target`，磁盘不新建任何东西。
+/// `mode = "soft"`（缺省，目标完整视图）｜`"hard"`（仅内容关联、只读，不得挂自己的后代）。
+pub fn link_add(
+    dir: &Path,
+    uuid: Option<String>,
+    target: &str,
+    mode: &str,
+    title: Option<String>,
+    order: Option<i64>,
+    note: Option<String>,
+) -> Result<()> {
+    if mode != "soft" && mode != "hard" {
+        return Err(Error::BadArg(format!(
+            "`mode` = {mode:?} 非法（只允许 \"soft\" / \"hard\"）"
+        )));
+    }
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let dst = locate(&scan, target)
+        .ok_or_else(|| Error::BadArg(format!("找不到目标分支 id `{target}`")))?;
+    if scan.visits[dst].depth == 0 {
+        return Err(Error::BadArg(
+            "链接的目标不得是 ROOT（可挂载对象只有 `node` / `branch`）".into(),
+        ));
+    }
+    // 硬链接仅内容关联：挂自己的后代 = 内容自嵌套，无意义（规范 §4.6.1）。
+    if mode == "hard" && scan.ancestors(dst).contains(&idx) {
+        return Err(Error::BadArg(
+            "硬链接不得挂载自己的后代（仅内容关联，内容自嵌套无意义）".into(),
+        ));
+    }
+    if scan.by_id.get(target).map(|v| v.len()).unwrap_or(0) > 1 {
+        return Err(Error::BadArg(format!(
+            "目标 id 在多个分支上重复，无法唯一指向：{target}"
+        )));
+    }
+    if link_would_cycle(&scan, idx, dst) {
+        return Err(Error::BadArg(
+            "该挂载会让挂载图成环（沿已挂载链可回到本分支）".into(),
+        ));
+    }
+    let src_dir = scan.visits[idx].dir.clone();
+    let mut meta = match bundle.read_meta(&src_dir)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => return Err(Error::BadArg("源分支 `._meta` 解析失败".into())),
+    };
+    if mode == "soft"
+        && meta
+            .entries
+            .iter()
+            .any(|e| e.is_link() && e.path == target)
+    {
+        return Err(Error::BadArg(format!("本分支下已挂载目标 `{target}`")));
+    }
+    // 硬链接 = 有身份的真实分支：`path` = `id` = 自身目录名（参与清单比对），
+    // 目录与 `._meta` 现在创建；内容所有权仍在目标分支（自有 entries 只允许子分支）。
+    // 别名（--title）留空时，自身标题默认取**目标标题**。
+    let own_title = match &title {
+        Some(t) => Some(t.clone()),
+        None => scan.visits[dst]
+            .meta
+            .as_ref()
+            .and_then(|m| m.title.clone()),
+    };
+    let (entry_path, entry_id, entry_title) = if mode == "hard" {
+        let id_version = scan
+            .visits
+            .first()
+            .and_then(|v| v.meta.as_ref())
+            .map(|m| m.policies.id_version)
+            .unwrap_or(7);
+        let id = util::new_uuid(id_version);
+        let dir = src_dir.join(&id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| Error::BadArg(format!("创建硬链接分支目录失败：{err}")))?;
+        let kind = if scan.visits[idx].depth == 0 {
+            Kind::Node
+        } else {
+            Kind::Branch
+        };
+        let text = crate::meta_edit::render_branch_meta(
+            kind,
+            &id,
+            None,
+            own_title.as_deref(),
+            None,
+            &util::now_rfc3339(),
+        );
+        std::fs::write(bundle.meta_path(&dir), text)
+            .map_err(|err| Error::BadArg(format!("写入硬链接 `._meta` 失败：{err}")))?;
+        (id.clone(), Some(id), None)
+    } else {
+        (target.to_string(), None, title)
+    };
+    let ord = order.unwrap_or(meta.entries.len() as i64 + 1);
+    meta.upsert_entry(&Entry {
+        path: entry_path,
+        role: "link".into(),
+        id: entry_id,
+        target: Some(target.to_string()),
+        mode: Some(mode.to_string()),
+        title: entry_title,
+        order: Some(ord),
+        note,
+        ..Default::default()
+    });
+    meta.touch();
+    save_meta(&bundle, &src_dir, &meta)?;
+    let kind = if mode == "hard" { "硬链接" } else { "软连接" };
+    println!("已挂载{kind} {} → {target}", scan.visits[idx].rel);
+    Ok(())
+}
+
+/// 摘除一条链接：软连接**只摘引用**（目标与其数据不动）；硬链接摘引用时**连同
+/// 自身目录**一并删除（它是有身份的真实分支，摘了引用目录即成清单幽灵）——
+/// 目标分支与其数据始终不动。
+pub fn link_rm(dir: &Path, uuid: Option<String>, target: &str) -> Result<()> {
+    let bundle = open(dir)?;
+    let scan = bundle.scan()?;
+    let idx = target_branch(&bundle, &scan, dir, uuid.as_deref())?;
+    let src_dir = scan.visits[idx].dir.clone();
+    let mut meta = match bundle.read_meta(&src_dir)? {
+        MetaLoad::Ok(m, _) => m,
+        MetaLoad::Failed(_) => return Err(Error::BadArg("源分支 `._meta` 解析失败".into())),
+    };
+    // 定位：软连接 `path` = target；硬链接 `path` = 自身 id（target 在 `target` 字段）。
+    let row = meta
+        .entries
+        .iter()
+        .find(|e| {
+            e.is_link()
+                && (e.path == target || e.target.as_deref() == Some(target))
+        })
+        .cloned();
+    let Some(row) = row else {
+        return Err(Error::BadArg(format!(
+            "本分支下没有指向 `{target}` 的链接"
+        )));
+    };
+    let hard = row.mode.as_deref() == Some("hard");
+    meta.remove_entry_path(&row.path);
+    meta.touch();
+    save_meta(&bundle, &src_dir, &meta)?;
+    if hard {
+        let link_dir = src_dir.join(&row.path);
+        std::fs::remove_dir_all(&link_dir)
+            .map_err(|err| Error::io(&link_dir, err))?;
+        println!(
+            "已摘除硬链接 {} → {target}（连同其自有子结构目录 `{}`，目标分支数据不动）",
+            scan.visits[idx].rel,
+            row.path
+        );
+    } else {
+        println!("已摘除软连接 {} → {target}", scan.visits[idx].rel);
+    }
     Ok(())
 }
 
