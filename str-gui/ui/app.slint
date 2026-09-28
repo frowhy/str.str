@@ -1468,14 +1468,25 @@ export component AppWindow inherits Window {
     in property <string> about-repository: "";
     in property <string> about-license: "";
 
-    // 编辑菜单可用性：需选中条目，且无模态对话框——否则对话框内的文本编辑
-    // 会被菜单快捷键（⌘C/⌘V 等）截获，无法正常复制粘贴文字。
+    // 编辑菜单可用性：需选中条目，且无模态对话框——对话框期间这批动作本就不适用。
     // 有主选中**或**存在多选区（⌘A / ⌘ 点击后主选中可能为空，但选区非空，
     // 复制 / 剪切 / 删除都应作用于整个选区）。
     property <bool> entry-cmd-ok: (root.entry-selected >= 0 || EntryApi.multi-count > 0)
         && !root.dialog-visible
         && !root.rename-visible
         && !root.branch-dialog-visible;
+
+    // ── 快捷键守卫：输入框聚焦 ──
+    // 菜单快捷键走的不是 Slint 按键系统，而是**原生加速器**（macOS = NSMenuItem
+    // .keyEquivalent，Windows / Linux = muda accelerator）：AppKit / Win32 在按键送达
+    // Slint 之前就把它截获，执行后按键不再下发（与「快速查看」处的空格同理）。
+    // 所以凡是和文本编辑同义的组合键 —— ⌘A（全选文字）·⌘C（拷贝）·⌘X（剪切）·
+    // ⌘V（粘贴）·⌘⌫（删除到行首）·⌘⇧V（粘贴并匹配样式）—— 在输入框聚焦时必须把
+    // 对应菜单项**置灰**：原生菜单项 disabled 后不再吞按键，事件回落到 Slint 的
+    // TextInput，由它自带的 StandardShortcut / TextShortcut 处理（core 在 macOS 上把
+    // ⌘ 重映射为 control，所以 TextInput 认的就是 ⌘）。
+    // 取值来自 Slint 内置全局（等价 Rust 侧 Window::text_input_focused），无需另加钩子。
+    property <bool> text-input-focus: TextInputInterface.text-input-focused;
 
     callback open-bundle();
     callback new-bundle();
@@ -1590,28 +1601,29 @@ export component AppWindow inherits Window {
             title: "编辑";
             MenuItem {
                 // Finder 语义：⌘A 全选作用于当前内容列表（多选入口之一）。
+                // 输入框聚焦时让位给 TextInput 自带的「全选文字」（见 root.text-input-focus）。
                 title: "全选";
                 shortcut: @keys(Control + A);
-                enabled: root.has-bundle;
+                enabled: root.has-bundle && !root.text-input-focus;
                 activated => { EntryApi.entries-select-all(); }
             }
             MenuSeparator { }
             MenuItem {
                 title: "拷贝";
                 shortcut: @keys(Control + C);
-                enabled: root.entry-cmd-ok;
+                enabled: root.entry-cmd-ok && !root.text-input-focus;
                 activated => { EntryApi.entry-copy(); }
             }
             MenuItem {
                 title: "剪切";
                 shortcut: @keys(Control + X);
-                enabled: root.entry-cmd-ok;
+                enabled: root.entry-cmd-ok && !root.text-input-focus;
                 activated => { EntryApi.entry-cut(); }
             }
             MenuItem {
                 title: "粘贴";
                 shortcut: @keys(Control + V);
-                enabled: root.has-bundle;
+                enabled: root.has-bundle && !root.text-input-focus;
                 activated => { EntryApi.paste(); }
             }
             MenuSeparator { }
@@ -1637,9 +1649,11 @@ export component AppWindow inherits Window {
                 activated => { EntryApi.entry-rename-open(); }
             }
             MenuItem {
+                // ⌘⌫ 在 macOS 文本编辑里是「删除到行首」（muda 把 Key.Delete 编成
+                // \u{7f}，正是 macOS 删除键的 keyEquivalent），故同样让位给输入框。
                 title: "删除";
                 shortcut: @keys(Control + Delete);
-                enabled: root.entry-cmd-ok;
+                enabled: root.entry-cmd-ok && !root.text-input-focus;
                 activated => { EntryApi.delete-entry(); }
             }
             MenuSeparator { }
@@ -1719,9 +1733,10 @@ export component AppWindow inherits Window {
             }
             MenuSeparator { }
             MenuItem {
+                // ⌘⇧V = macOS 的「粘贴并匹配样式」，属同一类冲突（见 root.text-input-focus）。
                 title: "校验 bundle";
                 shortcut: @keys(Control + Shift + V);
-                enabled: root.has-bundle;
+                enabled: root.has-bundle && !root.text-input-focus;
                 activated => { root.run-validate(); }
             }
         }

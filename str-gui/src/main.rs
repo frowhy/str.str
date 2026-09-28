@@ -2235,6 +2235,7 @@ fn shortcut_table(mac: bool) -> Vec<Shortcut> {
     push(&mut out, "文件", "新建文件…", format!("{m}N"));
     push(&mut out, "文件", "刷新（重新扫描磁盘）", format!("{m}R"));
 
+    push(&mut out, "编辑", "全选条目", format!("{m}A"));
     push(
         &mut out,
         "编辑",
@@ -2310,6 +2311,15 @@ fn shortcut_table(mac: bool) -> Vec<Shortcut> {
         "其他",
         "对话框：Esc 取消 / 关闭，Enter 确定",
         "Esc / Enter".into(),
+    );
+    push(
+        &mut out,
+        "其他",
+        concat!(
+            "输入框聚焦时：全选 / 复制 / 剪切 / 粘贴 / 删除到行首归输入框，",
+            "菜单里的同名动作暂停（避免抢走按键）"
+        ),
+        format!("{m}A {m}C {m}X {m}V {m}{del} {s}{m}V"),
     );
 
     out

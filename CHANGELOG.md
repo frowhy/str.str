@@ -30,7 +30,7 @@
 
 ## [Unreleased]
 
-规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.4.0
+规范 1.13.0 · CLI 0.7.2 · 技能包 0.4.2 · GUI 0.4.1
 
 ### 新增
 
@@ -69,6 +69,21 @@
   → 条目模型整体替换、FocusScope 销毁 → 方向键失效，toggle 后须重新 `keys.focus()`；
   本版 Slint 的 `changed` 回调不支持跨元素路径与函数内隐式局部变量（滚动逻辑用
   「镜像属性 + 元素 function」实现）。
+
+### 修复
+
+- **菜单快捷键不再劫持输入框（gui 0.4.0 → 0.4.1）**：编辑分支标题 / 类型 / 摘要 / 标签、
+  条目信息，或在各对话框输入框里按 ⌘（Ctrl）**C / V** 此前不会复制粘贴文字，而是触发
+  了「拷贝 / 粘贴条目」。根因：Slint `MenuBar` 的 `shortcut:` 不是按键系统的一部分，
+  而是被编译成**原生加速器**（macOS = `NSMenuItem.keyEquivalent`，Windows / Linux =
+  muda accelerator），系统在按键到达 Slint 之前就截获它。现以 Slint 内置全局
+  `TextInputInterface.text-input-focused` 判定焦点，把**与文本编辑同义**的六项菜单项
+  置灰 —— ⌘A 全选 / ⌘C 拷贝 / ⌘X 剪切 / ⌘V 粘贴 / ⌘⌫ 删除 / ⌘⇧V 校验 bundle
+  （其中 ⌘⌫ 在 macOS 文本编辑里是「删除到行首」，此前会直接删条目，危害最大）。
+  **置灰而非在回调里跳过**：原生菜单项 disabled 后才会停止吞键，事件得以回落给
+  Slint 的 `TextInput`，由它自带的复制 / 剪切 / 粘贴 / 全选 / 删除到行首处理；
+  无文本编辑语义的组合键（⌘O / ⌘N / ⌘R / ⌘D / ⌘S / ⇧⌘N,S,R / ⌘1,2,+,-,0）
+  保持原样。快捷键一览同步补「⌘A 全选条目」与该说明。
 
 ## [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) — 2026-09-23
 
