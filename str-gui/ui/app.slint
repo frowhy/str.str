@@ -314,6 +314,8 @@ export struct MindNode {
     hard: bool,
     mount-parent: int,
     link-visit: int,
+    // 渲染深度（挂载视图 ≠ visit 的扫描深度）：仅 Rust 侧小地图脊柱回溯使用。
+    depth: int,
     // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
     has-entries: bool,
     entry-rows: [EntryRow],

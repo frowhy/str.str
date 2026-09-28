@@ -1604,22 +1604,34 @@ fn mini_density_raster(
 }
 
 /// 选中分支的祖先链（含自身）在节点序列中的下标。
-/// 节点序列是**后序**（子节点先于父节点入列）：选中项之后第一个「深度更小」的
-/// 节点即其父节点，继续回溯直到根 —— 一次顺序扫描即可（O(N)）。
-fn selection_spine(out: &MindOut, scan: &Scan) -> Vec<usize> {
-    let depth = |i: usize| scan.visits[out.nodes[i].visit as usize].depth;
-    let Some(start) = out.nodes.iter().position(|n| n.is_selected) else {
-        return Vec::new();
-    };
-    let mut chain = vec![start];
-    let mut d = depth(start);
-    for j in start + 1..out.nodes.len() {
-        let dj = depth(j);
-        if dj < d {
-            chain.push(j);
-            d = dj;
-            if d == 0 {
-                break;
+///
+/// 节点序列是**后序**（子节点先于父节点入列）：选中项之后第一个「渲染深度更小」
+/// 的节点即其父节点，继续回溯直到根 —— 一次顺序扫描即可（O(N)）。深度必须用
+/// **渲染深度**（`MindNode::depth`）：挂载视图（软 / 硬）的 visit 是目标分支，
+/// 扫描深度 ≠ 渲染深度，用扫描深度回溯会跳过挂载点、链就断错。
+/// 同一目标可被多处渲染（真身 + 多个挂载视图，`is_selected` 同真）—— 对**所有**
+/// 选中副本取脊柱并集（与结构树「真身 + 挂载行同时高亮」一致）。
+fn selection_spine(nodes: &[MindNode]) -> Vec<usize> {
+    let mut chain: Vec<usize> = Vec::new();
+    let starts: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.is_selected)
+        .map(|(i, _)| i)
+        .collect();
+    for start in starts {
+        chain.push(start);
+        let mut d = nodes[start].depth;
+        for j in start + 1..nodes.len() {
+            let dj = nodes[j].depth;
+            if dj < d {
+                if !chain.contains(&j) {
+                    chain.push(j);
+                }
+                d = dj;
+                if d == 0 {
+                    break;
+                }
             }
         }
     }
@@ -1738,7 +1750,7 @@ fn mind_layout(e: &Editor) -> MindOut {
     }
     let mut mount_path: Vec<usize> = Vec::new();
     mind_dfs(
-        e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], false, -1, false,
+        e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], 0, false, -1, false,
         None, None, &mut mount_path, &mut out,
     );
     out.h = NODE_VGAP + sub_hs[0] + NODE_VGAP;
@@ -1866,6 +1878,7 @@ fn mind_dfs(
     x: f32,
     band_top: f32,
     band_h: f32,
+    depth: usize,
     mounted: bool,
     mount_parent: i32,
     hard: bool,
@@ -2013,7 +2026,7 @@ fn mind_dfs(
                 (false, -1)
             };
             centers.push(mind_dfs(
-                e, node_hs, sub_hs, c, child_x, cursor, cb, child_mounted,
+                e, node_hs, sub_hs, c, child_x, cursor, cb, depth + 1, child_mounted,
                 child_mount_parent, ch_hard, ch_link, ch_alias.clone(), path, out,
             ));
             path.pop();
@@ -2040,6 +2053,7 @@ fn mind_dfs(
         mount_parent,
         hard,
         link_visit: link_idx.map(|p| p as i32).unwrap_or(-1),
+        depth: depth as i32,
         has_entries: has_any_entries,
         entry_rows: apply_node_entry_rows(e, idx, rows),
     });
@@ -5345,32 +5359,6 @@ fn main() -> Result<(), slint::PlatformError> {
                 mind.mini_edge_chunks.clone(),
             ))));
         }
-        // 小地图密度形态：映射参数（盒尺寸 / 两轴比例 / 判据 / 用色）都由 Slint 侧
-        // 计算，这里回读后烘焙位图 —— 两边用同一组数值，不会各算一套。
-        if app.get_mini_dense() {
-            // Slint 在窗口显示前只报 1.0，密度图固定按 2x 生成：位图很小（184×116
-            // 量级），Retina 下不糊，1x 屏上略缩也看不出差别。
-            let dpr = app.window().scale_factor().clamp(2.0, 3.0);
-            let (bw, bh) = (app.get_mini_box_w(), app.get_mini_box_h());
-            let (sx, sy) = (app.get_mini_sx(), app.get_mini_sy());
-            let ink = rgb_of(app.get_mini_ink());
-            let accent = rgb_of(app.get_mini_accent());
-            let selected = e.selected.clone().unwrap_or_default();
-            // 键含布局签名 / 映射参数 / 用色 / 选中路径：只有这些变化才需要重烘焙。
-            let key = format!(
-                "{sig}|{dpr:.2}|{bw:.2}x{bh:.2}|{sx:.4}x{sy:.4}|{ink:?}{accent:?}|{selected}"
-            );
-            if e.mini_raster_key.borrow().as_deref() != Some(key.as_str()) {
-                // 无 scan（未打开 bundle）时布局为空，跳过光栅即可：过去这里 expect 会 panic。
-                if let Some(scan) = e.scan.as_ref() {
-                    let spine = selection_spine(mind, scan);
-                    let raster =
-                        mini_density_raster(mind, (bw, bh), (sx, sy), dpr, &spine, ink, accent);
-                    app.set_mind_mini_image(mini_density_image(&raster));
-                }
-                *e.mini_raster_key.borrow_mut() = Some(key);
-            }
-        }
         // 节点模型尽量原地更新：整体替换会重建所有节点组件，正在显示右键
         // 菜单的那个节点被销毁 → 菜单项点击失效（首次右键选中分支即触发，
         // 与结构树 rows_model 同款问题）。节点数变化时（展开/收起等）才整体替换。
@@ -5419,6 +5407,37 @@ fn main() -> Result<(), slint::PlatformError> {
                 let handle = Rc::new(VecModel::from(mind.nodes.clone()));
                 app.set_mind_nodes(ModelRc::from(handle.clone()));
                 *e.mind_nodes_model.borrow_mut() = Some(handle);
+            }
+        }
+        // 小地图密度形态：映射参数（盒尺寸 / 两轴比例 / 判据 / 用色）都由 Slint 侧
+        // 计算，这里回读后烘焙位图 —— 两边用同一组数值，不会各算一套。
+        // ⚠ 必须在节点模型原地刷新**之后**：脊柱（高亮路径）读的是**模型当前**的
+        // is_selected —— 缓存布局里的选中态是构建那一刻的，选中变化只改模型不重排
+        // 布局，直接用缓存会把高亮画在旧位置上（「高亮不正确且不及时」的根因）。
+        if app.get_mini_dense() {
+            // Slint 在窗口显示前只报 1.0，密度图固定按 2x 生成：位图很小（184×116
+            // 量级），Retina 下不糊，1x 屏上略缩也看不出差别。
+            let dpr = app.window().scale_factor().clamp(2.0, 3.0);
+            let (bw, bh) = (app.get_mini_box_w(), app.get_mini_box_h());
+            let (sx, sy) = (app.get_mini_sx(), app.get_mini_sy());
+            let ink = rgb_of(app.get_mini_ink());
+            let accent = rgb_of(app.get_mini_accent());
+            let selected = e.selected.clone().unwrap_or_default();
+            // 键含布局签名 / 映射参数 / 用色 / 选中键：只有这些变化才需要重烘焙。
+            let key = format!(
+                "{sig}|{dpr:.2}|{bw:.2}x{bh:.2}|{sx:.4}x{sy:.4}|{ink:?}{accent:?}|{selected}"
+            );
+            if e.mini_raster_key.borrow().as_deref() != Some(key.as_str()) {
+                // 脊柱回溯的数据源 = 节点模型的当前行（含原地刷新后的选中态）。
+                let spine_nodes: Vec<MindNode> = match e.mind_nodes_model.borrow().clone() {
+                    Some(h) => (0..h.row_count()).filter_map(|i| h.row_data(i)).collect(),
+                    None => mind.nodes.clone(),
+                };
+                let spine = selection_spine(&spine_nodes);
+                let raster =
+                    mini_density_raster(mind, (bw, bh), (sx, sy), dpr, &spine, ink, accent);
+                app.set_mind_mini_image(mini_density_image(&raster));
+                *e.mini_raster_key.borrow_mut() = Some(key);
             }
         }
         drop(guard);
@@ -10456,6 +10475,7 @@ mod mini_density_tests {
             hard: false,
             mount_parent: -1,
             link_visit: -1,
+            depth: 0,
             has_entries: false,
             entry_rows: ModelRc::from(Rc::new(VecModel::<EntryRow>::default())),
         };
@@ -10549,7 +10569,7 @@ mod mini_density_tests {
         e.rebuild();
 
         let out = mind_layout(&e);
-        let spine = selection_spine(&out, e.scan.as_ref().unwrap());
+        let spine = selection_spine(&out.nodes);
         assert_eq!(spine.len(), depth + 1, "链长应为深度 + 1");
         assert!(out.nodes[spine[0]].is_selected, "链首是选中节点");
         assert!(
