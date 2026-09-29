@@ -761,7 +761,7 @@ fn link_would_cycle(scan: &Scan, src: usize, dst: usize) -> bool {
 }
 
 /// 挂载一个链接子分支（规范 §4.6.1）：`role = "link"` + `target`，磁盘不新建任何东西。
-/// `mode = "soft"`（缺省，目标完整视图）｜`"hard"`（仅内容关联、只读，不得挂自己的后代）。
+/// `mode = "soft"`（缺省，目标完整视图）｜`"hard"`（仅内容关联、只读）。
 pub fn link_add(
     dir: &Path,
     uuid: Option<String>,
@@ -784,12 +784,6 @@ pub fn link_add(
     if scan.visits[dst].depth == 0 {
         return Err(Error::BadArg(
             "链接的目标不得是 ROOT（可挂载对象只有 `node` / `branch`）".into(),
-        ));
-    }
-    // 硬链接仅内容关联：挂自己的后代 = 内容自嵌套，无意义（规范 §4.6.1）。
-    if mode == "hard" && scan.ancestors(dst).contains(&idx) {
-        return Err(Error::BadArg(
-            "硬链接不得挂载自己的后代（仅内容关联，内容自嵌套无意义）".into(),
         ));
     }
     if scan.by_id.get(target).map(|v| v.len()).unwrap_or(0) > 1 {

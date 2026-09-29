@@ -33,18 +33,44 @@ export global DndApi {
     // ── 结构树分支拖拽（同级重排）──
     // 载荷 = branch-to-transfer(visit)（"branch|<visit>"，与条目载荷可辨）。
     in-out property <int> tree-src-visit: -1;
+    // 挂载行拖拽（软 / 硬链接）：src = **挂载声明**（挂载点 + 目标 visit），
+    // 不是真身 visit —— 拖拽只动挂载声明（重挂载 / 重排），目标分支与数据不动。
+    // 载荷 = mount-to-transfer（"mount|<挂载点>|<目标>"，branch / entry 解析均忽略）。
+    in-out property <int> tree-src-mount-parent: -1;
+    in-out property <int> tree-src-mount-target: -1;
+    // 被拖硬链接行的自有分支 visit（-1 = 软 / 非硬）：落点不得落在其自有结构
+    // 内（含自身），否则 = 把声明移进自己。
+    in-out property <int> tree-src-mount-link: -1;
     in-out property <int> tree-hover-visit: -2;
+    // 指示符按**行下标**记账（visit 会把挂载行与真身行一齐点亮）：插入线 /
+    // 高亮只允许出现在被悬停的那一行。
+    in-out property <int> tree-hover-row: -2;
     in-out property <int> tree-hover-half: 0;
-    // 上半区 = 插入为子分支（整行高亮，与内容「移入文件夹」一致）；
+    // 上半区 = 插入为该分支的**第一个子分支**（整行高亮，与内容「移入文件夹」
+    // 一致；末尾位置由最后一个子分支的下半区覆盖）；
     // 下半区 = 同级排序（行底插入线）。
     in-out property <bool> tree-hover-nest: false;
     pure callback branch-to-transfer(int) -> data-transfer;
-    // 解析分支载荷：条目 / 外部文件载荷返回 -1。
+    pure callback mount-to-transfer(int, int) -> data-transfer;
+    // 解析分支载荷：条目 / 外部文件 / 挂载载荷返回 -1。
     pure callback transfer-to-branch(data-transfer) -> int;
     // 上半区落点有效性：不能拖到自身 / 自身子树内（ROOT 不可拖动）。
     pure callback tree-nest-ok(int, int) -> bool;
     // 下半区落点有效性：同父同级且非「顺序不变」边界（拖到自身 / 紧邻原位）。
     pure callback tree-drop-ok(int, int, bool) -> bool;
+    // 挂载行拖拽落点判定（src 从 tree-src-mount-* 读）：
+    // 上半区 = 重挂载到该行解析出的挂载父级之下（真实行 = 自身；软挂载行 = 目标；
+    // 硬链接行 = 自有结构）→ nest-ok 布尔；
+    // 下半区 → drop-ok 返回动作：0 = 无效，1 = 同挂载点内重排（插到该行之后），
+    // 2 = 重挂载为该行解析挂载父级的第一个子分支（含挂载父节点自身 = 移到最前）。
+    pure callback tree-mount-nest-ok(int, bool, bool, int) -> bool;
+    pure callback tree-mount-drop-ok(int, bool, bool, int, int, bool) -> int;
+    // 目标行在其挂载点 entries[] 中的结构行 path（重排落盘定位用）：
+    // 真实行 = 自身 id；硬链接行 = 自身分支 id；软挂载行 = 目标 id。
+    pure callback mount-row-path(int, bool, bool, int, int) -> string;
+    in-out property <string> tree-hover-mount-path;
+    // 下半区落点动作（tree-mount-drop-ok 的结果，dropped 时消费）。
+    in-out property <int> tree-hover-mount-action: 0;
     pure callback transfer-to-entry(data-transfer) -> string;
     // 外部文件拖入（OS 文件管理器）：判别与读取路径列表（\n 分隔）。
     pure callback transfer-has-files(data-transfer) -> bool;
@@ -76,7 +102,10 @@ export global DndApi {
     // 行高亮/指示线只允许归属面板响应，否则拖拽时所有节点的同行同时触发。
     in-out property <int> hover-panel: -2;
     // 悬停状态所属导图节点（visit）：拖拽悬停到某分支上时该节点高亮反馈。
+    // 按**节点下标**点亮（visit 会把挂载节点与真身节点一齐点亮），visit 仅作
+    // 「是否被某节点认领」的布尔判据。
     in-out property <int> hover-node: -2;
+    in-out property <int> hover-node-idx: -2;
     // 被拖条目所属分支的 visits 下标（Rust 侧随选中分支更新；拖拽开始时面板写入自身值）。
     in-out property <int> src-visit: -1;
     // 内部条目拖拽的载荷（拖拽开始时写入，规避 data-transfer 文本往返问题）。
@@ -109,6 +138,7 @@ export global DndApi {
         src-mixed = false;
         tree-src-visit = -1;
         tree-hover-visit = -2;
+        tree-hover-row = -2;
         tree-hover-half = 0;
         tree-hover-nest = false;
         hover-external = false;
@@ -133,6 +163,7 @@ export global DndApi {
         hover-into-dir = false;
         hover-panel = -2;
         hover-node = -2;
+        hover-node-idx = -2;
         tree-hover-visit = -2;
         tree-hover-half = 0;
         tree-hover-nest = false;
@@ -229,12 +260,18 @@ export struct BranchRow {
     // 链接行（`role = "link"`，规范 §4.6.1）：`mounted` = 软连接视图（身份 = 目标
     // 分支，点它 = 选中真身；`mount-parent` = 挂载点分支，供「移除挂载」定位）；
     // `hard` = 硬链接（表现与软连接一致：身份 / 信息 / 内容 = 目标且内容只读，
-    // 标题带「≠」），额外渲染自有子分支 —— `link-visit` = 自身分支 visit
+    // 标题带「≡」），额外渲染自有子分支 —— `link-visit` = 自身分支 visit
     //（「新建子分支」的落点），软连接为 -1。
     mounted: bool,
     hard: bool,
     mount-parent: int,
     link-visit: int,
+    // 行的**展开键**（含实例上下文前缀）：右键选中时经 `sel-expand-key` 流转给
+    // Rust 侧 —— 菜单栏「展开/收起子树」据此作用于所选行的实例上下文。
+    expand-key: string,
+    // 行内容的**自然像素宽**（缩进 + 箭头 + 标题 + 类型 + 内边距，Rust 侧按
+    // 字宽估算）：横向滚动的行宽 = max(视口宽, 该值)。
+    content-px: length,
     // 挂载选择器自己的展开状态（与 `expanded` 互相独立，见 `pick_expanded`）。
     // 挂载对话框复用本模型时的**逐行可选标记**：该行能否作为挂载目标
     // （ROOT / 自身 / 祖先 / 硬链接时的后代 / id 重复者 = false，置灰仅展示）。
@@ -308,12 +345,15 @@ export struct MindNode {
     children-expanded: bool,
     has-children: bool,
     // 链接节点（规范 §4.6.1）：`mounted` = 软连接视图（⤷ 标记，身份 = 目标）；
-    // `hard` = 硬链接（表现与软连接一致 + 内容只读，标题带「≠」），自有子分支
+    // `hard` = 硬链接（表现与软连接一致 + 内容只读，标题带「≡」），自有子分支
     // 渲染在其下 —— `link-visit` = 自身分支 visit（「新建子分支」落点）。
     mounted: bool,
     hard: bool,
     mount-parent: int,
     link-visit: int,
+    // 实例展开键（真实节点 = rel；挂载节点 = 挂载点 ␟ mount ␟ 目标）：
+    // 展开 / 收起只作用于本节点，与真身及其它挂载视图互不关联。
+    expand-key: string,
     // 渲染深度（挂载视图 ≠ visit 的扫描深度）：仅 Rust 侧小地图脊柱回溯使用。
     depth: int,
     // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
@@ -1475,9 +1515,21 @@ export component AppWindow inherits Window {
     in-out property <bool> sel-hard: false;
     // 右键菜单对**硬链接行 / 节点**操作时的落点流转（Rust 侧消费后复位）：
     // child-parent-visit = 新建子分支的落点（硬链接自身分支）；op-visit = 删除
-    // （移除挂载）的目标（自身分支）。-1 = 常规流程（当前选中分支）。
+    // （移除挂载）的目标（自身分支）；mount-parent-visit = 挂载的落点（硬链接
+    // 自身分支）。-1 = 常规流程（当前选中分支）。
     in-out property <int> child-parent-visit: -1;
     in-out property <int> op-visit: -1;
+    in-out property <int> mount-parent-visit: -1;
+    // 选中经由**软挂载行 / 节点**进入时的挂载点（select-visit 前 → Rust 侧读取，
+    // 树行左键由 Rust 直接维护）：挂载行身份 = 目标真身，「删除分支」据此改道为
+    // 「移除挂载」。-1 = 常规流程。
+    in-out property <int> sel-mount-parent: -1;
+    // 选中行的**展开键**（含实例上下文前缀）：菜单栏「展开/收起子树」据此作用于
+    // 所选行所处的实例上下文。空串 = 真实上下文（按选中 visit 的 rel 键处理）。
+    in-out property <string> sel-expand-key: "";
+    // 结构树内容的最大自然像素宽（Rust 侧按行估算的最大值）：横向滚动
+    // viewport-width = max(视口宽, 该值)。
+    in-out property <length> tree-content-px: 0px;
 
     // ── 菜单栏「分支」项的可用性（由 Rust 随选中态维护）──
     in property <bool> sel-has-children: false;
@@ -1540,7 +1592,7 @@ export component AppWindow inherits Window {
     // 点击导图空白处：取消分支选中（激活）状态。
     callback clear-activation();
     // 导图：双击节点伸缩子树；▶ 展开/收起节点内内容条目。
-    callback toggle-visit-expand(int);
+    callback toggle-visit-expand(string);
     callback toggle-node-content(int);
     // 菜单栏「分支」：同上两个开关，作用于**当前选中分支**（菜单项没有行下标 / visit，
     // 由宿主按选中态解析目标）。
@@ -1558,6 +1610,9 @@ export component AppWindow inherits Window {
     callback save-details();
     callback add-child();
     callback delete-branch();
+    // 挂载行拖拽落点（软 / 硬链接：只动挂载声明）。src 与落点都取自
+    // DndApi.tree-src-mount-* / tree-hover-* 全局状态（拖拽开始 / 悬停时写入）。
+    callback drop-mount-row();
     callback add-entry();
     callback entry-drop-to-branch(string, string, int);
     // 分支拖拽重排：src_visit 拖到 target_visit 的前/后（同级分支之间）。
@@ -1927,14 +1982,22 @@ export component AppWindow inherits Window {
                             font-weight: 700;
                             color: c-text;
                         }
-                        ListView {
+                        treelist := ListView {
                             vertical-stretch: 1;
+                            // 横向滚动：viewport 宽 = max(视口, 行内容最大自然宽)。
+                            content-width: Math.max(self.width, root.tree-content-px);
                             for row[index] in root.rows: Rectangle {
                                 // 行高与内容列表同基准（对标 Finder 列表实测 20pt）。
                                 height: 20px;
+                                // 行宽 = 滚动视口全宽（≥ 自身内容宽）：横向滚动时
+                                // 选区 / 背景色撑满整行（若用自身 content-px，浅层
+                                // 行只到 320px 处，滚出的区域是空的）。
+                                width: Math.max(treelist.width, root.tree-content-px);
                                 // 重排悬停（下半区）：只显示行底插入线，**不**亮整行
                                 //（与内容列表排序手势一致——高亮 = 移入语义专属）。
-                                property <bool> tree-reorder-hover: DndApi.tree-hover-visit == row.visit
+                                // 按**行下标**判定：挂载行与真身行同 visit，按 visit
+                                // 判定会让插入线在多行同时出现。
+                                property <bool> tree-reorder-hover: DndApi.tree-hover-row == index
                                     && DndApi.tree-hover-half == 1
                                     && !DndApi.tree-hover-nest;
                                 // 整行高亮 = 「移入」语义专属（上半区嵌套 / 条目与外部
@@ -1985,8 +2048,13 @@ export component AppWindow inherits Window {
                                             activated => { root.branch-rename-open(); }
                                         }
                                         MenuItem {
+                                            // 硬链接行：挂载落**自有结构**（link-visit）；
+                                            // 其余行 link-visit = -1，落当前选中分支。
                                             title: "挂载已有分支…";
-                                            activated => { root.mount-dialog-open(); }
+                                            activated => {
+                                                root.mount-parent-visit = row.link-visit;
+                                                root.mount-dialog-open();
+                                            }
                                         }
                                         MenuSeparator { }
                                         MenuItem {
@@ -2035,11 +2103,25 @@ export component AppWindow inherits Window {
                                 }
                                 // 整行可拖拽（分支同级重排）；TouchArea 包在其中，
                                 // 点击 / 双击 / 右键语义不变（同内容列表 dragarea 模式）。
+                                // 真实行拖拽 = 移动该分支本身；软挂载行 / 硬链接行拖拽 =
+                                // 只动**挂载声明**（载荷与 src 状态走 mount|*，重挂载 /
+                                // 同挂载点内重排），目标真身与数据不动。
                                 branchdrag := DragArea {
-                                    data: DndApi.branch-to-transfer(row.visit);
+                                    data: (row.mounted || row.hard)
+                                        ? DndApi.mount-to-transfer(row.mount-parent, row.visit)
+                                        : DndApi.branch-to-transfer(row.visit);
                                     allow-move: true;
                                     changed dragging => {
-                                        DndApi.tree-src-visit = self.dragging ? row.visit : -1;
+                                        // 挂载行不得污染真实分支的 src 状态（否则落点
+                                        // 会按真身 visit 移动目标分支）。
+                                        DndApi.tree-src-visit = (self.dragging && !row.mounted && !row.hard)
+                                            ? row.visit : -1;
+                                        DndApi.tree-src-mount-parent = (self.dragging && (row.mounted || row.hard))
+                                            ? row.mount-parent : -1;
+                                        DndApi.tree-src-mount-target = (self.dragging && (row.mounted || row.hard))
+                                            ? row.visit : -1;
+                                        DndApi.tree-src-mount-link = (self.dragging && row.hard)
+                                            ? row.link-visit : -1;
                                     }
                                     drag-finished(action) => { EntryApi.end-drop(); }
                                     TouchArea {
@@ -2049,6 +2131,12 @@ export component AppWindow inherits Window {
                                         pointer-event(event) => {
                                             if (event.button == PointerEventButton.right
                                                 && event.kind == PointerEventKind.up) {
+                                                // 与左键 row-click 同口径：硬链接行进入只读
+                                                // 内容视图，软挂载行记挂载点 —— Rust 侧守卫、
+                                                // 挂载兜底落点与删除改道都读它们。
+                                                root.sel-hard = row.hard;
+                                                root.sel-mount-parent = row.mount-parent;
+                                                root.sel-expand-key = row.expand-key;
                                                 root.select-visit(row.visit);
                                                 treectx.show({x: self.mouse-x, y: self.mouse-y});
                                                 // 必须接受事件：否则冒泡到 ContextMenuArea 会重复弹菜单，
@@ -2066,15 +2154,31 @@ export component AppWindow inherits Window {
                                     can-drop(event) => {
                                         // 光标在树上：清空所有悬停指示（行 / 节点 / 边缘滚动，见 DndApi.clear-hover）。
                                         DndApi.clear-hover();
-                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
-                                            // 分支拖拽上半区 = 插入为该分支的**子分支**（可跨父级
-                                            // 结构移动）：指示 = 整行高亮（同内容「移入文件夹」）。
-                                            if (DndApi.tree-nest-ok(DndApi.tree-src-visit, row.visit)) {
+                                        if (DndApi.tree-src-mount-parent >= 0) {
+                                            // 挂载行拖拽上半区 = 重挂载为该行的**第一个子分支**
+                                            //（仅真实行可作落点；链接行是视图，写穿会被拒）。
+                                            if (DndApi.tree-mount-nest-ok(row.visit, row.mounted, row.hard, row.link-visit)) {
                                                 DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-row = index;
                                                 DndApi.tree-hover-nest = true;
                                                 DragAction.move
                                             } else {
                                                 DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-row = -2;
+                                                DndApi.tree-hover-nest = false;
+                                                DragAction.none
+                                            }
+                                        } else if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                            // 分支拖拽上半区 = 插入为该分支的**第一个子分支**（可跨父级
+                                            // 结构移动）：指示 = 整行高亮（同内容「移入文件夹」）。
+                                            if (DndApi.tree-nest-ok(DndApi.tree-src-visit, row.visit)) {
+                                                DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-row = index;
+                                                DndApi.tree-hover-nest = true;
+                                                DragAction.move
+                                            } else {
+                                                DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-row = -2;
                                                 DndApi.tree-hover-nest = false;
                                                 DragAction.none
                                             }
@@ -2086,7 +2190,9 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     dropped(event) => {
-                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                        if (DndApi.tree-src-mount-parent >= 0) {
+                                            root.drop-mount-row();
+                                        } else if (DndApi.transfer-to-branch(event.data) >= 0) {
                                             // 落点参数取全局悬停状态（与指示符同源，同内容列表 drop-*）。
                                             root.drop-branch-row(
                                                 DndApi.tree-src-visit,
@@ -2109,15 +2215,36 @@ export component AppWindow inherits Window {
                                     height: parent.height / 2;
                                     can-drop(event) => {
                                         DndApi.clear-hover();
-                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                        if (DndApi.tree-src-mount-parent >= 0) {
+                                            // 挂载行拖拽下半区：同挂载点兄弟行 = 排到它
+                                            // 之后；其余真实行（含挂载父节点）= 重挂载为
+                                            // 它的**第一个子分支**（行底插入线 = 首子之前）。
+                                            DndApi.tree-hover-mount-action = DndApi.tree-mount-drop-ok(row.visit, row.mounted, row.hard, row.mount-parent, row.link-visit, true);
+                                            if (DndApi.tree-hover-mount-action > 0) {
+                                                DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-row = index;
+                                                DndApi.tree-hover-half = 1;
+                                                DndApi.tree-hover-nest = false;
+                                                DndApi.tree-hover-mount-path = DndApi.mount-row-path(row.visit, row.mounted, row.hard, row.mount-parent, row.link-visit);
+                                                DragAction.move
+                                            } else {
+                                                DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-row = -2;
+                                                DndApi.tree-hover-nest = false;
+                                                DndApi.tree-hover-mount-path = "";
+                                                DragAction.none
+                                            }
+                                        } else if (DndApi.transfer-to-branch(event.data) >= 0) {
                                             // 分支拖拽下半区 = 同级排序（插到该分支之后）。
                                             if (DndApi.tree-drop-ok(DndApi.tree-src-visit, row.visit, true)) {
                                                 DndApi.tree-hover-visit = row.visit;
+                                                DndApi.tree-hover-row = index;
                                                 DndApi.tree-hover-half = 1;
                                                 DndApi.tree-hover-nest = false;
                                                 DragAction.move
                                             } else {
                                                 DndApi.tree-hover-visit = -2;
+                                                DndApi.tree-hover-row = -2;
                                                 DndApi.tree-hover-nest = false;
                                                 DragAction.none
                                             }
@@ -2129,7 +2256,9 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     dropped(event) => {
-                                        if (DndApi.transfer-to-branch(event.data) >= 0) {
+                                        if (DndApi.tree-src-mount-parent >= 0) {
+                                            root.drop-mount-row();
+                                        } else if (DndApi.transfer-to-branch(event.data) >= 0) {
                                             root.drop-branch-row(
                                                 DndApi.tree-src-visit,
                                                 DndApi.tree-hover-visit >= 0
@@ -2165,7 +2294,7 @@ export component AppWindow inherits Window {
                                         clicked => { root.toggle-expand(index); }
                                     }
                                     Text {
-                                        // 挂载行标题的识别标识（⤷ / ≠）由 Rust 侧
+                                        // 挂载行标题的识别标识（⤷ / ≡）由 Rust 侧
                                         // 统一加进行标题（emit_branch / mind_dfs），
                                         // 这里不再叠加，避免出现双符号。
                                         // 数据在真身处 —— 点行 = 选中真身（symlink 语义）。
@@ -2457,7 +2586,7 @@ export component AppWindow inherits Window {
                             fill: transparent;
                         }
 
-                        for node in root.mind-nodes: Rectangle {
+                        for node[i] in root.mind-nodes: Rectangle {
                             // 容器：与节点等大同位、不裁剪，承载节点主体 + 两个外置按钮。
                             x: node.x * 1px + root.mind-off-x;
                             y: node.y * 1px + root.mind-off-y;
@@ -2487,14 +2616,16 @@ export component AppWindow inherits Window {
                                 expanded: node.children-expanded;
                                 fg: c-sub;
                                 bg-hover: c-hover;
-                                clicked => { root.toggle-visit-expand(node.visit); }
+                                clicked => { root.toggle-visit-expand(node.expand-key); }
                             }
 
                             // 节点主体
                             nodebody := Rectangle {
                                 width: 100%;
                                 height: 100%;
-                                property <bool> node-hover: DndApi.hover-node == node.visit;
+                                // 按节点下标点亮：挂载节点与真身节点同 visit，
+                                // 按 visit 判定会两处同时亮。
+                                property <bool> node-hover: DndApi.hover-node-idx == i;
                                 // 根节点不再用专用底色（曾是淡/深靛蓝填充，观感与其它节点
                                 // 不一致、像卡在选中/悬停态）：统一面板色，靠 root 徽标 +
                                 // 加粗标题 + 最左位置区分。
@@ -2527,12 +2658,14 @@ export component AppWindow inherits Window {
                                         if (DndApi.transfer-to-entry(event.data) != ""
                                             && DndApi.src-visit != node.visit) {
                                             DndApi.hover-node = node.visit;
+                                            DndApi.hover-node-idx = i;
                                             DndApi.hover-row = -2;
                                             DndApi.hover-panel = -2;
                                             DndApi.hover-files = false;
                                             DragAction.move
                                         } else if (DndApi.transfer-has-files(event.data)) {
                                             DndApi.hover-node = node.visit;
+                                            DndApi.hover-node-idx = i;
                                             DndApi.hover-row = -2;
                                             DndApi.hover-panel = -2;
                                             DndApi.hover-files = true;
@@ -2550,10 +2683,12 @@ export component AppWindow inherits Window {
                                             DndApi.hover-sortable = false;
                                             DndApi.hover-files = false;
                                             DndApi.hover-node = node.visit;
+                                            DndApi.hover-node-idx = i;
                                             DragAction.none
                                         }
                                     }
                                     dropped(event) => {
+                                        root.sel-expand-key = node.expand-key;
                                         root.select-visit(node.visit);
                                         if (DndApi.transfer-to-entry(event.data) != "") {
                                             EntryApi.drop-row(
@@ -2580,7 +2715,7 @@ export component AppWindow inherits Window {
                                         // （含 mind-drag：边缘滚动必须停，否则移出窗口后
                                         // 残留的滚动会在下次拖动画布时窜出来）。
                                         if (!self.has-drag
-                                            && DndApi.hover-node == node.visit)
+                                            && DndApi.hover-node-idx == i)
                                         {
                                             DndApi.clear-hover();
                                         }
@@ -2603,13 +2738,20 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             title: "重命名分支…";
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 root.branch-rename-open();
                                             }
                                         }
                                         MenuItem {
+                                            // 硬链接节点：挂载落**自有结构**（link-visit）。
                                             title: "挂载已有分支…";
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-expand-key = node.expand-key;
+                                                root.mount-parent-visit = node.link-visit;
                                                 root.select-visit(node.visit);
                                                 root.mount-dialog-open();
                                             }
@@ -2618,7 +2760,7 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             title: "展开 / 收起子树";
                                             enabled: node.has-children;
-                                            activated => { root.toggle-visit-expand(node.visit); }
+                                            activated => { root.toggle-visit-expand(node.expand-key); }
                                         }
                                         MenuItem {
                                             title: "展开 / 收起内容";
@@ -2629,6 +2771,9 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             title: "在 Finder 中显示";
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 root.reveal-branch();
                                             }
@@ -2636,6 +2781,9 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             title: "拷贝路径";
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 root.branch-copy-path();
                                             }
@@ -2643,6 +2791,9 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             title: "在终端中显示";
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 root.branch-reveal-terminal();
                                             }
@@ -2652,6 +2803,9 @@ export component AppWindow inherits Window {
                                             title: "粘贴";
                                             enabled: !node.hard;
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 EntryApi.paste();
                                             }
@@ -2662,6 +2816,9 @@ export component AppWindow inherits Window {
                                             title: node.mounted || node.hard ? "移除挂载" : "删除分支";
                                             enabled: node.mounted || node.hard || !node.is-root;
                                             activated => {
+                                                root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                                 if (node.mounted) {
                                                     root.unmount(node.mount-parent);
@@ -2687,7 +2844,7 @@ export component AppWindow inherits Window {
                                     // 语义是「取消激活」，不该顺带折叠子树。
                                     double-clicked => {
                                         if (self.mouse-y <= root.node-title-h) {
-                                            root.toggle-visit-expand(node.visit);
+                                            root.toggle-visit-expand(node.expand-key);
                                         }
                                     }
                                     pointer-event(event) => {
@@ -2695,6 +2852,7 @@ export component AppWindow inherits Window {
                                             && event.kind == PointerEventKind.up) {
                                             // 右键整张卡片都算：右键即选中（Finder 语义），
                                             // 菜单操作作用于右键的节点而非之前激活的分支。
+                                            root.sel-expand-key = node.expand-key;
                                             root.select-visit(node.visit);
                                             nodectx.show({x: self.mouse-x, y: self.mouse-y});
                                             return EventResult.accept;
@@ -2703,8 +2861,11 @@ export component AppWindow inherits Window {
                                             && event.kind == PointerEventKind.up) {
                                             // 左键：标题行内 = 选中该节点；其余 = 取消激活。
                                             if (self.mouse-y <= root.node-title-h) {
-                                                // 硬链接节点 = 只读内容视图（Rust 侧守卫读取）。
+                                                // 硬链接节点 = 只读内容视图（Rust 侧守卫读取）；
+                                                // 软挂载节点 = 目标真身，记挂载点供删除入口改道。
                                                 root.sel-hard = node.hard;
+                                                root.sel-mount-parent = node.mount-parent;
+                                                root.sel-expand-key = node.expand-key;
                                                 root.select-visit(node.visit);
                                             } else {
                                                 root.clear-activation();

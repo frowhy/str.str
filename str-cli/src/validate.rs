@@ -319,7 +319,7 @@ impl<'a> Checker<'a> {
     /// - **软连接**：声明式（无 id、无目录、不参与清单比对），`path` = `target`；
     /// - **硬链接**：有身份的真实分支 —— 必写 `id` 且 `path = id` = 自身目录名
     ///   （参与清单比对），内容所有权唯一在目标分支（自有 entries 只允许子分支，
-    ///   由 `check_branch` 按 `E_LINK_OWN_CONTENT` 把关）；不得挂自己的后代。
+    ///   由 `check_branch` 按 `E_LINK_OWN_CONTENT` 把关）。
     fn check_links(&mut self, idx: usize) {
         let scan = self.scan;
         let v: &Visit = &scan.visits[idx];
@@ -443,14 +443,6 @@ impl<'a> Checker<'a> {
                     "链接的目标不得是 ROOT（可挂载对象只有 `node` / `branch`）",
                 );
                 continue;
-            }
-            // 硬链接仅内容关联：挂自己的后代 = 内容自嵌套，无意义，禁止。
-            if hard && scan.ancestors(dst).contains(&idx) {
-                self.err(
-                    code::LINK_TARGET_INVALID,
-                    ep,
-                    "硬链接不得挂载自己的后代（仅内容关联，内容自嵌套无意义）",
-                );
             }
         }
     }

@@ -29,6 +29,13 @@ slint::include_modules!();
 /// 节点标题行高（需与 app.slint 节点标题行、EntryListPanel 高度扣减一致）。
 const NODE_H: f32 = 28.0;
 const NODE_VGAP: f32 = 10.0;
+// 渲染 / 键枚举的**全局预算**：挂载可以构成任意深的 DAG，病态 bundle（大量
+// 交叉挂载 + 全部展开）下渲染出现次数与嵌套实例键数量会指数增长 —— 不设上限
+// 会让「展开全部」或一次重排挂死 UI（实测 490 分支 / 442 挂载即可触发）。上限
+// 远超正常 bundle 的规模（数万行），只拦截病态形态。
+const TREE_ROW_CAP: usize = 100_000;
+const MIND_NODE_CAP: usize = 100_000;
+const EXPAND_ALL_KEY_CAP: usize = 100_000;
 const NODE_HGAP: f32 = 70.0;
 const MIND_PAD: f32 = 20.0;
 /// 列表行高，对标 Finder 列表视图（本机实测 40px @2x = **20pt**，字体 13px）。
@@ -75,6 +82,9 @@ struct VisibleRow {
     /// 硬链接行 = 自身分支的 visit（自有子结构的磁盘父级，「新建子分支」落点）；
     /// 其余行为 None。
     link_visit: Option<usize>,
+    /// 本行的**实例展开键**：真实行 = 自身 rel；挂载行 = 「挂载点 ␟ mount ␟ 目标」
+    /// 实例键 —— 展开收起只作用于本行，与真身及其它挂载视图互不关联。
+    expand_key: String,
 }
 
 /// 挂载子分支（`role = "link"`）的解析结果：目标 visit 下标 + 挂载点别名。
@@ -126,6 +136,13 @@ struct Editor {
     /// 当前选中是否经由**硬链接**行 / 节点进入（规范 §4.6.1）：内容只读。
     /// 由行 / 节点点击处置位，`select_visit` 复位（真实位置选择恒为 false）。
     sel_hard: bool,
+    /// 当前选中经由**软挂载行 / 节点**进入时的挂载点（挂载所在分支的 visit）。
+    /// 挂载行身份 = 目标真身 —— 菜单栏 / 信息页的「删除分支」据此改道为
+    /// 「移除挂载」，防止误删目标分支。随 `sel_hard` 一起维护、`select_visit` 复位。
+    sel_mount_parent: Option<usize>,
+    /// 当前选中行的**展开键**（含实例上下文前缀，如 `{实例键}␟{rel}`）。菜单栏
+    /// 「展开/收起子树」据此作用于所选行所处的实例上下文，而非真身 rel 键。
+    sel_expand_key: Option<String>,
     /// 批量操作（内容条目多选）的条目路径集合（仅当前选中分支内；路径跨 rescan 稳定）。
     /// Finder 语义：⌘/Ctrl 点击切换、Shift 点击范围、⌘A 全选、点空白 / 切分支清空。
     entry_multi: HashSet<String>,
@@ -179,6 +196,8 @@ impl Editor {
             mind_cache: RefCell::new(None),
             mini_raster_key: RefCell::new(None),
             sel_hard: false,
+            sel_mount_parent: None,
+            sel_expand_key: None,
         }
     }
 
@@ -281,6 +300,8 @@ impl Editor {
     fn select_visit(&mut self, visit: usize) {
         // 默认按「真实位置选择」复位；硬链接行 / 节点的点击在调用后置位。
         self.sel_hard = false;
+        self.sel_mount_parent = None;
+        self.sel_expand_key = None;
         let new_key = self
             .scan
             .as_ref()
@@ -929,18 +950,15 @@ fn link_would_cycle(scan: &Scan, src: usize, dst: usize) -> bool {
 }
 
 /// 挂载目标的**禁选集合**（visit 下标）：ROOT、自身与祖先（挂进祖先 = 环）、
-/// id 重复或缺失者；硬链接另排除自己的后代（仅内容关联，内容自嵌套无意义）。
-/// 软连接允许挂后代（DAG，子树多处可见）。
-fn mount_banned(e: &Editor, hard: bool) -> HashSet<usize> {
+/// id 重复或缺失者。硬链接目标不限（1.15.0 撤回「不得挂载自己的后代」：硬链接
+/// 不渲染目标结构、内容只读，目标位于挂载点子树内不产生自嵌套）。
+fn mount_banned(e: &Editor, _hard: bool) -> HashSet<usize> {
     let Some(scan) = e.scan.as_ref() else {
         return HashSet::new();
     };
     let mut banned: HashSet<usize> = HashSet::new();
     if let Some(src_idx) = e.selected_idx_in_visits() {
         banned.extend(scan.ancestors(src_idx));
-        if hard {
-            banned.extend(subtree_indices(e, src_idx));
-        }
     }
     if let Some(root) = scan.root_index {
         banned.insert(root);
@@ -972,6 +990,21 @@ fn mount_pickables(e: &Editor, hard: bool, rows: &[VisibleRow]) -> Vec<bool> {
 
 /// `VisibleRow` → Slint `BranchRow`（树与挂载选择器共用同一种行渲染）。
 /// `pickable` 只有选择器行有意义（树行恒 false，无人读取）。
+/// 结构树一行的**内容自然像素宽**（横向滚动用）：基础内缩 8px + 每级缩进
+/// 14px + 箭头列 10px + 间距 4px + 标题 + 4px + 类型副列 + 右内边距 10px，
+/// 另加 6px 余量。标题 / 类型按字体字号估算（同 est_node_w 的口径）。
+fn row_content_px(depth: usize, title: &str, type_str: &str) -> f32 {
+    8.0 + depth as f32 * 14.0
+        + 10.0
+        + 4.0
+        + est_text_w(title, 12.0, 6.5)
+        + 6.0
+        + 4.0
+        + est_text_w(type_str, 10.0, 6.0)
+        + 10.0
+        + 6.0
+}
+
 fn branch_row_of(e: &Editor, r: &VisibleRow, pickable: bool) -> BranchRow {
     BranchRow {
         visit: r.visit as i32,
@@ -999,6 +1032,8 @@ fn branch_row_of(e: &Editor, r: &VisibleRow, pickable: bool) -> BranchRow {
         hard: r.hard,
         mount_parent: r.mount_parent.map(|p| p as i32).unwrap_or(-1),
         link_visit: r.link_visit.map(|p| p as i32).unwrap_or(-1),
+        expand_key: r.expand_key.clone().into(),
+        content_px: row_content_px(r.depth, &r.title, &r.type_str),
         pickable,
     }
 }
@@ -1046,8 +1081,76 @@ fn content_visit<'a>(scan: &'a Scan, visit: &'a Visit) -> Option<&'a Visit> {
     }
 }
 
+/// 选中经由**硬链接**行 / 节点进入（`sel_hard`）时，解析该硬链接自身分支的
+/// visit（挂载等结构写入的落点）：在挂载索引里找指向当前选中（目标）分支的
+/// 硬链接挂载。返回：
+/// - `Some(idx)` —— 恰有一条硬链接挂载指向该目标，`idx` = 自身分支 visit；
+/// - `None` —— 找不到（选中态与来源行不一致，如残留状态）：调用方按普通
+///   分支落点处理；
+/// - `Err` —— 同一目标被多处硬挂载，无法判定来源行（拒绝执行，提示改用
+///   硬链接行右键菜单，那里带精确落点）。
+fn selected_hard_link_idx(
+    e: &Editor,
+    selected: usize,
+) -> Result<Option<usize>, String> {
+    let mut hits: Vec<usize> = Vec::new();
+    for ms in &e.mounts {
+        for m in ms {
+            if m.hard && m.visit == selected {
+                if let Some(link_idx) = m.link_idx {
+                    hits.push(link_idx);
+                }
+            }
+        }
+    }
+    match hits.as_slice() {
+        [only] => Ok(Some(*only)),
+        [] => Ok(None),
+        _ => Err(
+            "同一目标被多处硬挂载，无法判定落点：请在目标硬链接行上右键选择「挂载已有分支…」"
+                .into(),
+        ),
+    }
+}
+
+/// 摘除一条软挂载（规范 §4.6.1 规则 6：只摘引用）：从 parent 分支的 `entries[]`
+/// 移除指向 target 的 `role = "link"` 行并落盘、rescan。目标分支与数据不动。
+/// 返回 (挂载点标题, 目标标题)。右键「移除挂载」与删除入口对挂载选中态的改道
+/// （本会话修复：菜单栏 ⌘⇧⌫ / 信息页「删除分支」在挂载行选中态下误删目标）
+/// 共用此实现。
+fn unmount_link(
+    e: &mut Editor,
+    parent_idx: usize,
+    target_idx: usize,
+) -> Result<(String, String), String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
+    let scan = e.scan.as_ref().ok_or("未选择分支")?;
+    let target_id = scan.visits[target_idx]
+        .meta
+        .as_ref()
+        .and_then(|m| m.id.clone())
+        .ok_or("目标分支缺少 id")?;
+    let parent = &scan.visits[parent_idx];
+    let parent_title = visit_title(parent);
+    let dst_title = visit_title(&scan.visits[target_idx]);
+    let mut meta = read_meta(bundle, &parent.dir)?;
+    if !meta
+        .entries
+        .iter()
+        .any(|en| en.is_link() && en.path == target_id)
+    {
+        return Err(format!("「{parent_title}」下没有指向「{dst_title}」的挂载"));
+    }
+    meta.remove_entry_path(&target_id);
+    meta.touch();
+    meta.save(&bundle.meta_path(&parent.dir))
+        .map_err(|err| err.to_string())?;
+    e.rescan()?;
+    Ok((parent_title, dst_title))
+}
+
 /// 分支是否存在**内容条目**：排除子分支与链接声明行（链接是结构，已在树 /
-/// 导图以「⤷ / ≠」分支行呈现，不该把内容按钮点亮）。硬链接分支看**内容来源**
+/// 导图以「⤷ / ≡」分支行呈现，不该把内容按钮点亮）。硬链接分支看**内容来源**
 /// （目标）的条目。决定「展开 / 收起内容」可用性与导图内容按钮可见性。
 fn has_content_entries(scan: &Scan, visit: &Visit) -> bool {
     content_visit(scan, visit)
@@ -1090,7 +1193,7 @@ enum RowDisplay {
 ///
 /// 软连接挂载行（`mounted = true`）的身份 = 目标分支（`visit` 即目标下标，点行 =
 /// 选中真身，symlink 语义），渲染目标的整棵子树；硬链接行（`hard = true`）**仅内容
-/// 关联**：呈现为带「≠」识别标识的可展开真实分支（不渲染目标的子分支、内容只读）。
+/// 关联**：呈现为带「≡」识别标识的可展开真实分支（不渲染目标的子分支、内容只读）。
 /// 两种挂载行的展开态 / 身份都按目标分支的 rel 记账，与真实位置共享。
 /// **防环守卫**：`path` 是当前渲染链上的分支集合 —— 软连接目标已在链上（挂进自己的
 /// 祖先 / 自身 / 互相挂载）就不再展开，否则无限递归（校验器 `E_LINK_CYCLE` 会报，
@@ -1112,9 +1215,21 @@ fn dfs_rows(
         scan.visits[idx].depth,
         RowDisplay::Real,
         expanded,
+        "",
         &mut path,
         out,
     );
+}
+
+/// 实例上下文键组合：`prefix` 为空 = 真实上下文（键原样）；非空 = 挂载实例
+/// 上下文，键 = `{实例键}␟{基础键}` —— 实例子树内的展开态整体独立于真身与
+/// 其它实例（回归：挂载行展开曾连带显示真身视图已展开的子孙）。
+fn compose_key(prefix: &str, base: String) -> String {
+    if prefix.is_empty() {
+        base
+    } else {
+        format!("{prefix}\u{1f}{base}")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1126,11 +1241,15 @@ fn emit_branch(
     depth: usize,
     display: RowDisplay,
     expanded: &HashSet<String>,
+    prefix: &str,
     path: &mut Vec<usize>,
     out: &mut Vec<VisibleRow>,
 ) {
+    // 全局预算（见 TREE_ROW_CAP）。
+    if out.len() >= TREE_ROW_CAP {
+        return;
+    }
     let visit = &scan.visits[idx];
-    let key = visit_key(scan, idx);
     let children: &[usize] = kids.get(idx).map(|v| v.as_slice()).unwrap_or_default();
     let mounted_list: &[MountChild] =
         mounts.get(idx).map(|v| v.as_slice()).unwrap_or_default();
@@ -1144,7 +1263,7 @@ fn emit_branch(
     }
     let (mounted, hard, mount_parent, title, link_idx) = match &display {
         RowDisplay::Real => (false, false, None, visit_title(visit), None),
-        // 挂载行：软「⤷」= 目标完整视图；硬「≠」= 内容引用 + 自有结构。
+        // 挂载行：软「⤷」= 目标完整视图；硬「≡」= 内容引用 + 自有结构。
         // 身份都是目标 —— 点行选中真身、展开态与真身共享；前缀只在行标题上，
         // `visit_title`（真身标题，状态栏 / 对话框用）保持干净。
         RowDisplay::Mounted { alias, parent, hard, link_idx } => (
@@ -1154,13 +1273,24 @@ fn emit_branch(
             *hard,
             Some(*parent),
             if *hard {
-                format!("≠ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
+                format!("≡ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
             } else {
                 format!("⤷ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
             },
             *link_idx,
         ),
     };
+    // 展开键：真实行 = 自身 rel（既有语义）；挂载行 = **实例键**（挂载点 ␟
+    // mount[-hard] ␟ 目标）—— 展开收起只作用于本行，与真身及其它挂载视图
+    // （含同挂载点指向同目标的软 / 硬链接对）互不关联。处于挂载实例上下文
+    // （prefix 非空）时，键再组合实例前缀：实例子树内所有行的展开态都独立。
+    let base_key = match &display {
+        RowDisplay::Mounted { parent, hard, .. } => {
+            mount_expand_key(scan, *parent, idx, *hard)
+        }
+        RowDisplay::Real => visit_key(scan, idx).to_string(),
+    };
+    let expand_key = compose_key(prefix, base_key);
     let (child_kids, child_mounts): (&[usize], &[MountChild]) = (children, mounted_list);
     // 硬链接行额外渲染**自有子分支**（link 分支磁盘目录下的真实子分支）。
     let own_children = link_idx
@@ -1169,50 +1299,71 @@ fn emit_branch(
                 || !mounts.get(li).map(|v| v.is_empty()).unwrap_or(true)
         })
         .unwrap_or(false);
+    let has_children = if hard {
+        // 硬链接行只渲染自有结构：目标的分支结构不跟过来（规范 §4.6.1）。
+        own_children
+    } else {
+        !child_kids.is_empty() || !child_mounts.is_empty() || own_children
+    };
     out.push(VisibleRow {
         visit: idx,
         depth,
         title,
         type_str: visit_type(visit),
-        expanded: expanded.contains(key),
-        has_children: !child_kids.is_empty() || !child_mounts.is_empty() || own_children,
+        expanded: expanded.contains(&expand_key),
+        has_children,
         has_entries: has_content_entries(scan, visit),
         mounted,
         hard,
         mount_parent,
         link_visit: link_idx,
+        expand_key: expand_key.clone().into(),
     });
     // ROOT 也受展开态控制：折叠根即隐藏全部一级分支。
-    if !expanded.contains(key) {
+    if !expanded.contains(&expand_key) {
         return;
     }
+    // 递归上下文：挂载行 / 硬链接行把自身实例键作为子树的上下文前缀
+    // （实例子树内所有行的展开键 = `{实例键}␟{行键}`，独立记账）；
+    // 真实行延续当前上下文。
+    let child_prefix: String = if mounted || hard {
+        expand_key.clone()
+    } else {
+        prefix.to_string()
+    };
     path.push(idx);
-    for &c in child_kids {
-        emit_branch(
-            scan, kids, mounts, c, depth + 1, RowDisplay::Real, expanded, path, out,
-        );
-    }
-    for m in child_mounts {
-        // 挂载目标已在当前渲染链上 ⇒ 环（或自我挂载）：跳过，不再展开。
-        if path.contains(&m.visit) {
-            continue;
+    // 硬链接行：**目标的分支结构不跟过来**——其子分支要操作请到目标分支；
+    // 仅渲染自有结构（见下方 link_idx 段）。
+    if !hard {
+        for &c in child_kids {
+            emit_branch(
+                scan, kids, mounts, c, depth + 1, RowDisplay::Real, expanded, &child_prefix,
+                path, out,
+            );
         }
-        emit_branch(
-            scan,
-            kids,
-            mounts,
-            m.visit,
-            depth + 1,
-            RowDisplay::Mounted {
-                alias: m.title.clone(),
-                parent: idx,
-                hard: m.hard,
-                link_idx: m.link_idx,
-            },
-            expanded,
-            path,
-            out,
-        );
+        for m in child_mounts {
+            // 挂载目标已在当前渲染链上 ⇒ 环（或自我挂载）：跳过，不再展开。
+            if path.contains(&m.visit) {
+                continue;
+            }
+            emit_branch(
+                scan,
+                kids,
+                mounts,
+                m.visit,
+                depth + 1,
+                RowDisplay::Mounted {
+                    alias: m.title.clone(),
+                    parent: idx,
+                    hard: m.hard,
+                    link_idx: m.link_idx,
+                },
+                expanded,
+                &child_prefix,
+                path,
+                out,
+            );
+        }
     }
     // 硬链接行：自有子分支渲染在目标子树之后（新建子分支落自有结构，在这里可见）；
     // 可见性跟随行本身（= 目标的展开键），与软连接同款。
@@ -1220,7 +1371,8 @@ fn emit_branch(
         path.push(li);
         for &c in kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
             emit_branch(
-                scan, kids, mounts, c, depth + 1, RowDisplay::Real, expanded, path, out,
+                scan, kids, mounts, c, depth + 1, RowDisplay::Real, expanded, &child_prefix,
+                path, out,
             );
         }
         for m in mounts.get(li).map(|v| v.as_slice()).unwrap_or_default() {
@@ -1240,6 +1392,7 @@ fn emit_branch(
                     link_idx: m.link_idx,
                 },
                 expanded,
+                &child_prefix,
                 path,
                 out,
             );
@@ -1710,32 +1863,56 @@ fn mind_layout(e: &Editor) -> MindOut {
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(scan.visits[i].depth));
     let mut sub_hs = node_hs.clone();
+    let mut inst_cache = InstHeightCache::default();
     for _ in 0..=n {
         let mut changed = false;
         for &i in &order {
-            if !e.expanded.contains(visit_key(scan, i)) {
+            // 展开判定 = 真实键：真实上下文的渲染以 rel 键为准。挂载实例的带高
+            // 由 ctx_child_band 按各自实例键精确计入 —— 不能再用「任一实例展开
+            // 即预留」的保守近似：嵌套实例键（`实例键␟rel`）的展开不体现在 rel
+            // 高度表里，保守值会小于渲染实际高度 → 子带溢出、兄弟子树互相压盖。
+            let rel_i = visit_key(scan, i);
+            if !e.expanded.contains(rel_i) {
                 continue;
             }
-            // 渲染视角的孩子 = 真实子分支 + 链接挂载的目标（去重）；带高据此计算，
-            // 否则挂载进来的子树没有预留垂直空间。硬链接节点 = 目标子树带高 +
-            // 自有子分支带高（二者都渲染在硬链接节点之下）。
-            let children = render_children(e, i);
+            // 孩子带高与渲染（mind_dfs）同式：真实孩子 = rel 上下文子树带高；
+            // 挂载孩子 = 实例键精确高度（展开才计子树，收起仅节点高）。
+            let mut children: Vec<MindChild> = e
+                .kids
+                .get(i)
+                .map(|v| v.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .copied()
+                .filter(|&c| scan.visits[c].hard_link_to.is_none())
+                .map(|c| MindChild {
+                    visit: c,
+                    hard: false,
+                    link_idx: None,
+                    alias: None,
+                    is_mount: false,
+                    mount_parent: i,
+                })
+                .collect();
+            for m in e.mounts.get(i).map(|v| v.as_slice()).unwrap_or_default() {
+                if m.visit == i {
+                    continue;
+                }
+                children.push(MindChild {
+                    visit: m.visit,
+                    hard: m.hard,
+                    link_idx: m.link_idx,
+                    alias: m.title.clone(),
+                    is_mount: true,
+                    mount_parent: i,
+                });
+            }
             if children.is_empty() {
                 continue;
             }
             let span: f32 = children
                 .iter()
-                .map(|&(c, hard, link)| {
-                    let mut h = sub_hs[c];
-                    if hard {
-                        if let Some(li) = link {
-                            for &k in e.kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
-                                h += sub_hs[k] + NODE_VGAP;
-                            }
-                        }
-                    }
-                    h + NODE_VGAP
-                })
+                .map(|ch| ctx_child_band(e, &node_hs, &sub_hs, scan, ch, "", &mut inst_cache) + NODE_VGAP)
                 .sum::<f32>()
                 - NODE_VGAP;
             let new_h = span.max(node_hs[i]);
@@ -1751,7 +1928,11 @@ fn mind_layout(e: &Editor) -> MindOut {
     let mut mount_path: Vec<usize> = Vec::new();
     mind_dfs(
         e, &node_hs, &sub_hs, 0, MIND_PAD, NODE_VGAP, sub_hs[0], 0, false, -1, false,
-        None, None, &mut mount_path, &mut out,
+        None, None,
+        scan.visits[0].rel.clone(),
+        String::new(),
+        &mut inst_cache,
+        &mut mount_path, &mut out,
     );
     out.h = NODE_VGAP + sub_hs[0] + NODE_VGAP;
     // 缩略图的内容实际右缘（不含按钮占位）：用它换算面板宽度与缩放比例。
@@ -1802,12 +1983,18 @@ fn mind_sig(e: &Editor) -> u64 {
         r.has_entries.hash(&mut h);
     }
     if let Some(scan) = e.scan.as_ref() {
-        // 内容展开集合按身份键（rel）排序入哈希：集合里可能残留上一代 scan 的键，
-        // 但 `scan_gen` 已入哈希，rescan 必然换签名，故无需再过滤存在性。
-        let mut expanded_keys: Vec<&str> =
-            e.content_expanded.iter().map(|s| s.as_str()).collect();
+        // 展开集合整体排序入哈希：挂载实例键的展开收起**不一定**反映在 e.rows
+        // （对应树上下文收起时该行不存在），漏哈希会导致布局缓存命中陈旧布局
+        // ——「展开按钮有时无效」的根源。
+        let mut expanded_keys: Vec<&str> = e.expanded.iter().map(|s| s.as_str()).collect();
         expanded_keys.sort_unstable();
         expanded_keys.hash(&mut h);
+        // 内容展开集合按身份键（rel）排序入哈希：集合里可能残留上一代 scan 的键，
+        // 但 `scan_gen` 已入哈希，rescan 必然换签名，故无需再过滤存在性。
+        let mut content_keys: Vec<&str> =
+            e.content_expanded.iter().map(|s| s.as_str()).collect();
+        content_keys.sort_unstable();
+        content_keys.hash(&mut h);
         // 内容行数决定节点高度（条目增删、内嵌文件夹展开都会变）。
         for i in 0..scan.visits.len() {
             let show = e.content_expanded.contains(visit_key(scan, i));
@@ -1838,33 +2025,158 @@ fn apply_node_entry_rows(e: &Editor, visit_idx: usize, rows: Vec<EntryRow>) -> M
     }
 }
 
-/// 渲染视角的孩子：(visit 下标, 是否硬链接, 硬链接自身 visit)。真实孩子在前
-/// （**跳过硬链接分支** —— 它们以挂载行形态渲染，身份 = 目标，见 `mount_index`），
-/// 链接挂载在后（去重：同一目标已在真实位置渲染的不再重复挂）。
-fn render_children(e: &Editor, idx: usize) -> Vec<(usize, bool, Option<usize>)> {
-    let mut out: Vec<(usize, bool, Option<usize>)> = e
+/// 导图布局的渲染孩子：`is_mount` 区分挂载实例与真实位置——同一 visit 可同时
+/// 出现（真身 + 软/硬挂载视图），实例的展开键与挂载标记互不关联。
+struct MindChild {
+    visit: usize,
+    hard: bool,
+    link_idx: Option<usize>,
+    alias: Option<String>,
+    is_mount: bool,
+    mount_parent: usize,
+}
+
+/// 实例上下文带高缓存（`inst_band_h` 的记忆化 + 进行中守卫；挂载 DAG 合法时
+/// 无环，守卫仅防**非法** bundle 的病态结构导致栈溢出）。
+#[derive(Default)]
+struct InstHeightCache {
+    memo: HashMap<(String, usize), f32>,
+    busy: HashSet<(String, usize)>,
+}
+
+/// 真实孩子 `c` 在上下文 `prefix` 下的带高：真实上下文（prefix 空）沿用既有
+/// fixpoint 高度表 `sub_hs`（快路径）；实例上下文按 `{prefix}␟{rel}` 判定展开，
+/// 展开则递归求实例上下文的带高。
+fn ctx_real_band(
+    e: &Editor,
+    node_hs: &[f32],
+    sub_hs: &[f32],
+    scan: &Scan,
+    c: usize,
+    prefix: &str,
+    cache: &mut InstHeightCache,
+) -> f32 {
+    if prefix.is_empty() {
+        return sub_hs[c];
+    }
+    let key = compose_key(prefix, visit_key(scan, c).to_string());
+    if !e.expanded.contains(&key) {
+        return node_hs[c];
+    }
+    inst_band_h(e, node_hs, sub_hs, scan, c, prefix, cache)
+}
+
+/// 孩子 `ch` 在上下文 `prefix` 下的带高（与 mind_dfs 渲染同式）：
+/// - 软挂载实例：收起 = 目标节点高；展开 = 实例上下文（键 = `{prefix}␟{实例键}`）
+///   的目标子树带高；
+/// - 硬挂载实例：展开 = 自有子分支 / 自有挂载的带跨度（同样按实例上下文记账）；
+/// - 真实孩子：见 `ctx_real_band`。
+///
+/// `sub_hs` 是**真实上下文**（rel 键）的高度表，不适用于实例上下文 —— 此前挂载
+/// 行展开曾按 rel 键记账，连带显示真身视图已展开的子孙（回归修复）。
+fn ctx_child_band(
+    e: &Editor,
+    node_hs: &[f32],
+    sub_hs: &[f32],
+    scan: &Scan,
+    ch: &MindChild,
+    prefix: &str,
+    cache: &mut InstHeightCache,
+) -> f32 {
+    let key = compose_key(prefix, mount_expand_key(scan, ch.mount_parent, ch.visit, ch.hard));
+    if ch.is_mount && ch.hard {
+        if !e.expanded.contains(&key) {
+            return node_hs[ch.visit];
+        }
+        let mut own = 0.0f32;
+        if let Some(li) = ch.link_idx {
+            for &k in e.kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
+                own += ctx_real_band(e, node_hs, sub_hs, scan, k, &key, cache) + NODE_VGAP;
+            }
+            for m in e.mounts.get(li).map(|v| v.as_slice()).unwrap_or_default() {
+                let mc = MindChild {
+                    visit: m.visit,
+                    hard: m.hard,
+                    link_idx: m.link_idx,
+                    alias: m.title.clone(),
+                    is_mount: true,
+                    mount_parent: li,
+                };
+                own += ctx_child_band(e, node_hs, sub_hs, scan, &mc, &key, cache) + NODE_VGAP;
+            }
+        }
+        if own > 0.0 {
+            own -= NODE_VGAP;
+        }
+        own.max(node_hs[ch.visit])
+    } else if ch.is_mount {
+        if !e.expanded.contains(&key) {
+            node_hs[ch.visit]
+        } else {
+            inst_band_h(e, node_hs, sub_hs, scan, ch.visit, &key, cache)
+        }
+    } else {
+        ctx_real_band(e, node_hs, sub_hs, scan, ch.visit, prefix, cache)
+    }
+}
+
+/// `idx` 子树在实例上下文 `prefix` 下（且 idx 已展开）的带高 =
+/// max(自身节点高, 孩子带跨度)。记忆化；孩子构造与 mind_dfs 一致
+/// （真实孩子排除硬链接分支 + 挂载孩子）。
+fn inst_band_h(
+    e: &Editor,
+    node_hs: &[f32],
+    sub_hs: &[f32],
+    scan: &Scan,
+    idx: usize,
+    prefix: &str,
+    cache: &mut InstHeightCache,
+) -> f32 {
+    let mkey = (prefix.to_string(), idx);
+    if let Some(&h) = cache.memo.get(&mkey) {
+        return h;
+    }
+    if !cache.busy.insert(mkey.clone()) {
+        return node_hs[idx];
+    }
+    let mut children: Vec<MindChild> = e
         .kids
         .get(idx)
-        .cloned()
+        .map(|v| v.as_slice())
         .unwrap_or_default()
-        .into_iter()
-        .filter(|&c| {
-            e.scan
-                .as_ref()
-                .map(|s| s.visits[c].hard_link_to.is_none())
-                .unwrap_or(true)
+        .iter()
+        .copied()
+        .filter(|&c| scan.visits[c].hard_link_to.is_none())
+        .map(|c| MindChild {
+            visit: c,
+            hard: false,
+            link_idx: None,
+            alias: None,
+            is_mount: false,
+            mount_parent: idx,
         })
-        .map(|c| (c, false, None))
         .collect();
-    if let Some(ms) = e.mounts.get(idx) {
-        for m in ms {
-            if m.visit == idx || out.iter().any(|(v, _, _)| *v == m.visit) {
-                continue;
-            }
-            out.push((m.visit, m.hard, m.link_idx));
-        }
+    for m in e.mounts.get(idx).map(|v| v.as_slice()).unwrap_or_default() {
+        children.push(MindChild {
+            visit: m.visit,
+            hard: m.hard,
+            link_idx: m.link_idx,
+            alias: m.title.clone(),
+            is_mount: true,
+            mount_parent: idx,
+        });
     }
-    out
+    let mut total = 0.0f32;
+    for ch in &children {
+        total += ctx_child_band(e, node_hs, sub_hs, scan, ch, prefix, cache) + NODE_VGAP;
+    }
+    if !children.is_empty() {
+        total -= NODE_VGAP;
+    }
+    let h = total.max(node_hs[idx]);
+    cache.busy.remove(&mkey);
+    cache.memo.insert(mkey, h);
+    h
 }
 
 /// 在垂直带 [band_top, band_top + band_h] 内布置节点及其子树，返回节点中心 y。
@@ -1884,10 +2196,20 @@ fn mind_dfs(
     hard: bool,
     link_idx: Option<usize>,
     alias: Option<String>,
+    // 本节点完整展开键（父层算好：`{实例前缀}␟{rel|实例键}`）与**孩子上下文**
+    // （挂载节点 = 自身键；真实节点 = 沿用父上下文）—— 与 emit_branch 同构。
+    expand_key: String,
+    prefix: String,
+    cache: &mut InstHeightCache,
     path: &mut Vec<usize>,
     out: &mut MindOut,
 ) -> f32 {
     let scan = e.scan.as_ref().unwrap();
+    // 全局预算（见 MIND_NODE_CAP）：病态 bundle 下超出即停止下探，
+    // 返回带中心近似值保持连线端点有限合理。
+    if out.nodes.len() >= MIND_NODE_CAP {
+        return band_top + band_h / 2.0;
+    }
     let visit = &scan.visits[idx];
     let key = visit_key(scan, idx);
     let is_root = visit.depth == 0;
@@ -1912,42 +2234,76 @@ fn mind_dfs(
                 || !e.mounts.get(li).map(|v| v.is_empty()).unwrap_or(true)
         })
         .unwrap_or(false);
-    let has_children = !real.is_empty() || !mounts_here.is_empty() || own_children;
-    // 渲染视角的孩子 = 真实子分支 + 挂载的目标（去重：同一目标已在真实位置渲染的
-    // 不再重复挂）+ 硬链接的**自有子分支**。展开态按目标分支的 rel 记账，与真实
-    // 位置共享（表现与软连接一致）。
-    let mut children: Vec<(usize, bool, Option<usize>, Option<String>)> =
-        Vec::new(); // (visit, hard, link_idx, alias)
-    if e.expanded.contains(key) {
-        for &c in real {
-            children.push((c, false, None, None));
-        }
-        if let Some(ms) = e.mounts.get(idx) {
-            for m in ms {
-                if m.visit == idx
-                    || path.contains(&m.visit)
-                    || children.iter().any(|(v, _, _, _)| *v == m.visit)
-                {
-                    continue; // 挂进自己 / 自己的祖先 / 真实位置已渲染 ⇒ 跳过（防环）
+    let has_children = if hard {
+        // 硬链接节点只渲染自有结构：目标的分支结构不跟过来（规范 §4.6.1）。
+        own_children
+    } else {
+        !real.is_empty() || !mounts_here.is_empty() || own_children
+    };
+    // 展开键由父层算好传入（真实节点 = rel；挂载节点 = 实例键；实例上下文内
+    // 再组合实例前缀）—— 展开收起只作用于本节点，与真身及其它挂载视图
+    // （含同挂载点指向同目标的软 / 硬链接对）互不关联。
+    // 渲染视角的孩子：普通分支 = 真实子分支 + 挂载的目标；**硬链接节点 = 仅自有
+    // 子分支**。同一目标的软 / 硬链接对各自渲染（不再按 visit 去重）。
+    // `is_mount` 区分挂载实例与真实位置——同 visit 可同时出现，实例键互不关联。
+    let mut children: Vec<MindChild> = Vec::new();
+    if e.expanded.contains(&expand_key) {
+        if !hard {
+            for &c in real {
+                children.push(MindChild {
+                    visit: c,
+                    hard: false,
+                    link_idx: None,
+                    alias: None,
+                    is_mount: false,
+                    mount_parent: idx,
+                });
+            }
+            if let Some(ms) = e.mounts.get(idx) {
+                for m in ms {
+                    if m.visit == idx || path.contains(&m.visit) {
+                        continue; // 挂进自己 / 自己的祖先 ⇒ 跳过（防环）
+                    }
+                    children.push(MindChild {
+                        visit: m.visit,
+                        hard: m.hard,
+                        link_idx: m.link_idx,
+                        alias: m.title.clone(),
+                        is_mount: true,
+                        mount_parent: idx,
+                    });
                 }
-                children.push((m.visit, m.hard, m.link_idx, m.title.clone()));
             }
         }
         if let Some(li) = link_idx {
             for &c in e.kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
-                if children.iter().any(|(v, _, _, _)| *v == c) {
+                if children.iter().any(|ch| ch.visit == c) {
                     continue;
                 }
-                children.push((c, false, None, None));
+                children.push(MindChild {
+                    visit: c,
+                    hard: false,
+                    link_idx: None,
+                    alias: None,
+                    is_mount: false,
+                    mount_parent: li,
+                });
             }
             for m in e.mounts.get(li).map(|v| v.as_slice()).unwrap_or_default() {
                 if m.visit == idx
                     || path.contains(&m.visit)
-                    || children.iter().any(|(v, _, _, _)| *v == m.visit)
+                    || children.iter().any(|ch| ch.visit == m.visit)
                 {
                     continue;
                 }
-                children.push((m.visit, m.hard, m.link_idx, m.title.clone()));
+                children.push(MindChild {
+                    visit: m.visit,
+                    hard: m.hard,
+                    link_idx: m.link_idx,
+                    alias: m.title.clone(),
+                    is_mount: true,
+                    mount_parent: li,
+                });
             }
         }
     }
@@ -1961,9 +2317,9 @@ fn mind_dfs(
         Vec::new()
     };
 
-    // 标识字形与结构树同款：软连接「⤷」（目标完整视图）、硬链接「≠」（内容引用）。
+    // 标识字形与结构树同款：软连接「⤷」（目标完整视图）、硬链接「≡」（内容引用）。
     let title = if hard {
-        format!("≠ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
+        format!("≡ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
     } else if mounted {
         format!("⤷ {}", alias.unwrap_or_else(|| visit_title(visit)))
     } else {
@@ -1986,48 +2342,55 @@ fn mind_dfs(
     let child_x = x + w + NODE_HGAP;
     let mut centers: Vec<f32> = Vec::new();
     if !children.is_empty() {
-        // 孩子的带高：硬链接孩子 = 目标子树带高 + 自有子分支带高（复合节点）；
-        // 其余同普通分支。
-        let child_band =
-            |&(c, ch_hard, ch_link, _): &(usize, bool, Option<usize>, Option<String>)| -> f32 {
-            let mut b = sub_hs[c];
-            if ch_hard {
-                if let Some(li) = ch_link {
-                    for &k in e.kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
-                        b += sub_hs[k] + NODE_VGAP;
-                    }
-                }
-            }
-            b
-        };
-        let total: f32 = children
+        // 孩子的带高：按上下文 `prefix` 记账（真实上下文走 sub_hs 快路径；挂载
+        // 实例上下文按实例键递归求带高，见 ctx_child_band）—— 挂载行展开只显示
+        // 一级，子树内展开态与真身 / 其它实例互不关联。
+        let bands: Vec<f32> = children
             .iter()
-            .map(|t| child_band(t) + NODE_VGAP)
-            .sum::<f32>()
-            - NODE_VGAP;
+            .map(|ch| ctx_child_band(e, node_hs, sub_hs, scan, ch, &prefix, cache))
+            .collect();
+        let total: f32 = bands.iter().map(|b| b + NODE_VGAP).sum::<f32>() - NODE_VGAP;
         // 防御式夹取：正常布局下 total ≤ band_h（带高含全部孩子），但面对**非法**
         // bundle（校验器会报环）不得 panic —— 下界取不到时钳到 band_top 即可，
         // 视觉后果只是子带溢出，比 SIGABRT 好得多。
         let lo = band_top;
         let hi = (band_top + band_h - total).max(lo);
         let mut cursor = (y - total / 2.0).clamp(lo, hi);
-        for (_n, &(c, ch_hard, ch_link, ref ch_alias)) in children.iter().enumerate() {
+        for (ch, &cb) in children.iter().zip(&bands) {
             path.push(idx);
-            let cb = child_band(&(c, ch_hard, ch_link, None));
             // 挂载进来的孩子（软连接 = 完整视图，标题由 mind_dfs 加「⤷」标识），
-            // 父都记为本节点（供「移除挂载」定位）；真实孩子 mounted = false。
-            let (child_mounted, child_mount_parent) = if e
-                .mounts
-                .get(idx)
-                .is_some_and(|ms| ms.iter().any(|m| m.visit == c))
-            {
-                (true, idx as i32)
+            // 父都记为**挂载声明的真正所在分支**（ch.mount_parent：普通节点 =
+            // 本节点；硬链接节点自有结构下 = link 分支 li —— 与 ctx_child_band
+            // 的键组合、树侧 emit_branch 的 `parent: li` 一致。此前传 idx（=
+            // 硬链接的挂载目标），导致硬链接自有结构下软挂载的展开键与带高
+            // 计算用的键不一致 → 带高按收起、渲染按展开 → 子带溢出错位）；
+            // 真实孩子 mounted = false。硬链接孩子 mounted = false（走
+            // delete-branch + op-visit）。
+            let (child_mounted, child_mount_parent) = if ch.is_mount && !ch.hard {
+                (true, ch.mount_parent as i32)
+            } else if ch.hard {
+                (false, ch.mount_parent as i32)
             } else {
                 (false, -1)
             };
+            // 递归上下文：孩子的完整展开键 = `{上下文}␟{rel|实例键}`；孩子上下文
+            // （供其子树）= 挂载孩子取自身键，真实孩子延续当前上下文。
+            let (child_ek, child_prefix) = if ch.is_mount {
+                let ek = compose_key(
+                    &prefix,
+                    mount_expand_key(scan, child_mount_parent.max(0) as usize, ch.visit, ch.hard),
+                );
+                (ek.clone(), ek)
+            } else {
+                (
+                    compose_key(&prefix, visit_key(scan, ch.visit).to_string()),
+                    prefix.clone(),
+                )
+            };
             centers.push(mind_dfs(
-                e, node_hs, sub_hs, c, child_x, cursor, cb, depth + 1, child_mounted,
-                child_mount_parent, ch_hard, ch_link, ch_alias.clone(), path, out,
+                e, node_hs, sub_hs, ch.visit, child_x, cursor, cb, depth + 1, child_mounted,
+                child_mount_parent, ch.hard, ch.link_idx, ch.alias.clone(), child_ek,
+                child_prefix, cache, path, out,
             ));
             path.pop();
             cursor += cb + NODE_VGAP;
@@ -2035,7 +2398,7 @@ fn mind_dfs(
     }
 
     let is_selected = e.selected.as_deref() == Some(key);
-    let children_expanded = e.expanded.contains(key);
+    let children_expanded = e.expanded.contains(&expand_key);
     out.nodes.push(MindNode {
         visit: idx as i32,
         x,
@@ -2053,6 +2416,7 @@ fn mind_dfs(
         mount_parent,
         hard,
         link_visit: link_idx.map(|p| p as i32).unwrap_or(-1),
+        expand_key: expand_key.clone().into(),
         depth: depth as i32,
         has_entries: has_any_entries,
         entry_rows: apply_node_entry_rows(e, idx, rows),
@@ -2955,7 +3319,7 @@ fn build_entry_rows_for(e: &Editor, visit_idx: usize) -> Vec<VisibleEntry> {
     let mut out = Vec::new();
     for (idx, en) in meta.entries.iter().enumerate() {
         // 内容面板只列内容：`branch` 是子分支结构，`link` 是挂载声明（已在
-        // 结构树 / 导图以「⤷ / ≠」分支行呈现）——都不该以
+        // 结构树 / 导图以「⤷ / ≡」分支行呈现）——都不该以
         // 内容条目的样子出现在这里。
         if en.is_branch() || en.is_link() {
             continue;
@@ -4041,7 +4405,33 @@ fn branch_move_plan(
 
 /// 结构树拖拽落点有效性（Slint 侧 `tree-drop-ok`）：同级排序或跨层级移动、
 /// 且该边界会实际改变顺序（拖到自身 / 紧邻原位 = 顺序不变的无效点）。
+/// ROOT 行下半区特殊：「after ROOT」无意义 → 成为 ROOT 的**第一个子分支**。
 fn tree_drop_ok(e: &Editor, src: usize, target: usize, after: bool) -> bool {
+    let Some(scan) = e.scan.as_ref() else {
+        return false;
+    };
+    if scan.visits[target].depth == 0 {
+        // ROOT 下半区：src 已是 ROOT 的第一个子分支 = 原位无效。
+        if scan.visits[src].parent != Some(target) {
+            return true;
+        }
+        let src_name = scan.visits[src]
+            .dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        return scan.visits[target]
+            .meta
+            .as_ref()
+            .map(|m| {
+                m.entries
+                    .iter()
+                    .find(|en| en.is_branch() || en.is_link())
+                    .map(|en| en.path != src_name)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+    }
     matches!(branch_move_plan(e, src, target, after), Ok(Some(_)))
 }
 
@@ -4068,6 +4458,371 @@ fn tree_nest_ok(e: &Editor, src: usize, target: usize) -> bool {
     true
 }
 
+// ── 挂载行拖拽（软 / 硬链接）：只动挂载声明，目标真身与数据不动 ──
+
+/// 分支 visit 的磁盘目录名（= 自身 id，`path = id` 语义）。
+fn visit_dir_name(scan: &Scan, idx: usize) -> Option<String> {
+    scan.visits
+        .get(idx)?
+        .dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+}
+
+/// 挂载点（任意分支）`entries[]` 的**结构行**：子分支（node/branch）+ 挂载声明
+/// （link）。内容条目不参与结构排序。
+fn structure_rows(e: &Editor, branch_idx: usize) -> Vec<Entry> {
+    let Some(scan) = e.scan.as_ref() else {
+        return Vec::new();
+    };
+    let Some(bundle) = e.bundle.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(meta) = read_meta(bundle, &scan.visits[branch_idx].dir) else {
+        return Vec::new();
+    };
+    meta.entries
+        .into_iter()
+        .filter(|en| en.is_branch() || en.is_link())
+        .collect()
+}
+
+/// 结构行重排计划：把 `src_path` 行移到 `tgt_path` 行之后（`after`）/ 之前，
+/// 重编 `order`。`None` = 顺序不变的无效边界（拖到自身 / 紧邻原位）。
+fn reorder_plan(
+    mut seq: Vec<Entry>,
+    src_path: &str,
+    tgt_path: &str,
+    after: bool,
+) -> Option<Vec<Entry>> {
+    let src_pos = seq.iter().position(|en| en.path == src_path)?;
+    let item = seq.remove(src_pos);
+    let tpos = (seq
+        .iter()
+        .position(|en| en.path == tgt_path)?
+        + usize::from(after))
+    .min(seq.len());
+    if tpos == src_pos {
+        return None;
+    }
+    seq.insert(tpos, item);
+    for (i, en) in seq.iter_mut().enumerate() {
+        en.order = Some(i as i64);
+    }
+    Some(seq)
+}
+
+/// 被拖挂载的声明行：在挂载点 `entries[]` 中按 target 分支 id 定位（软：`path` =
+/// target id；硬：`path` = 自身 id —— 同父同目标唯一，`E_LINK_DUP`）。
+fn mount_link_entry(
+    e: &Editor,
+    mount_parent_idx: usize,
+    target_visit: usize,
+) -> Result<Entry, String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
+    let scan = e.scan.as_ref().ok_or("未选择分支")?;
+    if mount_parent_idx >= scan.visits.len() || target_visit >= scan.visits.len() {
+        return Err("分支无效".into());
+    }
+    let target_id = scan.visits[target_visit]
+        .meta
+        .as_ref()
+        .and_then(|m| m.id.clone())
+        .or_else(|| visit_dir_name(scan, target_visit))
+        .ok_or("目标分支缺少 id")?;
+    let dir = &scan.visits[mount_parent_idx].dir;
+    let meta = read_meta(bundle, dir)?;
+    meta.entries
+        .iter()
+        .find(|en| en.is_link() && en.target.as_deref() == Some(target_id.as_str()))
+        .cloned()
+        .ok_or_else(|| "未找到挂载声明".to_string())
+}
+
+/// 挂载行的**实例展开键**（与 emit_branch / mind_dfs / all_branch_keys 同式）：
+/// 挂载点 rel ␟ mount ␟ 目标 rel —— 展开收起只作用于本行实例。
+/// 挂载行的**实例展开键**（与 emit_branch / mind_dfs / all_branch_keys 同式）：
+/// 挂载点 rel ␟ mount[-hard] ␟ 目标 rel —— 展开收起只作用于本行实例。`hard`
+/// 维度区分同一挂载点下指向同一目标的软 / 硬链接对（合法配置，二者互不关联）。
+fn mount_expand_key(scan: &Scan, mount_parent: usize, target: usize, hard: bool) -> String {
+    format!(
+        "{}\u{1f}mount{}\u{1f}{}",
+        visit_key(scan, mount_parent),
+        if hard { "-hard" } else { "" },
+        visit_key(scan, target)
+    )
+}
+
+/// 挂载拖拽落点行的「实际挂载父级」visit：真实行 = 该行自身；软挂载行 = 目标
+/// 分支（写入目标结构，与「软链接视图下新建子分支落目标」同规则）；硬链接行 =
+/// 自有分支（`link_visit`，与「新建子分支落自有结构」同规则）。
+fn mount_drop_parent_visit(
+    _scan: &Scan,
+    target_visit: usize,
+    target_hard: bool,
+    target_link_visit: i32,
+) -> Option<usize> {
+    if target_hard {
+        usize::try_from(target_link_visit).ok()
+    } else {
+        Some(target_visit)
+    }
+}
+
+/// 挂载行拖拽 — 重挂载落点有效性（Slint 侧 `tree-mount-nest-ok`）：目标行可以是
+/// 真实行（落到它之下）、软挂载行（落到其目标分支）或硬链接行（落到其自有结构），
+/// 且把挂载目标挂到解析出的挂载点之下不成环（真实父子边 ∪ 挂载边，同
+/// `link_would_cycle`，含自我挂载）。
+/// 挂载拖拽落点通用守卫：被拖的是**硬链接行**（`src_link_visit` = 自有分支）
+/// 时，落点不得位于其自有结构内（含自身）—— 把声明移进自己 = 自嵌套，且
+/// `link_would_cycle` 查不到这种环（目标到自有分支无现有边）。返回 true = 合法。
+fn mount_drop_not_inside_self(
+    scan: &Scan,
+    new_parent: usize,
+    src_link_visit: i32,
+) -> bool {
+    let Some(li) = usize::try_from(src_link_visit).ok().filter(|&li| li < scan.visits.len()) else {
+        return true;
+    };
+    let mut cur = Some(new_parent);
+    while let Some(i) = cur {
+        if i == li {
+            return false;
+        }
+        cur = scan.visits[i].parent;
+    }
+    true
+}
+
+fn tree_mount_nest_ok(
+    e: &Editor,
+    src_target: usize,
+    target_visit: usize,
+    target_hard: bool,
+    target_link_visit: i32,
+    src_link_visit: i32,
+) -> bool {
+    let Some(scan) = e.scan.as_ref() else {
+        return false;
+    };
+    if src_target >= scan.visits.len() || target_visit >= scan.visits.len() {
+        return false;
+    }
+    let Some(new_parent) =
+        mount_drop_parent_visit(scan, target_visit, target_hard, target_link_visit)
+    else {
+        return false;
+    };
+    if !mount_drop_not_inside_self(scan, new_parent, src_link_visit) {
+        return false;
+    }
+    !link_would_cycle(scan, new_parent, src_target)
+}
+
+/// 挂载行拖拽 — 下半区落点判定（Slint 侧 `tree-mount-drop-ok`），返回动作：
+/// - `1` = **同挂载点内重排**：目标行是挂载点的结构兄弟行（真实兄弟行 / 兄弟
+///   挂载行），把被拖声明插到它之后；
+/// - `2` = **重挂载为该行的第一个子分支**：目标行是不属于同一挂载点的真实行
+///   （含挂载父节点自身 —— 行底插入线正在首子之前的位置，落到这里 = 移到最前）；
+/// - `0` = 无效（挂载行 / 硬链接行落点、成环、原位边界等）。
+#[allow(clippy::too_many_arguments)]
+fn tree_mount_drop_ok(
+    e: &Editor,
+    mount_parent: usize,
+    src_target: usize,
+    target_visit: usize,
+    target_mounted: bool,
+    target_hard: bool,
+    target_mount_parent: i32,
+    target_link_visit: i32,
+    after: bool,
+    src_link_visit: i32,
+) -> i32 {
+    let Some(scan) = e.scan.as_ref() else {
+        return 0;
+    };
+    if mount_parent >= scan.visits.len() || src_target >= scan.visits.len() {
+        return 0;
+    }
+    // 目标行在其挂载点 entries[] 里的结构行 path（仅**同挂载点兄弟行**重排需要；
+    // 非兄弟链接行走下方重挂载分支 —— 软挂载行落到其目标、硬链接行落到自有结构）。
+    let sibling_path = if (target_mounted || target_hard)
+        && target_mount_parent == mount_parent as i32
+    {
+        if target_hard {
+            // 硬链接行：结构行 path = 自身分支 id（目录名）。
+            usize::try_from(target_link_visit)
+                .ok()
+                .and_then(|li| visit_dir_name(scan, li))
+        } else {
+            // 软挂载行：结构行 path = 目标 id（目录名）。
+            visit_dir_name(scan, target_visit)
+        }
+    } else if !(target_mounted || target_hard)
+        && scan.visits[target_visit].parent == Some(mount_parent)
+    {
+        // 真实兄弟行。
+        visit_dir_name(scan, target_visit)
+    } else {
+        None
+    };
+    let Ok(src_entry) = mount_link_entry(e, mount_parent, src_target) else {
+        return 0;
+    };
+    if let Some(tgt_path) = sibling_path {
+        if src_entry.path == tgt_path {
+            return 0;
+        }
+        return reorder_plan(
+            structure_rows(e, mount_parent),
+            &src_entry.path,
+            &tgt_path,
+            after,
+        )
+        .map(|_| 1)
+        .unwrap_or(0);
+    }
+    // 非兄弟行：重挂载为该行解析出的挂载父级（真实行 = 自身；软挂载行 = 目标；
+    // 硬链接行 = 自有结构）的**第一个子分支**（成环 / 自我挂载 / 落进被拖硬链接
+    // 自身内部拒绝）。
+    let Some(new_parent) =
+        mount_drop_parent_visit(scan, target_visit, target_hard, target_link_visit)
+    else {
+        return 0;
+    };
+    if !mount_drop_not_inside_self(scan, new_parent, src_link_visit) {
+        return 0;
+    }
+    if link_would_cycle(scan, new_parent, src_target) {
+        return 0;
+    }
+    // 新挂载点已有同 path 条目（最典型：目标已是它的真实子分支）⇒ 拒绝。
+    if new_parent != mount_parent {
+        let Ok(entry) = mount_link_entry(e, mount_parent, src_target) else {
+            return 0;
+        };
+        let Some(bundle) = e.bundle.as_ref() else {
+            return 0;
+        };
+        let Ok(nm) = read_meta(bundle, &scan.visits[new_parent].dir) else {
+            return 0;
+        };
+        if nm.entries.iter().any(|en| en.path == entry.path) {
+            return 0;
+        }
+    }
+    2
+}
+
+/// 重挂载：把挂载声明（软 / 硬）从 `mount_parent_idx` 摘下、插入为
+/// `new_parent_idx` 的**第一个子分支**。硬链接的自有目录随挂载点一起搬家
+/// （fs 移动 + kind 随新深度同步）；软连接不动任何磁盘内容。目标分支与数据
+/// 始终不动。
+fn mount_move_into_child(
+    e: &mut Editor,
+    mount_parent_idx: usize,
+    target_visit: usize,
+    new_parent_idx: usize,
+) -> Result<String, String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+    let scan = e.scan.as_ref().ok_or("未选择分支")?;
+    if mount_parent_idx >= scan.visits.len() || new_parent_idx >= scan.visits.len() {
+        return Err("落点分支无效".into());
+    }
+    // 成环：从目标出发沿真实父子边 ∪ 挂载边能走到新挂载点（含自我挂载）⇒ 拒绝。
+    if link_would_cycle(scan, new_parent_idx, target_visit) {
+        return Err("该挂载会形成环（不能挂到自身或自己的子树内）".into());
+    }
+    let entry = mount_link_entry(e, mount_parent_idx, target_visit)?;
+    let old_parent_dir = scan.visits[mount_parent_idx].dir.clone();
+    // 新挂载点已有同 path 条目（最典型：目标本身就是它的真实子分支）⇒
+    // upsert 会顶掉既有登记，拒绝。同挂载点重挂（首插）不受影响——移动会
+    // 先释放自己的 path。
+    if new_parent_idx != mount_parent_idx {
+        let nm = read_meta(&bundle, &scan.visits[new_parent_idx].dir)?;
+        if nm.entries.iter().any(|en| en.path == entry.path) {
+            return Err(format!(
+                "「{}」下已存在同路径条目，无法重挂载",
+                visit_title(&scan.visits[new_parent_idx])
+            ));
+        }
+    }
+    let new_parent_dir = scan.visits[new_parent_idx].dir.clone();
+    let new_parent_title = visit_title(&scan.visits[new_parent_idx]);
+    let hard = entry.mode.as_deref() == Some("hard");
+    let dst_title = visit_title(&scan.visits[target_visit]);
+    // 硬链接：自有目录随挂载点搬家（含自有子分支）；落点不得在其自身内部。
+    if hard {
+        let own_id = entry.id.clone().ok_or("硬链接缺少 id")?;
+        let own_dir = old_parent_dir.join(&own_id);
+        if new_parent_dir.starts_with(&own_dir) {
+            return Err("不能把硬链接移入其自身内部".into());
+        }
+        let new_depth = scan.visits[new_parent_idx].depth + 1;
+        move_file(&own_dir, &new_parent_dir.join(&own_id))?;
+        let role = if new_depth == 1 { "node" } else { "branch" };
+        sync_moved_branch_kind(&bundle, &new_parent_dir.join(&own_id), role)?;
+    }
+    // 旧挂载点摘登记 → 新挂载点登记（保留 mode / target / id / 标题等全部字段，
+    // 插入为第一个子分支）。
+    let mut old_meta = read_meta(&bundle, &old_parent_dir)?;
+    old_meta.remove_entry_path(&entry.path);
+    old_meta.touch();
+    old_meta.save(&bundle.meta_path(&old_parent_dir))
+        .map_err(|err| err.to_string())?;
+    let mut new_meta = read_meta(&bundle, &new_parent_dir)?;
+    let mut ne = entry;
+    ne.order = Some(first_child_order(&new_meta));
+    new_meta.upsert_entry(&ne);
+    new_meta.touch();
+    new_meta.save(&bundle.meta_path(&new_parent_dir))
+        .map_err(|err| err.to_string())?;
+    e.rescan()?;
+    Ok(if hard {
+        format!("已重挂载硬链接「{dst_title}」→「{new_parent_title}」之下（自有目录随迁，目标分支与数据不变）。")
+    } else {
+        format!("已重挂载：「{dst_title}」→「{new_parent_title}」之下。")
+    })
+}
+
+/// 挂载行同挂载点内重排：结构行（branch ∪ link）序列中把 `src_path` 移到
+/// `dst_path` 之后/之前并重编 `order`。目标分支与数据不动。
+fn mount_reorder(
+    e: &mut Editor,
+    mount_parent_idx: usize,
+    src_path: &str,
+    dst_path: &str,
+    after: bool,
+) -> Result<String, String> {
+    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+    let scan = e.scan.as_ref().ok_or("未选择分支")?;
+    if mount_parent_idx >= scan.visits.len() {
+        return Err("落点分支无效".into());
+    }
+    let dir = scan.visits[mount_parent_idx].dir.clone();
+    let mut meta = read_meta(&bundle, &dir)?;
+    let seq: Vec<Entry> = meta
+        .entries
+        .iter()
+        .filter(|en| en.is_branch() || en.is_link())
+        .cloned()
+        .collect();
+    let Some(new_seq) = reorder_plan(seq, src_path, dst_path, after) else {
+        return Ok("顺序未变化。".to_string());
+    };
+    for en in &new_seq {
+        meta.remove_entry_path(&en.path);
+    }
+    for en in new_seq {
+        meta.upsert_entry(&en);
+    }
+    meta.touch();
+    meta.save(&bundle.meta_path(&dir))
+        .map_err(|err| err.to_string())?;
+    e.rescan()?;
+    Ok("已调整挂载顺序。".into())
+}
+
 /// 移动分支后按新深度同步其自身 `._meta` 的 `kind`（深度 1 = node，≥2 = branch）。
 /// kind 已正确（深度未变化）时空操作。`role` 为父级登记所用 role 字面量
 /// （node/branch，与 moved 新深度的 kind 同规则），否则校验报
@@ -4085,7 +4840,21 @@ fn sync_moved_branch_kind(bundle: &Bundle, moved_dir: &Path, role: &str) -> Resu
     m.save(&bundle.meta_path(moved_dir)).map_err(|e| e.to_string())
 }
 
-/// 分支结构移动：把 `src` 分支移入 `target` 分支作为**最后一个子分支**
+/// 「插入为第一个子分支」的 `order` 值：取目标分支现有结构行（branch ∪ link）
+/// 的最小 `order` 减一；全无 `order` 时用 1（显示排序中 `None` 视为最大，
+/// 新行仍排最前）。末尾位置由「最后一个子分支的下半区」覆盖，二者合起来
+/// 子分支序列的所有位置都可达。
+fn first_child_order(meta: &Meta) -> i64 {
+    meta.entries
+        .iter()
+        .filter(|en| en.is_branch() || en.is_link())
+        .filter_map(|en| en.order)
+        .min()
+        .map(|m| m - 1)
+        .unwrap_or(1)
+}
+
+/// 分支结构移动：把 `src` 分支移入 `target` 分支作为**第一个子分支**
 /// （fs 目录移动 + 源父级撤登记 + 目标登记；角色随新深度 node/branch）。
 /// 分支自身 `._meta` 随目录移动，内部条目相对路径不受影响。
 fn branch_move_into_child(e: &mut Editor, src: usize, target: usize) -> Result<String, String> {
@@ -4124,14 +4893,16 @@ fn branch_move_into_child(e: &mut Editor, src: usize, target: usize) -> Result<S
     pm.touch();
     pm.save(&bundle.meta_path(&src_parent_dir))
         .map_err(|err| err.to_string())?;
-    // 目标分支登记为最后一个子分支。
+    // 目标分支登记为第一个子分支（上半区嵌套语义；末尾走最后子分支的下半区）。
     let mut tm = read_meta(&bundle, &target_dir)?;
+    let first_order = first_child_order(&tm);
     tm.upsert_entry(&Entry {
         path: name.clone(),
         role: new_role.to_string(),
         id: src_meta.id.clone(),
         r#type: src_meta.r#type.clone(),
         title: src_meta.title.clone(),
+        order: Some(first_order),
         ..Default::default()
     });
     tm.touch();
@@ -5074,6 +5845,9 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         let ed_multi = editor.clone();
         let dnd = app.global::<DndApi>();
+        // 闭包内读取 DndApi 源状态用（global 句柄借用 app，不能 move 进 'static
+        // 闭包 —— 经 weak 句柄 upgrade 取）。
+        let app_weak_dnd = app.as_weak();
         // 拖拽行在多选集合内 → 载荷携带整组多选（Finder 语义：拖一个选中项 = 拖全部）。
         // 多目标载荷格式："visit|path1\npath2…"（单目标保持旧格式 "visit|path"）。
         // 多选拖拽的整组载荷文本（`entry_to_transfer` 与 `payload_for` 共用，避免漂移）：
@@ -5130,9 +5904,20 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             slint::DataTransfer::from(SharedString::from(expanded))
         });
-        dnd.on_transfer_to_entry(|d| d.plain_text().unwrap_or_default());
+        dnd.on_transfer_to_entry(|d| {
+            let t = d.plain_text().unwrap_or_default();
+            // 挂载载荷（"mount|…"）不是条目路径：内容落点一律忽略。
+            if t.starts_with("mount|") {
+                SharedString::new()
+            } else {
+                t
+            }
+        });
         dnd.on_branch_to_transfer(|visit| {
             slint::DataTransfer::from(SharedString::from(format!("branch|{visit}")))
+        });
+        dnd.on_mount_to_transfer(|parent, target| {
+            slint::DataTransfer::from(SharedString::from(format!("mount|{parent}|{target}")))
         });
         dnd.on_transfer_to_branch(|d| {
             d.plain_text()
@@ -5157,6 +5942,83 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             tree_nest_ok(&e, src, target)
         });
+        // 挂载行拖拽（软 / 硬链接）：src 取自 DndApi 拖拽源状态。
+        let ed_mnest = editor.clone();
+        let app_weak_nest = app_weak_dnd.clone();
+        dnd.on_tree_mount_nest_ok(
+            move |target, _target_mounted, target_hard, target_link_visit| {
+                let Some(app) = app_weak_nest.upgrade() else { return false; };
+                let dnd = app.global::<DndApi>();
+                let e = ed_mnest.borrow();
+                let mp = dnd.get_tree_src_mount_parent();
+                let tv = dnd.get_tree_src_mount_target();
+                let sl = dnd.get_tree_src_mount_link();
+                let (Ok(mp), Ok(tv)) = (usize::try_from(mp), usize::try_from(tv)) else {
+                    return false;
+                };
+                let _ = mp;
+                tree_mount_nest_ok(
+                    &e,
+                    tv,
+                    usize::try_from(target).unwrap_or(usize::MAX),
+                    target_hard,
+                    target_link_visit,
+                    sl,
+                )
+            },
+        );
+        let ed_mdrop = editor.clone();
+        let app_weak_drop = app_weak_dnd.clone();
+        dnd.on_tree_mount_drop_ok(
+            move |target, target_mounted, target_hard, target_mount_parent, target_link_visit, after| {
+                let Some(app) = app_weak_drop.upgrade() else { return 0; };
+                let dnd = app.global::<DndApi>();
+                let e = ed_mdrop.borrow();
+                let mp = dnd.get_tree_src_mount_parent();
+                let tv = dnd.get_tree_src_mount_target();
+                let sl = dnd.get_tree_src_mount_link();
+                let (Ok(mp), Ok(tv)) = (usize::try_from(mp), usize::try_from(tv)) else {
+                    return 0;
+                };
+                tree_mount_drop_ok(
+                    &e,
+                    mp,
+                    tv,
+                    usize::try_from(target).unwrap_or(usize::MAX),
+                    target_mounted,
+                    target_hard,
+                    target_mount_parent,
+                    target_link_visit,
+                    after,
+                    sl,
+                )
+            },
+        );
+        // 目标行在其挂载点 entries[] 中的结构行 path（重排落盘定位用）。
+        let ed_mpath = editor.clone();
+        dnd.on_mount_row_path(
+            move |visit, mounted, hard, _mount_parent, link_visit| {
+                let e = ed_mpath.borrow();
+                let path = usize::try_from(visit)
+                    .ok()
+                    .and_then(|v| {
+                        let scan = e.scan.as_ref()?;
+                        if mounted {
+                            // 软挂载行：结构行 path = 目标 id（目录名）。
+                            visit_dir_name(scan, v)
+                        } else if hard {
+                            // 硬链接行：结构行 path = 自身分支 id。
+                            let li = usize::try_from(link_visit).ok()?;
+                            visit_dir_name(scan, li)
+                        } else {
+                            // 真实行：path = 自身 id。
+                            visit_dir_name(scan, v)
+                        }
+                    })
+                    .unwrap_or_default();
+            SharedString::from(path)
+            },
+        );
         dnd.on_transfer_has_files(|d| d.has_file_paths());
         dnd.on_transfer_to_files(|d| {
             d.file_paths()
@@ -5249,14 +6111,6 @@ fn main() -> Result<(), slint::PlatformError> {
             e.content_expanded.insert(key);
         }
         sync_detail(app, e);
-    }
-
-    /// 全部分支身份键（用于「展开全部子树」）。
-    fn all_branch_keys(e: &Editor) -> Vec<String> {
-        e.scan
-            .as_ref()
-            .map(|s| s.visits.iter().map(|v| v.rel.clone()).collect())
-            .unwrap_or_default()
     }
 
     /// **当前可见**的分支身份键（见 `visit_key`）：与列表树 / 导图此刻渲染出的节点一致 ——
@@ -5516,9 +6370,9 @@ fn main() -> Result<(), slint::PlatformError> {
             .unwrap_or_else(|| v.meta.as_deref());
         let is_root = v.depth == 0;
         app.set_has_selection(true);
-        // sel-hard 唯一写点（Rust 侧）：菜单栏「新建子分支 / 挂载已有分支」置灰、
-        // 守卫读取都用它 —— 导图点击路径此前单独写 Slint 属性，树行点击不写，
-        // 菜单置灰会停留在上一次的值。
+        // sel-hard 同步（Rust 侧守卫与挂载兜底落点都读它）：导图点击路径由 Slint
+        // 侧先置属性、select-visit 读取；树行点击路径在 Rust 侧维护，这里回写
+        // Slint 属性保持两侧一致。
         app.set_sel_hard(e.sel_hard);
         app.set_is_root(is_root);
         app.set_d_kind(
@@ -5744,6 +6598,12 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
 
     fn sync_ui(app: &AppWindow, e: &Editor) {
         let row_model: Vec<BranchRow> = e.rows.iter().map(|r| branch_row_of(e, r, false)).collect();
+        // 横向滚动：行内容最大自然宽（viewport-width = max(视口, 该值)）。
+        let content_px = row_model
+            .iter()
+            .map(|r| r.content_px)
+            .fold(0.0f32, f32::max);
+        app.set_tree_content_px(content_px);
         // 行模型尽量原地更新：替换模型会让 ListView 重建所有行组件，
         // 正在显示右键菜单的那一行被销毁 → 菜单项点击失效（选中分支即触发）。
         // 行数变化时（展开/收起等）才整体替换。
@@ -5881,8 +6741,15 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             let visit = e.rows.get(row as usize).map(|r| r.visit);
             if let Some(v) = visit {
                 e.select_visit(v);
-                // 硬链接行选中 = 进入只读内容视图（写操作被守卫拦下）。
+                // 硬链接行选中 = 进入只读内容视图（写操作被守卫拦下）；
+                // 软挂载行选中 = 目标真身，记下挂载点供删除入口改道移除挂载。
                 e.sel_hard = e.rows.get(row as usize).map(|r| r.hard).unwrap_or(false);
+                e.sel_mount_parent = e
+                    .rows
+                    .get(row as usize)
+                    .and_then(|r| r.mount_parent);
+                e.sel_expand_key =
+                    e.rows.get(row as usize).map(|r| r.expand_key.to_string());
                 // 原地更新选中标记（不重建模型，保留双击手势状态）。
                 let sel = e.selected_idx_in_visits();
                 if let Some(model) = &*e.rows_model.borrow() {
@@ -5910,23 +6777,23 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         app.on_toggle_expand(move |row| {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
-            let Some(visit) = e.rows.get(row as usize).map(|r| r.visit) else {
+            let Some(r) = e.rows.get(row as usize) else {
                 return;
             };
-            let key = e
-                .scan
-                .as_ref()
-                .map(|s| visit_key(s, visit).to_string())
-                .filter(|k| !k.is_empty());
-            if let Some(key) = key {
-                if e.expanded.remove(&key) {
+            let key = r.expand_key.clone();
+            let visit = r.visit;
+            let is_link_view = r.mounted || r.hard;
+            if e.expanded.remove(&key) {
+                // 仅**真实行**收起时清理子树状态；挂载行 / 硬链接行的展开态是
+                // 实例独立的，其渲染的孩子属于其它上下文，不得连带清除。
+                if !is_link_view {
                     collapse_subtree_state(&mut e, visit);
-                } else {
-                    e.expanded.insert(key);
                 }
-                e.rebuild();
-                sync_ui(&app, &e);
+            } else {
+                e.expanded.insert(key);
             }
+            e.rebuild();
+            sync_ui(&app, &e);
         });
     }
     {
@@ -5940,24 +6807,30 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             let mut e = editor.borrow_mut();
             // 行下标来自 pick-rows 模型，必须查 pick_rows（查 e.rows 会在两份
             // 模型错位后展开到错误的分支——孙级展不开正是这么来的）。
-            let Some(visit) = e.pick_rows.get(row as usize).map(|r| r.visit) else {
+            let Some(r) = e.pick_rows.get(row as usize) else {
                 return;
             };
+            let key = r.expand_key.clone();
+            let visit = r.visit;
+            let is_link_view = r.mounted || r.hard;
             // 先用不可变借用量算好本键与子树键，再动 pick_expanded（写时
             // scan / kids 的借用必须已结束）。
-            let (key, sub_keys) = {
+            let sub_keys = {
                 let Some(scan) = e.scan.as_ref() else {
                     return;
                 };
                 let mut sub_keys: HashSet<String> = HashSet::new();
-                let mut stack = vec![visit];
-                while let Some(i) = stack.pop() {
-                    for &c in e.kids.get(i).map(|v| v.as_slice()).unwrap_or_default() {
-                        stack.push(c);
-                        sub_keys.insert(visit_key(scan, c).to_string());
+                if !is_link_view {
+                    // 仅真实行收起连带清子树键；挂载行的展开态实例独立。
+                    let mut stack = vec![visit];
+                    while let Some(i) = stack.pop() {
+                        for &c in e.kids.get(i).map(|v| v.as_slice()).unwrap_or_default() {
+                            stack.push(c);
+                            sub_keys.insert(visit_key(scan, c).to_string());
+                        }
                     }
                 }
-                (visit_key(scan, visit).to_string(), sub_keys)
+                sub_keys
             };
             if e.pick_expanded.remove(&key) {
                 for k in sub_keys {
@@ -5975,10 +6848,30 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         // （与列表树共用 expanded 集合）。
         let editor = editor.clone();
         let app_weak = app.as_weak();
-        app.on_toggle_visit_expand(move |visit| {
+        app.on_toggle_visit_expand(move |key| {
             let app = app_weak.upgrade().unwrap();
+            let key = key.to_string();
             let mut e = editor.borrow_mut();
-            toggle_subtree(&mut e, &app, visit as usize);
+            if key.contains('\u{1f}') {
+                // 挂载节点实例键：只切自己（渲染的孩子属于其它上下文，不清子树状态）。
+                if e.expanded.remove(&key) {
+                    e.rebuild();
+                    sync_ui(&app, &e);
+                } else {
+                    e.expanded.insert(key);
+                    e.rebuild();
+                    sync_ui(&app, &e);
+                }
+                return;
+            }
+            // 真实位置 rel：走既有 toggle_subtree（保留子树状态清理语义）。
+            let visit = e
+                .scan
+                .as_ref()
+                .and_then(|s| s.visits.iter().position(|v| v.rel == key));
+            if let Some(visit) = visit {
+                toggle_subtree(&mut e, &app, visit);
+            }
         });
     }
     {
@@ -5994,12 +6887,34 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     {
         // 菜单栏「分支」：同样的两个开关，作用于**当前选中分支**
         // （菜单项拿不到行下标 / visit，故由宿主按选中态解析）。
+        // 选中经由**挂载行 / 硬链接行**进入时，展开/收起只作用于该挂载实例
+        // （实例键），不连带真身及其它挂载视图。
         let editor = editor.clone();
         let app_weak = app.as_weak();
         app.on_toggle_sel_subtree(move || {
             let app = app_weak.upgrade().unwrap();
             let mut e = editor.borrow_mut();
             if let Some(idx) = e.selected_idx_in_visits() {
+                // 选中行的展开键（含实例上下文前缀）。与真身 rel 键不同 ⇒ 选中
+                // 经由挂载行 / 实例上下文进入：展开/收起只作用于该键（该实例），
+                // 不连带真身、其它挂载视图或外层实例。
+                let sel_key = e.sel_expand_key.clone();
+                let rel_key = e
+                    .scan
+                    .as_ref()
+                    .map(|s| visit_key(s, idx).to_string());
+                if let Some(key) = sel_key {
+                    if rel_key.as_deref() != Some(key.as_str()) {
+                        if e.expanded.remove(&key) {
+                            e.rebuild();
+                        } else {
+                            e.expanded.insert(key);
+                            e.rebuild();
+                        }
+                        sync_ui(&app, &e);
+                        return;
+                    }
+                }
                 toggle_subtree(&mut e, &app, idx);
             }
         });
@@ -6105,8 +7020,13 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 return;
             }
             e.select_visit(visit as usize);
-            // Slint 侧（导图节点）会在调用前置好 sel-hard；树/其它路径默认 false。
+            // Slint 侧（导图节点 / 树行右键）会在调用前置好 sel-hard、
+            // sel-mount-parent 与 sel-expand-key；其它路径默认 false / None / 空。
             e.sel_hard = app.get_sel_hard();
+            e.sel_mount_parent = (app.get_sel_mount_parent() >= 0)
+                .then(|| app.get_sel_mount_parent() as usize);
+            let sek = app.get_sel_expand_key();
+            e.sel_expand_key = (!sek.is_empty()).then(|| sek.to_string());
             sync_ui(&app, &e);
             app.set_info_tab(0);
         });
@@ -6509,6 +7429,21 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 // 展开父级并选中新分支。身份键 = rel（见 `visit_key`）：rescan 后
                 // 按目录反查下标，**不按 id** —— id 可由同名复制而来、并不唯一。
                 e.expanded.insert(parent.rel.clone());
+                // 父级是硬链接的自有分支：再点亮硬链接行的实例展开键，否则
+                // 新子分支藏在收起的硬链接行下不可见。
+                let l_visit = &scan.visits[parent_idx];
+                if let (Some(t), Some(mp)) = (
+                    l_visit.hard_link_to.clone(),
+                    l_visit.parent,
+                ) {
+                    // 键 = 挂载点 rel ␟ mount-hard ␟ 目标 rel（hard_link_to 即目标
+                    // rel；硬链接实例键带 -hard 维度，与 mount_expand_key 同式）。
+                    e.expanded.insert(format!(
+                        "{}\u{1f}mount-hard\u{1f}{}",
+                        visit_key(scan, mp),
+                        t
+                    ));
+                }
                 e.rescan()?;
                 if let Some(key) = e
                     .scan
@@ -6548,8 +7483,58 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             // op-visit：右键菜单对**硬链接行**删除时传入自身分支 visit（此时选中
             // 的是目标真身）；-1 = 删除当前选中分支。硬链接移除 = 摘引用 + 删自有
             // 目录（含自有子分支），目标分支与数据不动。
-            let op_visit = app.get_op_visit();
+            let mut op_visit = app.get_op_visit();
             app.set_op_visit(-1);
+            // 菜单栏 ⌘⇧⌫ / 信息页「删除分支」作用于**当前选中分支**，而挂载行 /
+            // 硬链接行的选中身份 = 目标真身 —— 此前会直接删掉目标分支（指向它的
+            // 挂载再被悬空清理一并摘除），表现为「移除软连接把目标也删了」。现与
+            // 右键菜单同语义改道：软挂载 → 只摘引用；硬链接 → 移除挂载。
+            if op_visit < 0 {
+                let sel_mount_parent = editor.borrow().sel_mount_parent;
+                let sel_hard_view = editor.borrow().sel_hard;
+                if let Some(mount_parent) = sel_mount_parent {
+                    let result = with_editor(&editor, |e| {
+                        let target_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                        unmount_link(e, mount_parent, target_idx)
+                    });
+                    match result {
+                        Ok((parent_title, dst_title)) => {
+                            sync_ui(&app, &editor.borrow());
+                            show_status(
+                                &app,
+                                format!(
+                                    "已移除挂载：「{dst_title}」不再显示在「{parent_title}」之下。"
+                                )
+                                .into(),
+                            );
+                        }
+                        Err(msg) => show_status(&app, format!("移除挂载失败：{msg}").into()),
+                    }
+                    return;
+                }
+                if sel_hard_view {
+                    // 解析指向选中目标的硬链接自身分支；解析不到（选中态残留）时
+                    // 拒绝执行，绝不回落成「删目标真身」。
+                    let resolved = with_editor(&editor, |e| {
+                        let sel = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                        selected_hard_link_idx(e, sel)
+                    });
+                    match resolved {
+                        Ok(Some(link_idx)) => op_visit = link_idx as i32,
+                        Ok(None) => {
+                            show_status(
+                                &app,
+                                "当前选中经由硬链接进入，但未找到对应挂载：请到目标真实位置删除，或右键硬链接行选择「移除挂载」。".into(),
+                            );
+                            return;
+                        }
+                        Err(msg) => {
+                            show_status(&app, format!("移除挂载失败：{msg}").into());
+                            return;
+                        }
+                    }
+                }
+            }
             let hard_unlink = op_visit >= 0;
             let confirmed = rfd::MessageDialog::new()
                 .set_title(if hard_unlink { "移除挂载" } else { "删除分支" })
@@ -7441,7 +8426,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     }
 
     // ── 软 / 硬链接（挂载）管理 ──
-    // 候选以分支树展示；`selectable` 按形态判定（硬链接额外排除自己的后代）。
+    // 候选以分支树展示；软 / 硬链接的候选禁选集合见 `mount_banned`。
     // ROOT 不允许当目标（规范 §4.6.1 规则 3）。
     {
         let editor = editor.clone();
@@ -7498,7 +8483,10 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     {
         let app_weak = app.as_weak();
         app.on_mount_dialog_close(move || {
-            app_weak.upgrade().unwrap().set_mount_dialog_visible(false);
+            let app = app_weak.upgrade().unwrap();
+            // 丢弃菜单传入的挂载落点（避免残留到下一次「菜单栏 → 挂载已有分支」）。
+            app.set_mount_parent_visit(-1);
+            app.set_mount_dialog_visible(false);
         });
     }
     {
@@ -7514,12 +8502,34 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 show_status(&app, "挂载失败：请先选择一个可选的分支。".into());
                 return;
             }
+            // mount-parent-visit ≥ 0：右键菜单对**硬链接行 / 节点**挂载时传入自身
+            // 分支 visit（此时选中是目标真身）——链接落硬链接自有 entries，而不是
+            // 目标分支（否则目标分支与硬链接行两处都出现该链接）；-1 = 常规流程。
+            let mount_parent = app.get_mount_parent_visit();
+            app.set_mount_parent_visit(-1);
             let hard = app.get_m_mode_index() == 1;
             let alias = app.get_m_title().trim().to_string();
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
                 let scan = e.scan.as_ref().ok_or("未选择分支")?;
-                let src_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                let src_idx = if mount_parent >= 0 {
+                    if mount_parent as usize >= scan.visits.len() {
+                        return Err("挂载落点分支已不存在（树已变化）".into());
+                    }
+                    mount_parent as usize
+                } else {
+                    let sel = e.selected_idx_in_visits().ok_or("未选择分支")?;
+                    // 菜单栏路径兜底：选中经由硬链接行 / 节点进入（sel_hard）时，
+                    // 落点解析到该硬链接自身分支，而非其目标真身。
+                    if e.sel_hard {
+                        match selected_hard_link_idx(e, sel)? {
+                            Some(idx) => idx,
+                            None => sel,
+                        }
+                    } else {
+                        sel
+                    }
+                };
                 let dst_visit = pick_visit as usize;
                 // 打开对话框后树可能已变（展开收起 / 其他窗口改动）：写前按
                 // **当下**禁选集合复核一次，不可选即拒绝。
@@ -7550,10 +8560,6 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 if dst_idx == src_idx {
                     return Err("不能把分支挂载到它自己下面".into());
                 }
-                // 硬链接仅内容关联：挂自己的后代 = 内容自嵌套，无意义（规范 §4.6.1）。
-                if hard && scan.ancestors(dst_idx).contains(&src_idx) {
-                    return Err("硬链接不得挂载自己的后代".into());
-                }
                 // 成环预检（与 CLI `link_add` / 校验器 `check_link_cycles` 同源）：
                 // 沿真实父子边 + 挂载边，从目标出发能回到自己 ⇒ 挂进祖先都拒绝。
                 if link_would_cycle(scan, src_idx, dst_idx) {
@@ -7564,14 +8570,17 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 let dst_title = visit_title(&scan.visits[dst_idx]);
                 let mut meta = read_meta(bundle, &src.dir)?;
                 // 重复挂载检查仅对软连接（path = target）；硬链接 path = 新生成的
-                // 自身 id，天然不重复。
+                // 自身 id，天然不重复。**任何角色**的同 path 条目都冲突：目标若是
+                // 本分支的真实子分支，upsert 会把真身的登记替换成链接行 —— 拒绝。
                 if !hard
                     && meta
                         .entries
                         .iter()
-                        .any(|en| en.is_link() && en.path == target_id)
+                        .any(|en| en.path == target_id)
                 {
-                    return Err(format!("本分支下已挂载「{dst_title}」"));
+                    return Err(format!(
+                        "「{dst_title}」已是本分支的真实子分支或挂载，无法重复挂载"
+                    ));
                 }
                 // 软连接：`path` = 目标 id，**不带 id**（身份由 target 给出，声明式，
                 // 磁盘不新建目录）。硬链接：有身份的真实分支 —— `path` = `id` =
@@ -7658,28 +8667,9 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 return;
             }
             let result = with_editor(&editor, |e| {
-                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
-                let scan = e.scan.as_ref().ok_or("未选择分支")?;
                 let dst_idx = e.selected_idx_in_visits().ok_or("未选择分支")?;
                 let parent_idx = parent_visit.max(0) as usize;
-                let target_id = scan.visits[dst_idx]
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.id.clone())
-                    .ok_or("目标分支缺少 id")?;
-                let parent = &scan.visits[parent_idx];
-                let parent_title = visit_title(parent);
-                let dst_title = visit_title(&scan.visits[dst_idx]);
-                let mut meta = read_meta(bundle, &parent.dir)?;
-                if !meta.entries.iter().any(|en| en.is_link() && en.path == target_id) {
-                    return Err(format!("「{parent_title}」下没有指向「{dst_title}」的挂载"));
-                }
-                meta.remove_entry_path(&target_id);
-                meta.touch();
-                meta.save(&bundle.meta_path(&parent.dir))
-                    .map_err(|err| err.to_string())?;
-                e.rescan()?;
-                Ok((parent_title, dst_title))
+                unmount_link(e, parent_idx, dst_idx)
             });
             match result {
                 Ok((parent_title, dst_title)) => {
@@ -9736,6 +10726,17 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     // 上半区 = 插入为子分支（可跨父级结构移动）。
                     return branch_move_into_child(e, src, target);
                 }
+                // ROOT 下半区：「after ROOT」无意义 → 成为 ROOT 的第一个子分支。
+                if e.scan
+                    .as_ref()
+                    .ok_or("未打开 bundle")?
+                    .visits
+                    .get(target)
+                    .map(|v| v.depth == 0)
+                    .unwrap_or(false)
+                {
+                    return branch_move_into_child(e, src, target);
+                }
                 // 下半区 = 排序：插到 target 之后 **所在层级**（同父 = 重排；
                 // 跨层级 = 结构移动，fs 目录移动 + 两侧登记转移）。
                 let Some(op) = branch_move_plan(e, src, target, true)? else {
@@ -9825,6 +10826,55 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                             title_of_dir(e, &new_parent_dir)
                         ))
                     }
+                }
+            });
+            match result {
+                Ok(msg) => {
+                    sync_ui(&app, &editor.borrow());
+                    show_status(&app, msg.into());
+                }
+                Err(msg) => show_status(&app, format!("移动失败：{msg}").into()),
+            }
+        });
+    }
+    {
+        // 挂载行拖拽落点（软 / 硬链接）：只动挂载声明。src = DndApi 拖拽源状态
+        // （挂载点 + 目标 visit）；落点 = 悬停状态（nest = 重挂载到该行之下，
+        // 否则 = 同挂载点内重排，目标行 path 由 slint 侧 mount-row-path 求值写入）。
+        let editor = editor.clone();
+        let app_weak = app.as_weak();
+        app.on_drop_mount_row(move || {
+            let app = app_weak.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
+            let result = with_editor(&editor, |e| {
+                let dnd = app.global::<DndApi>();
+                let mp = dnd.get_tree_src_mount_parent();
+                let tv = dnd.get_tree_src_mount_target();
+                let hover = dnd.get_tree_hover_visit();
+                let nest = dnd.get_tree_hover_nest();
+                let action = dnd.get_tree_hover_mount_action();
+                let (Ok(mp), Ok(tv)) = (usize::try_from(mp), usize::try_from(tv)) else {
+                    return Err("挂载拖拽源无效。".into());
+                };
+                let Ok(hover) = usize::try_from(hover) else {
+                    return Err("挂载落点无效。".into());
+                };
+                if nest || action == 2 {
+                    // 上半区 / 下半区非兄弟真实行 = 重挂载为该行的第一个子分支
+                    //（落到挂载父节点下半区 = 移到最前）。
+                    mount_move_into_child(e, mp, tv, hover)
+                } else if action == 1 {
+                    // 同挂载点内重排：插到目标结构行之后。
+                    let dst_path = dnd.get_tree_hover_mount_path().to_string();
+                    if dst_path.is_empty() {
+                        return Err("挂载落点无效。".into());
+                    }
+                    let src_entry = mount_link_entry(e, mp, tv)?;
+                    mount_reorder(e, mp, &src_entry.path, &dst_path, true)
+                } else {
+                    Err("挂载落点无效。".into())
                 }
             });
             match result {
@@ -10036,6 +11086,171 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     }
 
     sync_ui(&app, &editor.borrow());
+
+    // ── 交互性能基准模式（env 门控，正常启动零影响）：`STR_GUI_BENCH=<bundle>`
+    // 打开指定 bundle，在**真实窗口 + 真实事件循环 + 真渲染器**上回放脚本化
+    // 操作（展开全部 / 收起全部 / 逐行展开收起 / 选中 / 导图实例展开），输出
+    // 每类操作的延迟统计（均值 / 最大 / >16ms 掉帧数 / >100ms 卡顿数）。──
+    if let Ok(bench_path) = std::env::var("STR_GUI_BENCH") {
+        eprintln!("bench mode: 打开 {}", bench_path);
+        let path = canonical_bundle_path(&PathBuf::from(bench_path));
+        match with_editor(&editor, |e| e.open(&path)) {
+            Ok(()) => {
+                push_recent(&path);
+                refresh_recent(&app);
+                sync_ui(&app, &editor.borrow());
+                eprintln!("bench: bundle opened + synced");
+            }
+            Err(msg) => show_status(&app, format!("bench 打开失败：{msg}").into()),
+        }
+        let app_weak = app.as_weak();
+        // 驱动线程：本环境（macOS + winit 后台启动）里 slint::Timer 不触发，
+        // 改用 std::thread + invoke_from_event_loop 逐个投递操作 —— UI 线程按序
+        // 执行，驱动线程等待完成并统计延迟。测量范围 = 处理器 + sync + 布局 +
+        // 模型更新全链路（用户可感的操作延迟）。
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            struct Stats {
+                n: u32,
+                total: f64,
+                max: f64,
+                over16: u32,
+                over100: u32,
+            }
+            impl Stats {
+                fn new() -> Self {
+                    Self { n: 0, total: 0.0, max: 0.0, over16: 0, over100: 0 }
+                }
+                fn record(&mut self, ms: f64) {
+                    self.n += 1;
+                    self.total += ms;
+                    self.max = self.max.max(ms);
+                    if ms > 16.0 {
+                        self.over16 += 1;
+                    }
+                    if ms > 100.0 {
+                        self.over100 += 1;
+                    }
+                }
+                fn report(&self, name: &str) {
+                    eprintln!(
+                        "bench[{name:>10}] n={:<3} avg={:>7.2}ms max={:>8.2}ms >16ms={:<3} >100ms={}",
+                        self.n,
+                        if self.n > 0 { self.total / self.n as f64 } else { 0.0 },
+                        self.max,
+                        self.over16,
+                        self.over100
+                    );
+                }
+            }
+            let (tx, rx) = std::sync::mpsc::channel::<(&'static str, f64)>();
+            let mut st_expand = Stats::new();
+            let mut st_collapse = Stats::new();
+            let mut st_toggle = Stats::new();
+            let mut st_select = Stats::new();
+            let mut st_mind = Stats::new();
+            // 在 UI 线程执行一个操作并等待完成；返回是否成功（超时 = UI 卡死）。
+            fn bench_op(
+                name: &'static str,
+                weak: &slint::Weak<AppWindow>,
+                tx: &std::sync::mpsc::Sender<(&'static str, f64)>,
+                rx: &std::sync::mpsc::Receiver<(&'static str, f64)>,
+                stats: &mut Stats,
+                op: impl FnOnce(&AppWindow) + Send + 'static,
+            ) -> bool {
+                let weak = weak.clone();
+                let tx2 = tx.clone();
+                let posted = slint::invoke_from_event_loop(move || {
+                    let Some(app) = weak.upgrade() else {
+                        let _ = tx2.send((name, -1.0));
+                        return;
+                    };
+                    let t = std::time::Instant::now();
+                    op(&app);
+                    let _ = tx2.send((name, t.elapsed().as_secs_f64() * 1000.0));
+                });
+                if posted.is_err() {
+                    eprintln!("bench op {name} 投递失败");
+                    return false;
+                }
+                match rx.recv_timeout(std::time::Duration::from_secs(180)) {
+                    Ok((_, ms)) => {
+                        stats.record(ms);
+                        true
+                    }
+                    Err(_) => {
+                        eprintln!("bench op {name} 超时（>180s，UI 卡死）");
+                        false
+                    }
+                }
+            }
+            eprintln!("bench started");
+            // 0) 切到导图视图（用户场景：导图才是重布局路径）。
+            if !bench_op("switch_mind", &app_weak, &tx, &rx, &mut st_select, |app| {
+                app.set_view_mind(true);
+            }) {
+                return;
+            }
+            // 1) 展开 / 收起全部 × 5（重布局最重路径）。
+            for i in 0..5u32 {
+                if !bench_op("expand_all", &app_weak, &tx, &rx, &mut st_expand, move |app| {
+                    app.invoke_expand_all_subtrees();
+                }) {
+                    return;
+                }
+                if !bench_op("collapse_all", &app_weak, &tx, &rx, &mut st_collapse, move |app| {
+                    app.invoke_collapse_all_subtrees();
+                }) {
+                    return;
+                }
+                let _ = i;
+            }
+            // 2) 展开全部后：逐行展开 / 收起 + 选中（轻量操作在重状态下的延迟）。
+            if !bench_op("expand_all", &app_weak, &tx, &rx, &mut st_expand, |app| {
+                app.invoke_expand_all_subtrees();
+            }) {
+                return;
+            }
+            for i in 0..40u32 {
+                let row = 2 + (i % 7);
+                if !bench_op("row_toggle", &app_weak, &tx, &rx, &mut st_toggle, move |app| {
+                    app.invoke_toggle_expand(row as i32);
+                }) {
+                    return;
+                }
+                if !bench_op("select", &app_weak, &tx, &rx, &mut st_select, move |app| {
+                    let v = app
+                        .get_mind_nodes()
+                        .row_data(1)
+                        .map(|n| n.visit)
+                        .unwrap_or(0);
+                    app.invoke_select_visit(v);
+                }) {
+                    return;
+                }
+            }
+            // 3) 导图实例展开 / 收起 × 40（取导图模型里的实际节点键）。
+            for i in 0..40u32 {
+                let slot = 1 + (i % 5) as usize;
+                if !bench_op("mind_toggle", &app_weak, &tx, &rx, &mut st_mind, move |app| {
+                    if let Some(n) = app.get_mind_nodes().row_data(slot) {
+                        app.invoke_toggle_visit_expand(n.expand_key.clone());
+                    }
+                }) {
+                    return;
+                }
+            }
+            st_expand.report("expand_all");
+            st_collapse.report("collapse_all");
+            st_toggle.report("row_toggle");
+            st_select.report("select");
+            st_mind.report("mind_toggle");
+            eprintln!("bench done");
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        });
+    }
 
     app.run()
 }
@@ -10475,6 +11690,7 @@ mod mini_density_tests {
             hard: false,
             mount_parent: -1,
             link_visit: -1,
+            expand_key: String::new().into(),
             depth: 0,
             has_entries: false,
             entry_rows: ModelRc::from(Rc::new(VecModel::<EntryRow>::default())),
@@ -11069,6 +12285,70 @@ mod move_group_tests {
     }
 }
 
+/// 全部分支身份键（用于「展开全部子树」）：真实位置 rel + 挂载行实例键 +
+/// **实例上下文内的嵌套键**（镜像 `emit_branch` 的键组合规则 —— 挂载实例
+/// 展开后其子树内行的键带实例前缀，「展开全部」必须覆盖它们）。
+fn all_branch_keys(e: &Editor) -> Vec<String> {
+    let Some(scan) = e.scan.as_ref() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = scan.visits.iter().map(|v| v.rel.clone()).collect();
+    fn walk_instance(
+        scan: &Scan,
+        kids: &[Vec<usize>],
+        mounts: &[Vec<MountChild>],
+        // 实例挂载点下渲染子树的位置：软 = 目标分支；硬 = 自身 link 分支。
+        root: usize,
+        prefix: &str,
+        // 渲染链上的 visit 集合（真实祖先 + 挂载链），与 emit_branch /
+        // mind_dfs 的 `path` 守卫同式 —— 挂载环 / 自我挂载 / 挂向真实祖先
+        // 的声明在这里跳过，保证**非法 bundle** 下展开全部也能终止。
+        path: &mut Vec<usize>,
+        out: &mut Vec<String>,
+        ) {
+        // 全局预算（见 EXPAND_ALL_KEY_CAP）。
+        if out.len() >= EXPAND_ALL_KEY_CAP {
+            return;
+        }
+        path.push(root);
+        for &c in kids.get(root).map(|v| v.as_slice()).unwrap_or_default() {
+            if scan.visits[c].hard_link_to.is_some() {
+                continue; // 硬链接分支不以真实行渲染（同 emit_branch 守卫）。
+            }
+            out.push(compose_key(prefix, scan.visits[c].rel.clone()));
+            // 真实子分支延续同一实例前缀。
+            walk_instance(scan, kids, mounts, c, prefix, path, out);
+        }
+        for m in mounts.get(root).map(|v| v.as_slice()).unwrap_or_default() {
+            if path.contains(&m.visit) {
+                continue; // 挂进自己 / 自己的祖先 ⇒ 跳过（防环，同渲染）。
+            }
+            let mk = compose_key(prefix, mount_expand_key(scan, root, m.visit, m.hard));
+            out.push(mk.clone());
+            // 嵌套挂载：软以其目标为根；硬以其自身 link 分支为根（自有结构）。
+            let sub_root = if m.hard { m.link_idx.unwrap_or(m.visit) } else { m.visit };
+            walk_instance(scan, kids, mounts, sub_root, &mk, path, out);
+        }
+        path.pop();
+    }
+    let mut walk_path: Vec<usize> = Vec::new();
+    for (p, ms) in e.mounts.iter().enumerate() {
+        for m in ms {
+            if walk_path.contains(&m.visit) {
+                continue;
+            }
+            let mk = mount_expand_key(scan, p, m.visit, m.hard);
+            keys.push(mk.clone());
+            let sub_root = if m.hard { m.link_idx.unwrap_or(m.visit) } else { m.visit };
+            walk_path.push(m.visit);
+            walk_instance(scan, &e.kids, &e.mounts, sub_root, &mk, &mut walk_path, &mut keys);
+            walk_path.pop();
+        }
+    }
+    keys
+}
+
+
 #[cfg(test)]
 mod mount_tests {
     use super::*;
@@ -11211,7 +12491,7 @@ mod mount_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 硬链接行：身份 = 目标分支（visit = B，与软连接一致）、带「≠」识别标识、
+    /// 硬链接行：身份 = 目标分支（visit = B，与软连接一致）、带「≡」识别标识、
     /// 内容面板显示**目标**的内容条目（只读视图，写操作由 sel_hard 守卫拦截）；
     /// `mounted = false`（移除挂载走 delete-branch + op-visit），`link_visit` =
     /// 自身分支 visit（「新建子分支」落自有结构）。
@@ -11232,7 +12512,7 @@ mod mount_tests {
             "link_visit = 自身分支（新建子分支落点）"
         );
         assert!(
-            hard_rows[0].title.starts_with("≠ "),
+            hard_rows[0].title.starts_with("≡ "),
             "硬链接行带 → 识别标识：{:?}",
             hard_rows[0].title
         );
@@ -11246,6 +12526,1357 @@ mod mount_tests {
         // 真实位置的 B 仍正常。
         assert!(e.rows.iter().any(|r| r.visit == b_idx && !r.hard && !r.mounted));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 挂载落点解析（菜单栏兜底路径）：选中经由硬链接行进入（sel_hard，选中 =
+    /// 目标真身）时，`selected_hard_link_idx` 必须解析到硬链接**自身分支**；
+    /// 软连接行不参与解析（返回 None）。
+    #[test]
+    fn selected_hard_link_resolves_to_own_branch() {
+        // 硬链接：选中 = 目标 B ⇒ 落点 = 自身分支。
+        let dir = bundle_with_mount("hardresolve", None, true);
+        let e = opened(&dir);
+        let b_idx = e.visit_idx(RB).expect("B");
+        let link_idx = e
+            .visit_idx(&format!("{RA}/{RL}"))
+            .expect("硬链接分支自身是 visit");
+        assert_eq!(
+            selected_hard_link_idx(&e, b_idx),
+            Ok(Some(link_idx)),
+            "sel_hard 兜底落点 = 硬链接自身分支（不是目标真身）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 软连接：没有硬链接挂载指向 B ⇒ None（调用方按普通分支落点处理）。
+        let dir = bundle_with_mount("softresolve", None, false);
+        let e = opened(&dir);
+        let b_idx = e.visit_idx(RB).expect("B");
+        assert_eq!(
+            selected_hard_link_idx(&e, b_idx),
+            Ok(None),
+            "软连接行不参与硬链接落点解析"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 摘引用（`unmount_link`）：软挂载只从挂载点 `entries[]` 移除 link 行 ——
+    /// 目标分支目录、`._meta` 与内容完好（回归：菜单栏 / 信息页删除入口曾在
+    /// 挂载行选中态下误删目标真身）。
+    #[test]
+    fn unmount_link_keeps_target_branch() {
+        let dir = bundle_with_mount("softunmount", None, false);
+        let mut e = opened(&dir);
+        let a_idx = e.visit_idx(RA).expect("A");
+        let b_idx = e.visit_idx(RB).expect("B");
+        let b_dir = e.scan.as_ref().unwrap().visits[b_idx].dir.clone();
+        let (_pt, _dt) = unmount_link(&mut e, a_idx, b_idx).expect("摘引用成功");
+        // 目标分支完好：目录、`._meta` 与内容文件都在，且仍可解析。
+        assert!(b_dir.join("._meta").exists(), "目标分支 `._meta` 仍在");
+        assert!(b_dir.join("b.json").exists(), "目标内容仍在");
+        assert!(
+            e.visit_idx(RB).is_some(),
+            "目标分支仍在 bundle 内可解析"
+        );
+        // 挂载点 entries[] 已无 link 行。
+        let a_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RA).unwrap()]
+            .dir
+            .clone();
+        let a_meta = read_meta(e.bundle.as_ref().unwrap(), &a_dir).unwrap();
+        assert!(
+            a_meta.entries.iter().all(|en| !en.is_link()),
+            "挂载点的 link 行已摘除"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重挂载（软）：链接声明从旧挂载点摘除、登记到新挂载点 —— 目标分支目录 /
+    /// 内容不动；自我挂载按环拒绝。
+    #[test]
+    fn mount_move_soft_remounts_without_touching_target() {
+        let dir = bundle_with_mount("mmove-soft", None, false);
+        let mut e = opened(&dir);
+        let a_idx = e.visit_idx(RA).expect("A");
+        let b_idx = e.visit_idx(RB).expect("B");
+        let b_dir = e.scan.as_ref().unwrap().visits[b_idx].dir.clone();
+        let root_idx = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .position(|v| v.depth == 0)
+            .expect("ROOT");
+        let root_dir = e.scan.as_ref().unwrap().visits[root_idx].dir.clone();
+        // 自我挂载 = 环。
+        assert!(mount_move_into_child(&mut e, a_idx, b_idx, b_idx).is_err());
+        // 重挂载到 ROOT：B 已是 ROOT 的真实子分支（同 path）⇒ 冲突拒绝，
+        // 真身登记不被链接行顶替。
+        assert!(mount_move_into_child(&mut e, a_idx, b_idx, root_idx).is_err());
+        // 造第三个分支 C（ROOT 下）作为无冲突重挂载目标。
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let c_id = "01928f3a-7c4b-4000-8000-000000000009";
+        let c_dir = root_dir.join(c_id);
+        std::fs::create_dir_all(&c_dir).unwrap();
+        std::fs::write(
+            bundle.meta_path(&c_dir),
+            meta_edit::render_branch_meta(
+                Kind::Node,
+                c_id,
+                None,
+                Some("C"),
+                None,
+                &util::now_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let mut rm = read_meta(&bundle, &root_dir).unwrap();
+        rm.upsert_entry(&Entry {
+            path: c_id.to_string(),
+            role: "node".into(),
+            id: Some(c_id.to_string()),
+            title: Some("C".into()),
+            ..Default::default()
+        });
+        rm.touch();
+        rm.save(&bundle.meta_path(&root_dir)).unwrap();
+        e.rescan().unwrap();
+        // rescan 后 visit 下标漂移，全部重取。
+        let a_idx = e.visit_idx(RA).expect("A");
+        let b_idx = e.visit_idx(RB).expect("B");
+        let c_idx = e.visit_idx(c_id).expect("C");
+        // 重挂载到 C 之下。
+        mount_move_into_child(&mut e, a_idx, b_idx, c_idx).expect("重挂载成功");
+        let bundle = e.bundle.as_ref().unwrap();
+        let c_meta = read_meta(bundle, &c_dir).unwrap();
+        assert!(
+            c_meta
+                .entries
+                .iter()
+                .any(|en| en.is_link() && en.target.as_deref() == Some(RB)),
+            "C 获得指向 B 的挂载声明"
+        );
+        let a_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RA).unwrap()]
+            .dir
+            .clone();
+        let a_meta = read_meta(bundle, &a_dir).unwrap();
+        assert!(
+            a_meta.entries.iter().all(|en| !en.is_link()),
+            "旧挂载点的声明已摘除"
+        );
+        assert!(b_dir.join("._meta").exists(), "目标分支完好");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 重挂载（硬）：自有目录随挂载点搬家（`._meta` 的 target 不变），旧挂载点
+    /// 摘登记、新挂载点登记；目标分支与数据不动。
+    #[test]
+    fn mount_move_hard_relocates_own_dir() {
+        let dir = bundle_with_mount("mmove-hard", None, true);
+        let mut e = opened(&dir);
+        let a_idx = e.visit_idx(RA).expect("A");
+        let root_idx = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .position(|v| v.depth == 0)
+            .expect("ROOT");
+        let root_dir = e.scan.as_ref().unwrap().visits[root_idx].dir.clone();
+        let a_dir = e.scan.as_ref().unwrap().visits[a_idx].dir.clone();
+        let b_idx = e.visit_idx(RB).unwrap();
+        mount_move_into_child(&mut e, a_idx, b_idx, root_idx).expect("重挂载成功");
+        let new_dir = root_dir.join(RL);
+        assert!(new_dir.join("._meta").exists(), "硬链接自有目录已随迁");
+        assert!(!a_dir.join(RL).exists(), "旧位置目录已移走");
+        let bundle = e.bundle.as_ref().unwrap();
+        // target 绑定在新挂载点（ROOT）的 link 声明行上，且 mode = hard 保留。
+        let root_meta = read_meta(bundle, &root_dir).unwrap();
+        let link_row = root_meta
+            .entries
+            .iter()
+            .find(|en| en.is_link())
+            .expect("ROOT 获得硬链接声明行");
+        assert_eq!(link_row.target.as_deref(), Some(RB), "target 绑定不变");
+        assert_eq!(link_row.mode.as_deref(), Some("hard"), "mode = hard 保留");
+        assert_eq!(
+            link_row.order,
+            Some(1),
+            "重挂载插入为第一个子分支（ROOT 现有结构行均无 order）"
+        );
+        assert!(e.visit_idx(RB).is_some(), "目标分支完好");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同挂载点内重排：链接声明行在结构行序列（branch ∪ link）中移位并重编
+    /// order；目标分支与数据不动；跨挂载点的真实行不是合法重排目标。
+    #[test]
+    fn mount_reorder_moves_link_row_among_structure_rows() {
+        let dir = bundle_with_mount("mreorder", None, false);
+        let mut e = opened(&dir);
+        let a_idx = e.visit_idx(RA).expect("A");
+        let b_idx = e.visit_idx(RB).expect("B");
+        // 在 A 下手工加一个真实子分支 C：A 的结构行 = [link B, branch C]。
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let a_dir = e.scan.as_ref().unwrap().visits[a_idx].dir.clone();
+        let cid = "01928f3a-7c4b-4000-8000-000000000009";
+        let c_dir = a_dir.join(cid);
+        std::fs::create_dir_all(&c_dir).unwrap();
+        std::fs::write(
+            bundle.meta_path(&c_dir),
+            meta_edit::render_branch_meta(
+                Kind::Branch,
+                cid,
+                None,
+                Some("C"),
+                None,
+                &util::now_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let mut am = read_meta(&bundle, &a_dir).unwrap();
+        am.upsert_entry(&Entry {
+            path: cid.to_string(),
+            role: "branch".into(),
+            id: Some(cid.to_string()),
+            title: Some("C".into()),
+            ..Default::default()
+        });
+        am.touch();
+        am.save(&bundle.meta_path(&a_dir)).unwrap();
+        e.rescan().unwrap();
+        let b_link_path = visit_dir_name(e.scan.as_ref().unwrap(), b_idx).unwrap();
+        // 拖到自身 = 原位（顺序未变化）。
+        assert!(mount_reorder(&mut e, a_idx, &b_link_path, &b_link_path, true).is_ok());
+        // link B → C **之前**（after = false）：B 的 order 应小于 C。
+        //（am.save 的 canonical 排序后 C 已排在 link B 之前，「插到 C 之后」= 原位。）
+        mount_reorder(&mut e, a_idx, &b_link_path, cid, false).expect("重排成功");
+        let a_meta = read_meta(&bundle, &a_dir).unwrap();
+        let b_order = a_meta
+            .entries
+            .iter()
+            .find(|en| en.is_link() && en.target.as_deref() == Some(RB))
+            .and_then(|en| en.order)
+            .expect("link B 仍有 order");
+        let c_order = a_meta
+            .entries
+            .iter()
+            .find(|en| en.path == cid)
+            .and_then(|en| en.order)
+            .expect("C 仍有 order");
+        assert!(b_order < c_order, "link B 已排到 C 之前");
+        // 下半区动作枚举：兄弟真实行 C = 1（重排到它之后）；ROOT 下半区 = 0
+        //（B 已是 ROOT 的真实子分支，同 path 冲突）；目标自身 = 0（自我挂载成环）。
+        let c_visit = e.visit_idx(&format!("{RA}/{cid}")).expect("C");
+        assert_eq!(
+            tree_mount_drop_ok(&e, a_idx, b_idx, c_visit, false, false, -1, -1, true, -1),
+            1,
+            "兄弟真实行下半区 = 同挂载点内重排"
+        );
+        let root_idx = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .position(|v| v.depth == 0)
+            .unwrap();
+        assert_eq!(
+            tree_mount_drop_ok(&e, a_idx, b_idx, root_idx, false, false, -1, -1, true, -1),
+            0,
+            "同 path 冲突（目标已是 ROOT 真实子分支）拒绝"
+        );
+        assert_eq!(
+            tree_mount_drop_ok(&e, a_idx, b_idx, b_idx, false, false, -1, -1, true, -1),
+            0,
+            "自我挂载拒绝"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 上半区嵌套 = 插入为**第一个子分支**：新子分支的 `order` 取目标分支现有
+    /// 结构行最小 `order` 减一，排在所有既有子分支之前。
+    #[test]
+    fn branch_move_into_child_inserts_as_first_child() {
+        let dir = bundle_with_mount("firstchild", None, true);
+        let mut e = opened(&dir);
+        let a_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RA).unwrap()]
+            .dir
+            .clone();
+        // 给 A 的硬链接声明行设 order = 5，验证移入的子分支排到它前面。
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let mut am = read_meta(&bundle, &a_dir).unwrap();
+        let mut link = am.entries.iter().find(|en| en.is_link()).cloned().unwrap();
+        link.order = Some(5);
+        am.upsert_entry(&link);
+        am.touch();
+        am.save(&bundle.meta_path(&a_dir)).unwrap();
+        e.rescan().unwrap();
+        let a_idx = e.visit_idx(RA).unwrap();
+        let b_idx = e.visit_idx(RB).unwrap();
+        branch_move_into_child(&mut e, b_idx, a_idx).expect("移入成功");
+        let a_meta = read_meta(&bundle, &a_dir).unwrap();
+        let b_order = a_meta
+            .entries
+            .iter()
+            .find(|en| en.path == RB)
+            .and_then(|en| en.order)
+            .expect("移入的 B 已登记");
+        assert_eq!(b_order, 4, "新子分支 = 最小 order 减一");
+        assert!(b_order < 5, "B 排在既有硬链接声明（order 5）之前");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 落点补全：ROOT 下半区（真实分支）= 成为 ROOT 第一个子分支；挂载行落到
+    /// 硬链接行上 = 重挂载到其**自有结构**首子位置（成环场景拒绝）。
+    #[test]
+    fn drop_targets_root_lower_and_hard_link_row() {
+        let dir = bundle_with_mount("droptgt", None, true);
+        let mut e = opened(&dir);
+        let a_idx = e.visit_idx(RA).expect("A");
+        let b_idx = e.visit_idx(RB).expect("B");
+        let root_idx = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .position(|v| v.depth == 0)
+            .expect("ROOT");
+        // ① 真实分支 → ROOT 下半区：有效（after ROOT 无意义，改道首子插入）。
+        assert!(tree_drop_ok(&e, b_idx, root_idx, true));
+        branch_move_into_child(&mut e, b_idx, root_idx).expect("移入 ROOT 成功");
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let root_dir = e.scan.as_ref().unwrap().visits[root_idx].dir.clone();
+        let b_order = read_meta(&bundle, &root_dir)
+            .unwrap()
+            .entries
+            .iter()
+            .find(|en| en.path == RB)
+            .and_then(|en| en.order)
+            .expect("B 已登记为 ROOT 子分支");
+        let _ = b_order;
+        // ② 挂载行 → 硬链接行下半区 = 重挂载到硬链接自有结构首子。
+        // 手工造第三个分支 C（ROOT 下）+ C 的挂载（挂在 B 下）。
+        let c_id = "01928f3a-7c4b-4000-8000-000000000009";
+        let c_dir = root_dir.join(c_id);
+        std::fs::create_dir_all(&c_dir).unwrap();
+        std::fs::write(
+            bundle.meta_path(&c_dir),
+            meta_edit::render_branch_meta(
+                Kind::Node,
+                c_id,
+                None,
+                Some("C"),
+                None,
+                &util::now_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let mut rm = read_meta(&bundle, &root_dir).unwrap();
+        rm.upsert_entry(&Entry {
+            path: c_id.to_string(),
+            role: "node".into(),
+            id: Some(c_id.to_string()),
+            title: Some("C".into()),
+            ..Default::default()
+        });
+        rm.touch();
+        rm.save(&bundle.meta_path(&root_dir)).unwrap();
+        e.rescan().unwrap();
+        let b_idx = e.visit_idx(RB).unwrap();
+        let b_dir = e.scan.as_ref().unwrap().visits[b_idx].dir.clone();
+        let mut bm = read_meta(&bundle, &b_dir).unwrap();
+        bm.upsert_entry(&Entry {
+            path: c_id.to_string(),
+            role: "link".into(),
+            target: Some(c_id.to_string()),
+            ..Default::default()
+        });
+        bm.touch();
+        bm.save(&bundle.meta_path(&b_dir)).unwrap();
+        e.rescan().unwrap();
+        let c_idx = e.visit_idx(c_id).expect("C");
+        let rl_idx = e
+            .visit_idx(&format!("{RA}/{RL}"))
+            .expect("硬链接自有分支");
+        // 硬链接行（target = B，自有 = RL）：下半区 = 重挂载到 RL 自有结构首子。
+        let hard_row_visit = b_idx; // 硬链接行身份 = 目标 B
+        assert_eq!(
+            tree_mount_drop_ok(
+                &e,
+                b_idx,  // 被拖挂载的挂载点 = B
+                c_idx,  // 被拖挂载的目标 = C
+                hard_row_visit,
+                false,  // 硬链接行 mounted = false
+                true,   // hard = true
+                a_idx as i32,
+                rl_idx as i32,
+                true,
+                -1,     // 被拖的是软挂载，无自有结构
+            ),
+            2,
+            "硬链接行下半区 = 重挂载到自有结构首子"
+        );
+        // 拖硬链接行到**它自己**：落点解析为自有结构 = 自嵌套，拒绝（上半区
+        // 不得点亮、落盘被守卫拦截）。
+        assert!(!tree_mount_nest_ok(
+            &e, b_idx, b_idx, true, rl_idx as i32, rl_idx as i32
+        ));
+        mount_move_into_child(&mut e, b_idx, c_idx, rl_idx).expect("重挂载成功");
+        let rl_dir = e.scan.as_ref().unwrap().visits
+            [e.visit_idx(&format!("{RA}/{RL}")).unwrap()]
+        .dir
+        .clone();
+        let rl_meta = read_meta(&bundle, &rl_dir).unwrap();
+        assert!(
+            rl_meta
+                .entries
+                .iter()
+                .any(|en| en.is_link() && en.target.as_deref() == Some(c_id)),
+            "硬链接自有结构获得指向 C 的挂载声明"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 挂载行展开键实例独立：与真身行的展开键不同 —— 展开收起挂载行不再连带
+    /// 真身与兄弟挂载视图（回归：展开态曾按目标 rel 共享）。
+    #[test]
+    fn mounted_row_expand_key_is_instance_scoped() {
+        let dir = bundle_with_mount("expkeys", None, false);
+        let e = opened(&dir);
+        let b_idx = e.visit_idx(RB).expect("B");
+        let mount_row = e.rows.iter().find(|r| r.mounted).expect("挂载行");
+        let real_row = e
+            .rows
+            .iter()
+            .find(|r| r.visit == b_idx && !r.mounted)
+            .expect("真身行");
+        assert_ne!(
+            mount_row.expand_key, real_row.expand_key,
+            "挂载行与真身行的展开键相互独立"
+        );
+        assert_eq!(real_row.expand_key, RB, "真实行展开键 = 自身 rel");
+        assert!(
+            mount_row.expand_key.contains("mount"),
+            "挂载行展开键为实例键"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一挂载点下指向同一目标的软 / 硬链接对：实例展开键互不相同（回归：
+    /// 实例键未含软硬维度时，二者联动展开 / 收起）。
+    #[test]
+    fn soft_and_hard_pair_have_distinct_expand_keys() {
+        let dir = bundle_with_mount("pairkeys", None, false);
+        let mut e = opened(&dir);
+        // 在 A 下再挂一条指向 B 的硬链接（path = 自身 id，与软链接 path 不同 ⇒ 合法）。
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let a_idx = e.visit_idx(RA).expect("A");
+        let a_dir = e.scan.as_ref().unwrap().visits[a_idx].dir.clone();
+        let hid = "01928f3a-7c4b-4000-8000-00000000000a";
+        let h_dir = a_dir.join(hid);
+        std::fs::create_dir_all(&h_dir).unwrap();
+        std::fs::write(
+            bundle.meta_path(&h_dir),
+            meta_edit::render_branch_meta(
+                Kind::Branch,
+                hid,
+                None,
+                Some("B"),
+                None,
+                &util::now_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let mut am = read_meta(&bundle, &a_dir).unwrap();
+        am.upsert_entry(&Entry {
+            path: hid.to_string(),
+            role: "link".into(),
+            id: Some(hid.to_string()),
+            target: Some(RB.to_string()),
+            mode: Some("hard".into()),
+            title: Some("B".into()),
+            ..Default::default()
+        });
+        am.touch();
+        am.save(&bundle.meta_path(&a_dir)).unwrap();
+        e.rescan().unwrap();
+        let b_idx = e.visit_idx(RB).expect("B");
+        let soft_key = e
+            .rows
+            .iter()
+            .find(|r| r.mounted)
+            .map(|r| r.expand_key.clone())
+            .expect("软挂载行");
+        let hard_key = e
+            .rows
+            .iter()
+            .find(|r| r.hard)
+            .map(|r| r.expand_key.clone())
+            .expect("硬链接行");
+        let real_key = e
+            .rows
+            .iter()
+            .find(|r| r.visit == b_idx && !r.mounted && !r.hard)
+            .map(|r| r.expand_key.clone())
+            .expect("真身行");
+        assert_ne!(soft_key, hard_key, "软 / 硬链接对实例键互不关联");
+        assert_ne!(real_key, soft_key, "真身行与软挂载行实例键互不关联");
+        assert_ne!(real_key, hard_key, "真身行与硬链接行实例键互不关联");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 挂载实例子树的展开态独立（回归：挂载行展开曾按 rel 键记账 —— 真身视图
+    /// 已展开的孙代会随挂载行展开直接显示到子孙级；实例子树内收起也会连带真身）。
+    #[test]
+    fn mount_instance_subtree_expand_is_scoped() {
+        let dir = bundle_with_mount("instscope", None, false);
+        let mut e = opened(&dir);
+        // 给 B 加一个真实子分支 C：真身视图里 C 是「已展开的孙代」。
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let b_idx = e.visit_idx(RB).expect("B");
+        let b_dir = e.scan.as_ref().unwrap().visits[b_idx].dir.clone();
+        let cid = "01928f3a-7c4b-4000-8000-00000000000b";
+        let c_dir = b_dir.join(cid);
+        std::fs::create_dir_all(&c_dir).unwrap();
+        std::fs::write(
+            bundle.meta_path(&c_dir),
+            meta_edit::render_branch_meta(
+                Kind::Branch,
+                cid,
+                None,
+                Some("C"),
+                None,
+                &util::now_rfc3339(),
+            ),
+        )
+        .unwrap();
+        let mut bm = read_meta(&bundle, &b_dir).unwrap();
+        bm.upsert_entry(&Entry {
+            path: cid.to_string(),
+            role: "branch".into(),
+            id: Some(cid.to_string()),
+            title: Some("C".into()),
+            ..Default::default()
+        });
+        bm.touch();
+        bm.save(&bundle.meta_path(&b_dir)).unwrap();
+        e.rescan().unwrap();
+        let c_rel = visit_key(
+            e.scan.as_ref().unwrap(),
+            e.visit_idx(&format!("{RB}/{cid}")).expect("C"),
+        )
+        .to_string();
+        e.expanded.insert(c_rel.clone());
+        e.rebuild();
+        // 展开挂载实例（A 下的 ⤷B）。
+        let a_idx = e.visit_idx(RA).expect("A");
+        let inst_key = mount_expand_key(e.scan.as_ref().unwrap(), a_idx, b_idx, false);
+        e.expanded.insert(inst_key.clone());
+        e.rebuild();
+        // 实例内的 C 行：键带实例前缀，**未展开**（不随真身视图联动到子孙级）。
+        let inst_c_key = format!("{inst_key}\u{1f}{c_rel}");
+        let inst_c_row = e
+            .rows
+            .iter()
+            .find(|r| r.expand_key == inst_c_key)
+            .expect("实例内的 C 行");
+        assert!(
+            !inst_c_row.expanded,
+            "实例内 C 行收起：挂载行展开只显示一级"
+        );
+        // 真身 C 行保持展开，且与实例内 C 行的键互不相同。
+        let real_c_row = e
+            .rows
+            .iter()
+            .find(|r| r.expand_key == c_rel)
+            .expect("真身 C 行");
+        assert!(real_c_row.expanded, "真身视图的 C 行保持展开");
+        // 实例内展开 C / 真身收起 C：互不影响。
+        e.expanded.insert(inst_c_key.clone());
+        e.expanded.remove(&c_rel);
+        e.rebuild();
+        assert!(
+            e.rows
+                .iter()
+                .find(|r| r.expand_key == inst_c_key)
+                .unwrap()
+                .expanded,
+            "实例内 C 独立展开"
+        );
+        assert!(
+            !e.rows
+                .iter()
+                .find(|r| r.expand_key == c_rel)
+                .unwrap()
+                .expanded,
+            "真身 C 独立收起"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 导图布局：多挂载实例 + 实例内展开的混合态下，节点矩形不得互相重叠
+    /// （回归：实例上下文带高与渲染不一致时子带溢出、兄弟子树互相压盖）。
+    #[test]
+    fn mind_layout_no_overlap_with_instance_expansions() {
+        // ROOT ─ R1 ─ A ─ A1；R1 下挂 ⤷A、⤷B；R2 下挂 ⤷A；B 下挂 ⤷A。
+        let root = std::env::temp_dir().join(format!(
+            "strgui-mindlay-{}.str",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let r1 = "01928f3a-7c4b-4000-8000-0000000000c1";
+        let r2 = "01928f3a-7c4b-4000-8000-0000000000c2";
+        let a1 = "01928f3a-7c4b-4000-8000-0000000000c3";
+        let r3 = "01928f3a-7c4b-4000-8000-0000000000c4";
+        let hl = "01928f3a-7c4b-4000-8000-0000000000c5";
+        for d in [
+            r1,
+            &format!("{r1}/{RA}"),
+            &format!("{r1}/{RA}/{a1}"),
+            r2,
+            RB,
+            &format!("{RB}/{hl}"),
+            r3,
+        ] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(
+            root.join("._meta"),
+            meta_text(
+                "root",
+                "01928f3a-7c4b-4000-8000-000000000003",
+                &format!(
+                    "[[entries]]\npath = \"{r1}\"\nrole = \"node\"\nid = \"{r1}\"\n\
+                     [[entries]]\npath = \"{r2}\"\nrole = \"node\"\nid = \"{r2}\"\n\
+                     [[entries]]\npath = \"{RB}\"\nrole = \"node\"\nid = \"{RB}\"\n\
+                     [[entries]]\npath = \"{r3}\"\nrole = \"node\"\nid = \"{r3}\"\n"
+                ),
+            ),
+        )
+        .unwrap();
+        let link_a = format!("[[entries]]\npath = \"{RA}\"\nrole = \"link\"\ntarget = \"{RA}\"\n");
+        std::fs::write(
+            root.join(r1).join("._meta"),
+            meta_text(
+                "node",
+                r1,
+                &format!(
+                    "[[entries]]\npath = \"{RA}\"\nrole = \"branch\"\nid = \"{RA}\"\n\
+                     [[entries]]\npath = \"{RB}\"\nrole = \"link\"\ntarget = \"{RB}\"\n"
+                ),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(RA).join("._meta"),
+            meta_text(
+                "branch",
+                RA,
+                &format!("[[entries]]\npath = \"{a1}\"\nrole = \"branch\"\nid = \"{a1}\"\n"),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(RA).join(a1).join("._meta"),
+            meta_text("branch", a1, "title = \"A1\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r2).join("._meta"),
+            meta_text("node", r2, &link_a),
+        )
+        .unwrap();
+        // B：硬链接 ≡A（自有目录 hl）+ 软挂载 ⤷A。
+        std::fs::write(
+            root.join(RB).join("._meta"),
+            meta_text(
+                "node",
+                RB,
+                &format!(
+                    "{link_a}[[entries]]\npath = \"{hl}\"\nrole = \"link\"\nid = \"{hl}\"\n\
+                     target = \"{RA}\"\nmode = \"hard\"\n"
+                ),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(RB).join(hl).join("._meta"),
+            meta_text("branch", hl, "title = \"硬A\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r3).join("._meta"),
+            meta_text("node", r3, "title = \"R3\"\n"),
+        )
+        .unwrap();
+        let mut e = opened(&root);
+        let scan = e.scan.as_ref().unwrap();
+        let idx = |rel: &str| scan.visits.iter().position(|v| v.rel == rel).unwrap();
+        let (r1_i, r2_i, a_i, b_i) =
+            (idx(r1), idx(r2), idx(&format!("{r1}/{RA}")), idx(RB));
+        // 实例展开键 + 实例内嵌套展开（⤷B 实例内的 ⤷A 及其 A1 都展开）。
+        let i_b_r1 = mount_expand_key(&scan, r1_i, b_i, false);
+        let i_a_r2 = mount_expand_key(&scan, r2_i, a_i, false);
+        let i_a_b = mount_expand_key(&scan, b_i, a_i, false);
+        let a1_rel = visit_key(&scan, idx(&format!("{r1}/{RA}/{a1}"))).to_string();
+        let nested_a_in_b = format!(
+            "{i_b_r1}\u{1f}{}",
+            mount_expand_key(&scan, b_i, a_i, false)
+        );
+        // 穷举所有展开键子集：任何组合下布局都不得出现节点矩形重叠。
+        let hl_i = idx(&format!("{RB}/{hl}"));
+        let i_hard_b = mount_expand_key(&scan, b_i, hl_i, true);
+        let mut universe: Vec<String> = scan.visits.iter().map(|v| v.rel.clone()).collect();
+        universe.push(i_b_r1.clone());
+        universe.push(i_a_r2.clone());
+        universe.push(i_a_b.clone());
+        universe.push(nested_a_in_b.clone());
+        universe.push(i_hard_b.clone());
+        universe.push(format!("{i_a_r2}\u{1f}{a1_rel}"));
+        universe.push(format!("{i_a_b}\u{1f}{a1_rel}"));
+        universe.push(format!("{nested_a_in_b}\u{1f}{a1_rel}"));
+        universe.sort();
+        universe.dedup();
+        assert!(universe.len() <= 20, "穷举规模失控");
+        for mask in 0..(1u32 << universe.len()) {
+            e.expanded = universe
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, k)| k.clone())
+                .collect();
+            e.rebuild();
+            let out = mind_layout(&e);
+            for (i, a) in out.nodes.iter().enumerate() {
+                for b in &out.nodes[i + 1..] {
+                    let ox = (a.x + a.w - b.x).min(b.x + b.w - a.x);
+                    let oy = (a.y + a.h - b.y).min(b.y + b.h - a.y);
+                    assert!(
+                        ox <= 0.5 || oy <= 0.5,
+                        "mask={mask:#06b} 节点矩形重叠：「{}」{:?} 与「{}」{:?}\nkeys={:?}",
+                        a.title,
+                        (a.x, a.y, a.w, a.h),
+                        b.title,
+                        (b.x, b.y, b.w, b.h),
+                        e.expanded
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 导图布局模糊测试：随机真实树 + 随机无环挂载（软 / 硬）+ 随机展开组合
+    /// （rel 键 + 实例键 + 嵌套实例键），断言节点矩形两两不重叠。
+    #[test]
+    fn mind_layout_fuzz_no_overlap() {
+        // 简易可复现 RNG。
+        let mut seed: u64 = 0x5EED_2026_0929;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // 固定 id 池（合法 UUID 尾组）。
+        let ids: Vec<String> = (0..24)
+            .map(|i| format!("01928f3a-7c4b-4000-8000-{i:012}"))
+            .collect();
+        for case in 0..200u64 {
+            let root = std::env::temp_dir().join(format!("strgui-fuzz-{}.str", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            // ── 随机真实树：ROOT 下挂 2-4 个一级，每个一级再随机挂 0-2 个二级 ──
+            let mut tree: Vec<(String, Option<String>)> = Vec::new(); // (id, parent)
+            let top_n = 2 + (rng() % 3) as usize;
+            for i in 0..top_n {
+                tree.push((ids[i].clone(), None));
+            }
+            for i in top_n..ids.len() {
+                if rng() % 3 == 0 {
+                    continue;
+                }
+                let parent = &ids[(rng() % top_n as u64) as usize];
+                tree.push((ids[i].clone(), Some(parent.clone())));
+            }
+            for (id, parent) in &tree {
+                let dir = match parent {
+                    Some(p) => root.join(p).join(id),
+                    None => root.join(id),
+                };
+                std::fs::create_dir_all(&dir).unwrap();
+                let kind = if parent.is_none() { "node" } else { "branch" };
+                std::fs::write(
+                    dir.join("._meta"),
+                    meta_text(kind, id, "title = \"N\"\n"),
+                )
+                .unwrap();
+            }
+            // ROOT meta：一级分支登记。
+            let top_list: Vec<String> = tree
+                .iter()
+                .filter(|(_, p)| p.is_none())
+                .map(|(id, _)| {
+                    format!("[[entries]]\npath = \"{id}\"\nrole = \"node\"\nid = \"{id}\"\n")
+                })
+                .collect();
+            std::fs::write(
+                root.join("._meta"),
+                meta_text("root", "01928f3a-7c4b-4000-8000-000000000000", &top_list.concat()),
+            )
+            .unwrap();
+            // 各分支 meta：登记真实子分支。
+            for (id, parent) in &tree {
+                if parent.is_none() {
+                    continue;
+                }
+                let kid_list: String = tree
+                    .iter()
+                    .filter(|(_, p)| p.as_deref() == Some(id.as_str()))
+                    .map(|(kid, _)| {
+                        format!("[[entries]]\npath = \"{kid}\"\nrole = \"branch\"\nid = \"{kid}\"\n")
+                    })
+                    .collect();
+                let dir = match parent {
+                    Some(p) => root.join(p).join(id),
+                    None => root.join(id),
+                };
+                std::fs::write(
+                    dir.join("._meta"),
+                    meta_text("branch", id, &kid_list),
+                )
+                .unwrap();
+            }
+            // ── 随机挂载：软链接（无目录）。目标任取非自身 / 非祖先的分支 ──
+            // 祖先判定走真实父子链（挂载环由构造避免：只挂到真实路径上不构成
+            // 环的组合 —— 简化：目标与挂载点的真实路径不相交即挂）。
+            let is_ancestor = |a: &str, b: &str| -> bool {
+                // a 是否 b 的真实祖先（含相等）。
+                let mut cur = Some(b.to_string());
+                while let Some(c) = cur {
+                    if c == a {
+                        return true;
+                    }
+                    cur = tree
+                        .iter()
+                        .find(|(id, _)| *id == c)
+                        .and_then(|(_, p)| p.clone());
+                }
+                false
+            };
+            let all_ids: Vec<String> = tree.iter().map(|(id, _)| id.clone()).collect();
+            let dir_of = |id: &str| -> std::path::PathBuf {
+                let mut parts = vec![id.to_string()];
+                let mut cur = Some(id.to_string());
+                loop {
+                    let next = tree
+                        .iter()
+                        .find(|(id2, _)| *id2 == cur.as_deref().unwrap_or(""))
+                        .and_then(|(_, p)| p.clone());
+                    match next {
+                        Some(p) => {
+                            parts.push(p.clone());
+                            cur = Some(p);
+                        }
+                        None => break,
+                    }
+                }
+                parts.iter().rev().fold(root.clone(), |acc, p| acc.join(p))
+            };
+            let mut hl_seq = 90u64;
+            for parent in &all_ids {
+                let n_mounts = (rng() % 3) as usize;
+                for _ in 0..n_mounts {
+                    let target = &all_ids[(rng() % all_ids.len() as u64) as usize];
+                    if is_ancestor(target, parent) || target == parent {
+                        continue; // 环 / 自我挂载：跳过。
+                    }
+                    let meta_path = dir_of(parent).join("._meta");
+                    let mut text = std::fs::read_to_string(&meta_path).unwrap();
+                    // 同挂载点同目标只挂一次（软链接 path = 目标 id）。
+                    if text.contains(&format!("path = \"{target}\"")) {
+                        continue;
+                    }
+                    if rng() % 4 == 0 {
+                        // 硬链接：path = id = 自有目录名（目录 + 自有 `_meta`，
+                        // 可带自有子分支）。
+                        hl_seq += 1;
+                        let hl = format!("01928f3a-7c4b-4000-8000-{hl_seq:012}");
+                        let hdir = dir_of(parent).join(&hl);
+                        std::fs::create_dir_all(&hdir).unwrap();
+                        let mut hl_tables = String::from("title = \"硬\"\n");
+                        if rng() % 2 == 0 {
+                            hl_seq += 1;
+                            let hc = format!("01928f3a-7c4b-4000-8000-{hl_seq:012}");
+                            std::fs::create_dir_all(hdir.join(&hc)).unwrap();
+                            std::fs::write(
+                                hdir.join(&hc).join("._meta"),
+                                meta_text("branch", &hc, "title = \"硬子\"\n"),
+                            )
+                            .unwrap();
+                            hl_tables.push_str(&format!(
+                                "[[entries]]\npath = \"{hc}\"\nrole = \"branch\"\nid = \"{hc}\"\n"
+                            ));
+                        }
+                        // 盲区覆盖：硬链接自有结构下的**软挂载**（回归：此处
+                        // mount_parent 曾传错分支导致实例键不一致、子带溢出）。
+                        if rng() % 2 == 0 {
+                            let mtarget = &all_ids[(rng() % all_ids.len() as u64) as usize];
+                            if mtarget != &hl && !is_ancestor(mtarget, parent) {
+                                hl_tables.push_str(&format!(
+                                    "[[entries]]\npath = \"{mtarget}\"\nrole = \"link\"\ntarget = \"{mtarget}\"\n"
+                                ));
+                            }
+                        }
+                        std::fs::write(hdir.join("._meta"), meta_text("branch", &hl, &hl_tables))
+                            .unwrap();
+                        text.push_str(&format!(
+                            "[[entries]]\npath = \"{hl}\"\nrole = \"link\"\nid = \"{hl}\"\n\
+                             target = \"{target}\"\nmode = \"hard\"\n"
+                        ));
+                    } else {
+                        text.push_str(&format!(
+                            "[[entries]]\npath = \"{target}\"\nrole = \"link\"\ntarget = \"{target}\"\n"
+                        ));
+                    }
+                    std::fs::write(meta_path, text).unwrap();
+                }
+            }
+            // ── 打开 + 随机展开 ──
+            let mut e = opened(&root);
+            let scan = e.scan.as_ref().unwrap();
+            let mut universe: Vec<String> =
+                scan.visits.iter().map(|v| v.rel.clone()).collect();
+            // 一层实例键 + 一层嵌套（真实孩子 / 挂载孩子）。硬链接的渲染结构根
+            // = **link 分支**（自有结构），不是挂载目标。
+            for p in 0..scan.visits.len() {
+                for m in e.mounts.get(p).map(|v| v.as_slice()).unwrap_or_default() {
+                    let k = mount_expand_key(&scan, p, m.visit, m.hard);
+                    universe.push(k.clone());
+                    let structure_root = if m.hard {
+                        m.link_idx.unwrap_or(m.visit)
+                    } else {
+                        m.visit
+                    };
+                    for &g in
+                        e.kids.get(structure_root).map(|v| v.as_slice()).unwrap_or_default()
+                    {
+                        universe.push(format!("{k}\u{1f}{}", scan.visits[g].rel));
+                    }
+                    for m2 in
+                        e.mounts.get(structure_root).map(|v| v.as_slice()).unwrap_or_default()
+                    {
+                        if m2.visit == structure_root {
+                            continue;
+                        }
+                        let k2 = format!(
+                            "{k}\u{1f}{}",
+                            mount_expand_key(&scan, structure_root, m2.visit, m2.hard)
+                        );
+                        universe.push(k2.clone());
+                        // 三层嵌套：实例里的实例里的真实孩子 / 挂载孩子。
+                        for &g2 in
+                            e.kids.get(m2.visit).map(|v| v.as_slice()).unwrap_or_default()
+                        {
+                            universe.push(format!("{k2}\u{1f}{}", scan.visits[g2].rel));
+                        }
+                        for m3 in
+                            e.mounts.get(m2.visit).map(|v| v.as_slice()).unwrap_or_default()
+                        {
+                            if m3.visit == m2.visit {
+                                continue;
+                            }
+                            universe.push(format!(
+                                "{k2}\u{1f}{}",
+                                mount_expand_key(&scan, m2.visit, m3.visit, m3.hard)
+                            ));
+                        }
+                    }
+                }
+            }
+            universe.sort();
+            universe.dedup();
+            for k in &universe {
+                if rng() % 2 == 0 {
+                    e.expanded.insert(k.clone());
+                }
+            }
+            // 随机内容面板（影响节点高度，验证高度表与渲染一致）。
+            for v in scan.visits.iter() {
+                if rng() % 4 == 0 {
+                    e.content_expanded.insert(v.rel.clone());
+                }
+            }
+            e.rebuild();
+            let out = mind_layout(&e);
+            for (i, a) in out.nodes.iter().enumerate() {
+                for b in &out.nodes[i + 1..] {
+                    let ox = (a.x + a.w - b.x).min(b.x + b.w - a.x);
+                    let oy = (a.y + a.h - b.y).min(b.y + b.h - a.y);
+                    assert!(
+                        ox <= 0.5 || oy <= 0.5,
+                        "case={case} 节点矩形重叠：「{}」{:?} 与「{}」{:?}\nexpanded={:?}",
+                        a.title,
+                        (a.x, a.y, a.w, a.h),
+                        b.title,
+                        (b.x, b.y, b.w, b.h),
+                        e.expanded
+                    );
+                }
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// 硬链接节点**自有结构下的软挂载**展开（回归：mind_dfs 曾把孩子的
+    /// mount_parent 传成硬链接的挂载目标而非 link 分支，渲染的实例展开键与
+    /// 带高计算用的键不一致 → 带高按收起、渲染按展开 → 子带溢出压盖兄弟）。
+    #[test]
+    fn mind_layout_soft_mount_under_hard_link_no_overflow() {
+        // ROOT ─ R1 ─ { T(real), T2(real)→T2A, ≡HL→T(硬链接，自有结构挂 ⤷T2), S(real) }。
+        let root = std::env::temp_dir().join(format!("strgui-hardmnt-{}.str", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let r1 = "01928f3a-7c4b-4000-8000-0000000000d1";
+        let t = "01928f3a-7c4b-4000-8000-0000000000d2";
+        let t2 = "01928f3a-7c4b-4000-8000-0000000000d3";
+        let t2a = "01928f3a-7c4b-4000-8000-0000000000d4";
+        let hl = "01928f3a-7c4b-4000-8000-0000000000d5";
+        let s = "01928f3a-7c4b-4000-8000-0000000000d6";
+        for d in [r1, &format!("{r1}/{t}"), &format!("{r1}/{t2}"), &format!("{r1}/{t2}/{t2a}"), &format!("{r1}/{hl}"), r1.to_string().as_str(), &format!("{r1}/{s}")] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(
+            root.join("._meta"),
+            meta_text(
+                "root",
+                "01928f3a-7c4b-4000-8000-000000000000",
+                &format!("[[entries]]\npath = \"{r1}\"\nrole = \"node\"\nid = \"{r1}\"\n"),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join("._meta"),
+            meta_text(
+                "node",
+                r1,
+                &format!(
+                    "[[entries]]\npath = \"{t}\"\nrole = \"branch\"\nid = \"{t}\"\n\
+                     [[entries]]\npath = \"{t2}\"\nrole = \"branch\"\nid = \"{t2}\"\n\
+                     [[entries]]\npath = \"{hl}\"\nrole = \"link\"\nid = \"{hl}\"\n\
+                     target = \"{t}\"\nmode = \"hard\"\n\
+                     [[entries]]\npath = \"{s}\"\nrole = \"branch\"\nid = \"{s}\"\n"
+                ),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(t).join("._meta"),
+            meta_text("branch", t, "title = \"T\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(t2).join("._meta"),
+            meta_text(
+                "branch",
+                t2,
+                &format!("[[entries]]\npath = \"{t2a}\"\nrole = \"branch\"\nid = \"{t2a}\"\n"),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(t2).join(t2a).join("._meta"),
+            meta_text("branch", t2a, "title = \"T2A\"\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(r1).join(s).join("._meta"),
+            meta_text("branch", s, "title = \"S\"\n"),
+        )
+        .unwrap();
+        // HL 自有结构：软挂载 ⤷T2。
+        std::fs::write(
+            root.join(r1).join(hl).join("._meta"),
+            meta_text(
+                "branch",
+                hl,
+                &format!("[[entries]]\npath = \"{t2}\"\nrole = \"link\"\ntarget = \"{t2}\"\n"),
+            ),
+        )
+        .unwrap();
+        let mut e = opened(&root);
+        let scan = e.scan.as_ref().unwrap();
+        let pos = |rel: &str| scan.visits.iter().position(|v| v.rel == rel).unwrap();
+        let (r1_i, t_i, hl_i) = (pos(r1), pos(&format!("{r1}/{t}")), pos(&format!("{r1}/{hl}")));
+        // 展开硬实例 + 其自有结构下的 ⤷T2（**link 分支** 为挂载点的正确键）。
+        let hard_key = mount_expand_key(scan, r1_i, t_i, true);
+        e.expanded.insert(hard_key.clone());
+        let soft_key = format!(
+            "{hard_key}\u{1f}{}",
+            mount_expand_key(scan, hl_i, pos(&format!("{r1}/{t2}")), false)
+        );
+        e.expanded.insert(soft_key);
+        e.rebuild();
+        let out = mind_layout(&e);
+        // 硬链接节点下应渲染出 ⤷T2，且 ⤷T2 展开渲染出 T2A。
+        assert!(
+            out.nodes.iter().any(|n| n.title.contains("⤷") && n.mount_parent == hl_i as i32),
+            "硬链接自有结构下的 ⤷T2 应以 link 分支为 mount_parent 渲染"
+        );
+        for (i, a) in out.nodes.iter().enumerate() {
+            for b in &out.nodes[i + 1..] {
+                let ox = (a.x + a.w - b.x).min(b.x + b.w - a.x);
+                let oy = (a.y + a.h - b.y).min(b.y + b.h - a.y);
+                assert!(
+                    ox <= 0.5 || oy <= 0.5,
+                    "节点矩形重叠：「{}」{:?} 与「{}」{:?}",
+                    a.title,
+                    (a.x, a.y, a.w, a.h),
+                    b.title,
+                    (b.x, b.y, b.w, b.h)
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 性能基准（手动 --ignored 运行）：生成超大规模合成 bundle（约 500 真实
+    /// 分支 + 300 软挂载 + 30 硬挂载，跨子树挂载），测量 open / rebuild /
+    /// mind_layout（收起、真实全展开、含实例全展开）/ 展开全部 全链路耗时。
+    #[test]
+    #[ignore]
+    fn probe_perf_large_bundle() {
+        use std::collections::HashMap;
+        use std::time::Instant;
+        let root =
+            std::env::temp_dir().join(format!("strgui-perf-large-{}.str", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let t_gen = Instant::now();
+        // ── 结构：10 个一级，各 3→3→2→1 层，约 490 真实分支 ──
+        let mut nodes: Vec<(String, Option<String>)> = Vec::new();
+        let mut seq = 0usize;
+        let mut next_id = || {
+            seq += 1;
+            format!("01928f3a-7c4b-4000-8000-{seq:012}")
+        };
+        let top = 10usize;
+        let mut level: Vec<String> = Vec::new();
+        for _ in 0..top {
+            let id = next_id();
+            nodes.push((id.clone(), None));
+            level.push(id);
+        }
+        let mut all: Vec<String> = level.clone();
+        for width in [3usize, 3, 2, 1] {
+            let mut next_level = Vec::new();
+            for p in &level {
+                for _ in 0..width {
+                    let id = next_id();
+                    nodes.push((id.clone(), Some(p.clone())));
+                    next_level.push(id.clone());
+                    all.push(id.clone());
+                }
+            }
+            level = next_level;
+        }
+        let parent_of: HashMap<&String, &Option<String>> =
+            nodes.iter().map(|(id, p)| (id, p)).collect();
+        let mut dirs: HashMap<String, std::path::PathBuf> = HashMap::new();
+        for (id, parent) in &nodes {
+            let dir = match parent {
+                Some(p) => dirs[p].join(id),
+                None => root.join(id),
+            };
+            std::fs::create_dir_all(&dir).unwrap();
+            dirs.insert(id.clone(), dir);
+        }
+        // ── 挂载：每个深度 ≥1 分支向**别的子树**挂 1 条；10% 硬链接
+        //（HL 自有结构下再挂一条软链接，覆盖硬链接自有挂载路径）。──
+        let top_of = |parent_of: &HashMap<&String, &Option<String>>, id: &String| -> String {
+            let mut cur = id;
+            loop {
+                match parent_of.get(cur) {
+                    Some(Some(p)) => cur = p,
+                    _ => return cur.clone(),
+                }
+            }
+        };
+        let mut soft: Vec<(String, String)> = Vec::new(); // (挂载点, 目标)
+        let mut hard: Vec<(String, String, String)> = Vec::new(); // (宿主, 目标, HL id)
+        for (i, id) in all.iter().enumerate() {
+            let target = &all[(i * 7 + 3) % all.len()];
+            // 跨一级子树挂载 ⇒ 无环；目标 ≠ 自身 / 祖先由跨子树保证。
+            if top_of(&parent_of, id) == top_of(&parent_of, target) || target == id {
+                continue;
+            }
+            if i % 10 == 0 {
+                let hl = format!("01928f3a-7c4b-4000-8000-9{i:011}");
+                let hdir = dirs[id].join(&hl);
+                std::fs::create_dir_all(&hdir).unwrap();
+                dirs.insert(hl.clone(), hdir.clone());
+                // HL 自有结构：一条软挂载 + 一个自有子分支。
+                let t2 = &all[(i * 11 + 5) % all.len()];
+                if top_of(&parent_of, t2) != top_of(&parent_of, &hl) {
+                    std::fs::write(
+                        hdir.join("._meta"),
+                        meta_text(
+                            "branch",
+                            &hl,
+                            &format!(
+                                "title = \"硬\"\n[[entries]]\npath = \"{t2}\"\nrole = \"link\"\ntarget = \"{t2}\"\n"
+                            ),
+                        ),
+                    )
+                    .unwrap();
+                } else {
+                    std::fs::write(hdir.join("._meta"), meta_text("branch", &hl, "title = \"硬\"\n"))
+                        .unwrap();
+                }
+                hard.push((id.clone(), target.clone(), hl));
+            } else {
+                soft.push((id.clone(), target.clone()));
+            }
+        }
+        // ── 落盘 `_meta` 与载荷 ──
+        std::fs::write(
+            root.join("._meta"),
+            meta_text(
+                "root",
+                "01928f3a-7c4b-4000-8000-000000000000",
+                &nodes
+                    .iter()
+                    .filter(|(_, p)| p.is_none())
+                    .map(|(id, _)| {
+                        format!("[[entries]]\npath = \"{id}\"\nrole = \"node\"\nid = \"{id}\"\n")
+                    })
+                    .collect::<String>(),
+            ),
+        )
+        .unwrap();
+        for (id, parent) in &nodes {
+            let dir = &dirs[id];
+            let kind = if parent.is_none() { "node" } else { "branch" };
+            let mut tables = String::new();
+            for (kid, kp) in &nodes {
+                if kp.as_deref() == Some(id.as_str()) {
+                    tables.push_str(&format!(
+                        "[[entries]]\npath = \"{kid}\"\nrole = \"branch\"\nid = \"{kid}\"\n"
+                    ));
+                }
+            }
+            for (p, target) in &soft {
+                if p == id {
+                    tables.push_str(&format!(
+                        "[[entries]]\npath = \"{target}\"\nrole = \"link\"\ntarget = \"{target}\"\n"
+                    ));
+                }
+            }
+            for (p, target, hl) in &hard {
+                if p == id {
+                    tables.push_str(&format!(
+                        "[[entries]]\npath = \"{hl}\"\nrole = \"link\"\nid = \"{hl}\"\ntarget = \"{target}\"\nmode = \"hard\"\n"
+                    ));
+                }
+            }
+            tables.push_str(&format!(
+                "[[entries]]\npath = \"data.json\"\nrole = \"payload\"\nsize = 12\nsha256 = \"{}\"\n",
+                "0".repeat(64)
+            ));
+            std::fs::write(dir.join("._meta"), meta_text(kind, id, &tables)).unwrap();
+            std::fs::write(dir.join("data.json"), "{\"v\":1}\n").unwrap();
+        }
+        eprintln!(
+            "生成：{} 分支 / {} 软挂载 / {} 硬挂载 / 耗时 {:.1?}",
+            nodes.len(),
+            soft.len(),
+            hard.len(),
+            t_gen.elapsed()
+        );
+
+        // ── 测量 ──
+        let t = Instant::now();
+        let mut e = opened(&root);
+        eprintln!("open             {:>8.1?}", t.elapsed());
+        e.rebuild();
+        eprintln!("rows(收起)       {}", e.rows.len());
+        let t = Instant::now();
+        let out = mind_layout(&e);
+        eprintln!(
+            "layout(收起)     {:>8.1?} nodes={}",
+            t.elapsed(),
+            out.nodes.len()
+        );
+
+        let t = Instant::now();
+        let rel_keys: Vec<String> = e
+            .scan
+            .as_ref()
+            .unwrap()
+            .visits
+            .iter()
+            .map(|v| v.rel.clone())
+            .collect();
+        for k in &rel_keys {
+            e.expanded.insert(k.clone());
+        }
+        e.rebuild();
+        eprintln!("rows(真实全开)   {}", e.rows.len());
+        let t = Instant::now();
+        let out = mind_layout(&e);
+        eprintln!(
+            "layout(真实全开) {:>8.1?} nodes={}",
+            t.elapsed(),
+            out.nodes.len()
+        );
+
+        // 一层实例键。
+        let scan = e.scan.as_ref().unwrap();
+        let mut inst: Vec<String> = Vec::new();
+        for p in 0..scan.visits.len() {
+            for m in e.mounts.get(p).map(|v| v.as_slice()).unwrap_or_default() {
+                inst.push(mount_expand_key(scan, p, m.visit, m.hard));
+            }
+        }
+        inst.sort();
+        inst.dedup();
+        for k in &inst {
+            e.expanded.insert(k.clone());
+        }
+        e.rebuild();
+        let t = Instant::now();
+        let out = mind_layout(&e);
+        eprintln!(
+            "layout(一层实例) {:>8.1?} nodes={} rows={}",
+            t.elapsed(),
+            out.nodes.len(),
+            e.rows.len()
+        );
+        // 展开全部（含嵌套实例键）。
+        let t = Instant::now();
+        let all_keys = all_branch_keys(&e);
+        eprintln!(
+            "all_branch_keys  {:>8.1?} keys={}",
+            t.elapsed(),
+            all_keys.len()
+        );
+        for k in &all_keys {
+            e.expanded.insert(k.clone());
+        }
+        e.rebuild();
+        let t = Instant::now();
+        let out = mind_layout(&e);
+        eprintln!(
+            "layout(全展开)   {:>8.1?} nodes={} rows={}",
+            t.elapsed(),
+            out.nodes.len(),
+            e.rows.len()
+        );
+        // 供 STR_GUI_BENCH 基准模式复用时保留 bundle。
+        if std::env::var("STR_BENCH_KEEP").is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+        } else {
+            eprintln!("bundle kept: {}", root.display());
+        }
     }
 
     /// 导图同样渲染挂载节点（mounted = true），且同一 visit 可同时出现在

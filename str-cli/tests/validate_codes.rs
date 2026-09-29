@@ -998,8 +998,9 @@ fn e_link_dup() {
     assert_code(&root, "E_LINK_DUP");
 }
 
-/// 硬链接（`mode = "hard"`）：合法挂载干净；挂自己的后代被拒；
-/// `mode` 非法值与非链接行写 `mode` 都报 `E_SCHEMA_FIELD`。
+/// 硬链接（`mode = "hard"`）：合法挂载干净；目标位于挂载点子树内（含 ROOT 下）
+/// 同样合法（1.15.0 撤回「不得挂载自己的后代」：硬链接不渲染目标结构、内容只读，
+/// 不存在自嵌套）；`mode` 非法值与非链接行写 `mode` 都报 `E_SCHEMA_FIELD`。
 /// 在 `parent` 分支下创建一个合法的硬链接分支（C1 语义：`path` = `id` = 自身
 /// 目录名，目录 + 自有 `._meta` 存在，自有 entries 只有子分支 / 空），并在父
 /// 分支 `entries` 追加对应 `role = "link"` 行。
@@ -1033,11 +1034,12 @@ fn link_hard_mode_rules() {
     hard_link_branch(&root, A, HARD_LID, B, "mode = \"hard\"\n");
     assert_clean(&root);
 
-    // 硬链接挂自己的后代：ROOT 硬链接 A（A 是 ROOT 的子分支）⇒ 拒绝。
-    // （「挂自己的祖先」由成环判定 E_LINK_CYCLE 覆盖，见 e_link_cycle_and_self_and_ancestor。）
+    // 目标位于挂载点子树内（ROOT 硬链接 A，A 是 ROOT 的子分支）⇒ 合法
+    // （1.15.0 撤回「不得挂载自己的后代」；「挂自己的祖先」仍由成环判定
+    // E_LINK_CYCLE 覆盖，见 e_link_cycle_and_self_and_ancestor。）
     let root = two_nodes("linkharddesc");
     hard_link_branch(&root, ".", HARD_LID, A, "mode = \"hard\"\n");
-    assert_code(&root, "E_LINK_TARGET_INVALID");
+    assert_clean(&root);
 
     // 硬链接缺 `id`（有身份的真实分支必须写 id）
     let root = two_nodes("linkhardnoid");

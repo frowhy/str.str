@@ -418,7 +418,7 @@ enum LinkCmd {
         /// 目标分支 id（`node` / `branch`，不得是 ROOT）
         #[arg(long)]
         target: String,
-        /// 链接形态：soft = 目标完整视图（缺省）；hard = 仅内容关联（只读，不得挂自己的后代）
+        /// 链接形态：soft = 目标完整视图（缺省）；hard = 仅内容关联（只读）
         #[arg(long, default_value = "soft")]
         mode: String,
         /// 挂载点别名（覆盖目标标题显示）
