@@ -28,6 +28,29 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
+## [Unreleased]
+
+规范 1.15.0 · CLI 0.8.0 · 技能包 0.5.0 · GUI 0.5.2
+
+### 修复
+
+- **Windows / Linux 编译回归修复（gui 0.5.1 → 0.5.2）**：`gui-build` 工作流的
+  Windows / Linux job 自 09-23 起持续失败（由 `750de9c` 引入，非本次发布引入）。
+  根因是两处 macOS 专属代码没有平台门控：① 内容列表方向键处理里**无条件调用**
+  `native_toggle_shift()`，而该函数定义在 `#[cfg(target_os = "macos")]` 之下，非
+  macOS 目标报 `E0425`（rustc 提示 "found an item that was configured out"）；
+  ② 阻止 Quick Look 面板吞掉方向键的 `NSEvent` 本地键盘监视器（`_ql_monitor`）
+  整块裸露，直接引用 `objc2` / `block2` / `objc2_app_kit`，而这三个 crate 只在
+  macOS 目标的依赖表里声明，非 macOS 目标报 7 处 `E0433`（共 8 处编译错误）。
+  修法：调用点补 `#[cfg]` 双分支，非 macOS 的 Shift 判定完全交回 Slint 传入的
+  `shift_flag`（与同文件 `on_entry_click` 的既有写法一致）；监视器则以
+  `#[cfg(target_os = "macos")]` **标注在 `let` 语句上** —— 不能套一层 `{}` 块，
+  套块会让 `_ql_monitor` 在块尾立即析构、监视器当场失效，该绑定必须活到函数末尾。
+  非 macOS 侧行为不变（`quicklook` 模块本就以「返回 Err」的桩实现，面板打不开、
+  监视器无从触发）。
+
+---
+
 ## [`v0.8.0`](https://github.com/frowhy/str.str/releases/tag/v0.8.0) — 2026-09-29
 
 规范 1.15.0 · CLI 0.8.0 · 技能包 0.5.0 · GUI 0.5.1

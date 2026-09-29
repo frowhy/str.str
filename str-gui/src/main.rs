@@ -7655,7 +7655,18 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         let app_weak = app.as_weak();
         app.global::<EntryApi>().on_entry_step(move |delta, shift_flag| {
             let app = app_weak.upgrade().unwrap();
-            let (native_shift, _cmd) = native_toggle_shift();
+            // NSEvent 真值只有 macOS 有；其它平台（Windows / Linux）没有该
+            // 通路，Shift 判定完全交给 Slint 传入的 shift_flag。
+            let (native_shift, _cmd) = {
+                #[cfg(target_os = "macos")]
+                {
+                    native_toggle_shift()
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    (false, false)
+                }
+            };
             let shift_down = shift_flag || native_shift;
             let mut e = editor.borrow_mut();
             let rows = build_entry_rows(&e);
@@ -8886,6 +8897,11 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     // 成为 key window、把方向键吃掉（拿去翻页）。预览开着时只拦 **↑↓ / 空格 /
     // Esc** —— ↑↓ 转交 Slint 窗口（列表移动选中，面板实时跟着换预览），
     // **←→ 留给预览面板翻页**（不占用它的左右键），其余按键照常放行。
+    // 仅 macOS：QLPreviewPanel / NSEvent 都是 AppKit 对象，其它平台无此通路
+    //（quicklook 模块在非 macOS 是返回 Err 的桩，面板根本打不开）。
+    // 注：这里必须把 #[cfg] 标在**语句**上而非套一层 `{}` —— 套块会让
+    // `_ql_monitor` 在块尾即刻析构，监视器当场失效。绑定活到本函数末尾。
+    #[cfg(target_os = "macos")]
     let _ql_monitor: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> = unsafe {
         let app_weak = app.as_weak();
         let open = quicklook_open.clone();
