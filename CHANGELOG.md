@@ -28,7 +28,7 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
-## [Unreleased]
+## [`v0.8.0`](https://github.com/frowhy/str.str/releases/tag/v0.8.0) — 2026-09-29
 
 规范 1.15.0 · CLI 0.8.0 · 技能包 0.5.0 · GUI 0.5.1
 
@@ -248,6 +248,17 @@
   Slint 的 `TextInput`，由它自带的复制 / 剪切 / 粘贴 / 全选 / 删除到行首处理；
   无文本编辑语义的组合键（⌘O / ⌘N / ⌘R / ⌘D / ⌘S / ⇧⌘N,S,R / ⌘1,2,+,-,0）
   保持原样。快捷键一览同步补「⌘A 全选条目」与该说明。
+
+### 变更
+
+- **发行真源**：`VERSIONS.toml` 的发行 tag 定为 **`v0.8.0`**（`status` 由 `unreleased` 转
+  `released`，`last_published` 同步为 `v0.8.0`）；`release.yml` 的 `workflow_dispatch`
+  默认 tag 同步为 `v0.8.0`。
+- **CLI 0.7.2 → 0.8.0 · 技能包 0.4.2 → 0.5.0 · GUI 0.3.2 → 0.5.1**：本版内容见上「新增」/「修复」；
+  逐版明细见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md) 与
+  [`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
+
+---
 
 ## [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) — 2026-09-23
 
