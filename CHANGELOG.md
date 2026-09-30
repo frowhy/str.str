@@ -17,6 +17,8 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 | GUI |
 | --- | --- | --- | --- | --- | --- |
+| [`v0.8.1`](https://github.com/frowhy/str.str/releases/tag/v0.8.1) | 2026-10-01 | 1.15.0 | 0.8.1 | 0.5.1 | 0.5.2 |
+| [`v0.8.0`](https://github.com/frowhy/str.str/releases/tag/v0.8.0) | 2026-09-29 | 1.15.0 | 0.8.0 | 0.5.0 | 0.5.1 |
 | [`v0.7.2`](https://github.com/frowhy/str.str/releases/tag/v0.7.2) | 2026-09-23 | 1.13.0 | 0.7.2 | 0.4.2 | 0.3.2 |
 | [`v0.7.1`](https://github.com/frowhy/str.str/releases/tag/v0.7.1) | 2026-09-22 | 1.13.0 | 0.7.1 | 0.4.1 | 0.3.0 |
 | [`v0.7.0`](https://github.com/frowhy/str.str/releases/tag/v0.7.0) | 2026-09-20 | 1.13.0 | 0.7.0 | 0.4.0 | 0.2.0 |
@@ -28,9 +30,9 @@
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
 
-## [Unreleased]
+## [`v0.8.1`](https://github.com/frowhy/str.str/releases/tag/v0.8.1) — 2026-10-01
 
-规范 1.15.0 · CLI 0.8.0 · 技能包 0.5.0 · GUI 0.5.2
+规范 1.15.0 · CLI 0.8.1 · 技能包 0.5.1 · GUI 0.5.2
 
 ### 修复
 
@@ -48,6 +50,20 @@
   套块会让 `_ql_monitor` 在块尾立即析构、监视器当场失效，该绑定必须活到函数末尾。
   非 macOS 侧行为不变（`quicklook` 模块本就以「返回 Err」的桩实现，面板打不开、
   监视器无从触发）。
+
+### 变更
+
+- **发行真源**：`VERSIONS.toml` 的发行 tag 定为 **`v0.8.1`**（`status` 保持 `released`，
+  `last_published` 同步为 `v0.8.1`）；`release.yml` 的 `workflow_dispatch` 默认 tag
+  同步为 `v0.8.1`。
+- **CLI 0.8.0 → 0.8.1 · 技能包 0.5.0 → 0.5.1**：本版是**发行重切** —— 上面「修复」里的
+  GUI 0.5.2 平台编译回归修复需要一个能跑通全部构建 job 的新 tag，才能让 `gui-build.yml` 的
+  `release-gui` 把 macOS 产物（按架构 dmg + Universal `.app` zip）发布到 GitHub Release
+  （`v0.8.0` 那次因 Windows / Linux 构建失败而从未执行）。cli 与 skill 两条轴**仅版本号随发行
+  前进、无行为变更**；逐版明细见 [`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md) 与
+  [`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
+- **补记 `v0.8.0` 发行矩阵行**：`v0.8.0` 发行提交漏补矩阵行，本版一并补上（矩阵须与
+  `VERSIONS.toml` 一致）。
 
 ---
 
