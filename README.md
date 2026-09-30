@@ -9,7 +9,7 @@
 在同一份资产上安全地读写、协作与版本控制。
 
 - 格式：`.str` 目录 bundle（形态对标 macOS `.app`）—— 纯目录 + 纯文本，零平台依赖
-- 规范版本：v1.15.0（`str` 主版本号 = `1`）
+- 规范版本：v1.16.0（`str` 主版本号 = `1`）
 - 参考实现：Rust CLI（`str-cli/`），20+ 子命令，35 个校验错误码
 - 状态：`DRAFT → 待评审`
 
@@ -216,7 +216,7 @@ GitHub Releases 下载（SHA-256 强制校验）→ crates.io 编译：
 
 ```sh
 STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version                    # 期望：str 0.8.1
+"$STR" --version                    # 期望：str 0.9.0
 ```
 
 高频命令分三组：
@@ -293,7 +293,7 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 
 | 位置 | 说明 |
 | --- | --- |
-| `SPEC.md` | 格式规范（唯一真源，v1.15.0） |
+| `SPEC.md` | 格式规范（唯一真源，v1.16.0） |
 | `VERSIONS.toml` | **版本唯一真源**：规范 / CLI / 技能包 / 界面四条轴 + 发行 tag 锚 |
 | `CHANGELOG.md` | 仓库与发行的变更日志（每个 tag 冻结的「规范 · CLI · skill · gui」四元组） |
 | `SPEC-CHANGELOG.md` | 格式规范的变更日志（发行 / 兼容视角；细则真源仍是正文《修订记录》） |
@@ -318,11 +318,11 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 
 | 轴 | 当前 | 定义什么契约 | 怎么升 |
 | --- | --- | --- | --- |
-| 规范 `spec` | `1.15.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
-| 实现 `cli` | `0.8.1` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
-| 技能包 `skill` | `0.5.1` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
-| 界面 `gui` | `0.5.2` | 图形界面契约（crate `str-gui`） | 修复 / 文案 → patch；新功能 / 新视图 → minor；交互或写入行为不兼容 → major |
-| **发行 tag** | `v0.8.1` | 把上面四者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
+| 规范 `spec` | `1.16.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
+| 实现 `cli` | `0.9.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
+| 技能包 `skill` | `0.6.0` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
+| 界面 `gui` | `0.6.0` | 图形界面契约（crate `str-gui`） | 修复 / 文案 → patch；新功能 / 新视图 → minor；交互或写入行为不兼容 → major |
+| **发行 tag** | `v0.9.0` | 把上面四者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
 
 - **唯一需要工具显式支持的只有 `str` 主版本号**（当前 `1`）；`spec` 供人类追溯 —— 见规范 §13。
 - **门禁**：`bash scripts/check-versions.sh` 逐点比对「真源 ↔ 各声明点」（正文头部、`._meta`、
