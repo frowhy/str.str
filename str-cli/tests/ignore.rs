@@ -119,7 +119,7 @@ fn gitignore_exempts_unregistered_entries() {
 
     // sync 不补登被忽略条目
     let bundle = Bundle::new(root.to_path_buf()).unwrap();
-    str_format::cmd::sync(&root, false).unwrap();
+    str_format::cmd::sync(&root, false, true).unwrap();
     let scan = bundle.scan().unwrap();
     let a = scan.resolve(A).unwrap();
     let meta = scan.visits[a].meta.as_ref().unwrap();

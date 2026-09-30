@@ -153,6 +153,9 @@ enum Cmd {
         /// 只显示将要发生的变更
         #[arg(long)]
         dry_run: bool,
+        /// 显式确认本次对账（移除条目数达到门禁 10 时必须提供，否则拒绝执行）
+        #[arg(long)]
+        yes: bool,
     },
     /// 按规范键序 / 表序重写 `._meta`（保注释）
     Fmt {
@@ -880,8 +883,8 @@ fn dispatch(cmd: Cmd) -> Result<i32> {
                 Ok(0)
             }
         },
-        Cmd::Sync { dir, dry_run } => {
-            cmd::sync(&dir, dry_run)?;
+        Cmd::Sync { dir, dry_run, yes } => {
+            cmd::sync(&dir, dry_run, yes)?;
             Ok(0)
         }
         Cmd::Fmt {

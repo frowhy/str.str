@@ -471,7 +471,7 @@ fn spec_set_rewrites_whole_bundle_and_is_idempotent() {
 #[test]
 fn branch_rm_accepts_recursive_and_cleans_baseline() {
     let (root, aaa, _) = two_nodes("rmrecursive");
-    cmd::sync(&root, false).unwrap();
+    cmd::sync(&root, false, true).unwrap();
     let bundle = Bundle::new(root.clone()).unwrap();
     assert!(str_format::baseline::load(&bundle).branches.contains_key(&aaa));
 
@@ -504,7 +504,7 @@ fn metadata_stays_parsable_after_writes() {
 #[test]
 fn revision_stale_uses_written_baseline() {
     let (root, aaa, _) = two_nodes("revhistory");
-    cmd::sync(&root, false).unwrap();
+    cmd::sync(&root, false, true).unwrap();
     assert_eq!(report(&root).0, 0);
 
     // 绕过 CLI 改 `updated_at` 而不推进 `revision`
@@ -520,7 +520,7 @@ fn revision_stale_uses_written_baseline() {
     );
 
     // `str sync` 不得把刚犯下的违规洗白
-    cmd::sync(&root, false).unwrap();
+    cmd::sync(&root, false, true).unwrap();
     let codes = report(&root).2;
     assert!(
         codes.contains(&"E_REVISION_STALE".to_string()),
@@ -544,7 +544,7 @@ fn revision_stale_uses_written_baseline() {
     assert_eq!(report(&root).0, 0, "revision 前进后应恢复干净");
 
     // 基线随之推进
-    cmd::sync(&root, false).unwrap();
+    cmd::sync(&root, false, true).unwrap();
     let bundle = Bundle::new(root.clone()).unwrap();
     let snap = str_format::baseline::load(&bundle);
     assert_eq!(snap.branches.get(&aaa).map(|s| s.revision), Some(2));

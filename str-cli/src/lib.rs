@@ -26,7 +26,7 @@ pub mod validate;
 /// 本实现对应的 `str` 格式主版本。
 pub const STR_MAJOR: i64 = 1;
 /// 本实现对应的规范版本。
-pub const SPEC_VERSION: &str = "1.15.0";
+pub const SPEC_VERSION: &str = "1.16.0";
 /// 本 crate（`str-format` 库 / `str` CLI）自身的版本。
 pub const LIB_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 内嵌的三种档位 JSON Schema（bundle 未自带 `._schema/` 时的兜底）。

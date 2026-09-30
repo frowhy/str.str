@@ -243,7 +243,8 @@ pub fn validate(dir: &Path, strict: bool, json: bool, fix_manifest: bool) -> Res
     let bundle = open(dir)?;
     if fix_manifest {
         // 规范 §9：`--fix-manifest` 是「校验前先修正清单」——必须**真正写盘**。
-        sync(dir, false)?;
+        // 属显式修复意图，豁免 sync 的批量删除门禁（软连接条目本就不在对账范围）。
+        sync(dir, false, true)?;
     }
     let mut report = crate::validate::validate(&bundle)?;
     if strict {
@@ -1673,12 +1674,27 @@ pub fn spec_set(dir: &Path, version: &str, dry_run: bool) -> Result<()> {
 
 // ─────────────────────────── sync ───────────────────────────
 
+/// `sync` 未显式确认（`--yes`）时允许直接移除的条目数上限；
+/// 达到即拒绝执行，要求先 `--dry-run` 预览或 `--yes` 确认（规范 §9）。
+pub const SYNC_REMOVE_GATE: usize = 10;
+
 /// 用磁盘实际状态修正全部 `entries`，并更新 `size` / `sha256`。
-pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
+///
+/// 规范 §4.6.1 规则 1：软连接（`role = "link"` 且非 `mode = "hard"`）是声明式挂载、
+/// 磁盘上**没有**对应目录（`path` 即目标分支 id，位于 bundle 其它位置），
+/// **不参与清单比对** —— 本命令同样不得将其视为「已消失」而移除。
+///
+/// 删除类变更必须醒目（规范 §9）：
+/// - 移除条目数 > 0 时输出 `WARN:` 汇总行（dry-run 亦然）；
+/// - 移除条目数 ≥ [`SYNC_REMOVE_GATE`] 且未带 `--yes`（非 dry-run）时拒绝执行，
+///   杜绝「0 errors 0 warnings 但批量删除条目」的静默破坏。
+pub fn sync(dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let bundle = open(dir)?;
     let scan = bundle.scan()?;
     let mut changed = 0usize;
     let mut planned: Vec<String> = Vec::new();
+    let mut removals = 0usize;
+    let mut writes: Vec<(PathBuf, Meta)> = Vec::new();
 
     for v in &scan.visits {
         if v.meta.is_none() {
@@ -1737,10 +1753,18 @@ pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
 
         // 移除已消失的条目 + 刷新指纹
         for e in &declared {
+            // 规范 §4.6.1 规则 1：软连接是声明式挂载、磁盘上没有对应目录
+            // （`path` = 目标分支 id，位于 bundle 其它位置），不参与清单比对 ——
+            // 绝不能因「磁盘不存在」而移除。硬链接（`mode = "hard"`）目录真实存在，
+            // 目录缺失照常按「已消失」对账（受下方告警 / 门禁保护）。
+            if e.is_link() && e.mode.as_deref() != Some("hard") {
+                continue;
+            }
             let path = dir_path.join(&e.path);
             if !path.exists() {
                 if !e.optional {
                     planned.push(format!("- {rel}/{}", e.path));
+                    removals += 1;
                     work.remove_entry_path(&e.path);
                     touched = true;
                 }
@@ -1768,24 +1792,39 @@ pub fn sync(dir: &Path, dry_run: bool) -> Result<()> {
             work.sort_collections();
             work.touch();
             changed += 1;
-            if !dry_run {
-                work.save(&bundle.meta_path(&dir_path))?;
-            }
+            writes.push((bundle.meta_path(&dir_path), *work));
         }
     }
 
     for line in &planned {
         println!("{line}");
     }
+    // 删除类变更必须醒目：只要发生移除就打 WARN 汇总（规范 §9）。
+    if removals > 0 {
+        println!("WARN: 本次对账将移除 {removals} 个条目（上方以 `-` 列出）");
+    }
+
+    // 批量删除门禁：达到阈值且未显式确认时拒绝执行、一字不写。
+    if !dry_run && removals >= SYNC_REMOVE_GATE && !yes {
+        return Err(Error::Other(format!(
+            "拒绝执行：本次对账将移除 {removals} 个条目（≥ 门禁 {SYNC_REMOVE_GATE}）。\
+             先用 `str sync {} --dry-run` 预览，确认后加 `--yes` 显式执行",
+            dir.display()
+        )));
+    }
+
     if dry_run {
         println!("（dry-run）将更新 {changed} 份 `._meta`");
-    } else {
-        // `sync` 是「与磁盘对齐」的总入口：顺手把 `E_REVISION_STALE` 的基线刷成当前状态。
-        if let Ok(after) = bundle.scan() {
-            crate::baseline::record_scan(&bundle, &after);
-        }
-        println!("已更新 {changed} 份 `._meta`");
+        return Ok(());
     }
+    for (path, work) in writes {
+        work.save(&path)?;
+    }
+    // `sync` 是「与磁盘对齐」的总入口：顺手把 `E_REVISION_STALE` 的基线刷成当前状态。
+    if let Ok(after) = bundle.scan() {
+        crate::baseline::record_scan(&bundle, &after);
+    }
+    println!("已更新 {changed} 份 `._meta`");
     Ok(())
 }
 

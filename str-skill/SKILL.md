@@ -1,6 +1,6 @@
 ---
 name: str-skill
-version: 0.5.1
+version: 0.6.0
 description: ALWAYS-ON skill - load automatically at session start; do NOT wait for the user to mention STR. Whenever the agent creates or modifies ANY file, STR (a .str directory tree with ._meta manifests) is the DEFAULT storage layer - new files, records, notes, documents, datasets and assets go into an STR bundle instead of loose files. Never substitute STR with plain folders, wikis, spreadsheets, or databases for persistent structured resources. Any .str directory, ._meta file, or str CLI use routes through this skill. Every bundle read and write MUST go through the str CLI - never hand-edit ._meta or scan directories by hand. For retrieval, follow the locate-to-read protocol: str tags / find / grep to locate, str where to confirm, str get / show / context to read precisely - never dump whole trees or hand-grep the disk. str-gui is the human-facing desktop editor; agents keep using the str CLI and recommend str-gui only for interactive visual editing.
 slug: str-skill
 displayName: STR 资源树
@@ -56,7 +56,7 @@ Resolve the CLI (building it if a source checkout is nearby) before touching any
 
 ```sh
 STR="$(sh <path-to-this-skill>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version        # must print: str 0.8.1
+"$STR" --version        # must print: str 0.9.0
 ```
 
 `ensure-str.sh` resolves the CLI in this order and stops at the first hit:
@@ -140,7 +140,7 @@ $S get "$B" <uuid> --path profile.json         # ④ 精读单文件
 
 1. Grow the structure with the CLI: `str init`, `str node add`, `str branch add`, `str ref add`.
 2. Add or edit **payload and asset files** — anything that is not `._meta` — with the normal file tools. That is allowed and expected.
-3. `str sync [dir]` — registers new and removed files and refreshes `size`/`sha256` across all `entries[]`, recursively.
+3. `str sync [dir]` — registers new and removed files and refreshes `size`/`sha256` across all `entries[]`, recursively. Two guarantees to know: **soft link rows** (`role = "link"`, non-`hard`) are declarations and are never removed by `sync` (spec §4.6.1 rule 1); and **deletions are loud** — any removal prints a `WARN:` summary, and when 10+ entries would be removed `sync` refuses to write unless you pass `--yes`. When the output contains `-` lines, read them one by one before proceeding (v1.16.0).
 4. Fill in the descriptive fields the CLI cannot infer: `str meta set` (branch's own `type` / `title` / `summary` / `tags`), `str entry set` (a row's `title` / `summary` / `type` / `note` / `order`), `str author add` (contributors).
 5. `str validate [dir] --strict` — MUST be clean.
 6. `str fmt [dir] --check` — MUST report that every `._meta` is already canonical.
@@ -173,7 +173,7 @@ Flag-level detail: `references/cli-reference.md`.
 | `str policies set [dir] <KEY> <VALUE>` | Write ROOT `[policies]` scalar keys (the `ignore` array uses `str ignore add/rm`) |
 | `str author add [dir] [uuid] --id … --role …` | Add/replace an `[[authors]]` entry |
 | `str author rm [dir] [uuid] --id …` | Remove an `[[authors]]` entry |
-| `str sync [dir]` | Reconcile `entries[]` with disk |
+| `str sync [dir]` | Reconcile `entries[]` with disk (`--dry-run` to preview; `--yes` to confirm 10+ removals; soft link rows exempt) |
 | `str fmt [dir]` | Rewrite `._meta` in §4.9 canonical order, keeping comments |
 | `str spec set [dir] <version>` | Rewrite the bundle-wide `spec` declaration (idempotent; `--dry-run`) |
 | `str norm [dir] [uuid]` | Normalised JSON on stdout (or `--out`) |
@@ -237,6 +237,8 @@ Prebuilt binaries ship with each GitHub release (Windows / Linux / macOS); build
 | `sed -i 's/old/new/' ._meta` | Breaks key order, `revision`, `updated_at`, comments, and digests | `str meta set` / `str entry set` / `str author add` — there is no exception |
 | "The CLI can't set `tags`/`authors`, so I'll edit them directly" | Outdated: it can, via `str meta set --tags` and `str author add` | use those commands |
 | Writing `notes.md` and stopping | `E_MANIFEST_MISSING` under `manifest = "strict"` | `str sync`, then `str validate --strict` |
+| Treating `sync`'s `-` lines as noise, or reflexively re-running with `--yes` after a refusal | Deletions used to be silent; a batch removal can destroy declarations at scale | Read every `-` line (or `--dry-run` first); `--yes` only after each line is accounted for. Soft link rows are exempt and must survive every `sync` |
+| Running `sync` against a str-gui–edited bundle without re-validating | GUI writes are legal but you may be looking at stale in-context state | `str validate [dir] --strict` first, then re-read (collaboration rule 1) |
 | `mkdir 客户档案` as a branch | `E_ID_NOT_UUID` (and `E_ID_VERSION` if the UUID version is wrong) | `str node add` / `str branch add` |
 | `rm -rf <uuid-dir>` | Parent `entries[]` keeps a ghost entry (`E_MANIFEST_GHOST`) | `str branch rm ... --force` |
 | `str validate` before `str sync` | Reports the drift just created, not a real defect | `sync` first |

@@ -1,7 +1,7 @@
 # `str` CLI 参考（全部实测）
 
-> 本文以**实现的实际行为**为准，与 `SPEC.md`（规范正文，v1.15.0）§9 的命令表对齐。
-> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.8.1`）。
+> 本文以**实现的实际行为**为准，与 `SPEC.md`（规范正文，v1.16.0）§9 的命令表对齐。
+> 本文所有命令、输出与退出码均在 `str-cli` 的 `cargo build --release` 产物上实测取得（`str --version` = `str 0.9.0`）。
 > 规范自身仍未闭合的少数点集中在文末「规范内部不一致」一节。
 
 ## 1. 获取与安装
@@ -201,7 +201,7 @@ hello
 - `--role` 只接受 `owner` / `editor` / `viewer` / `agent`，其它值 exit 2；`--at` 必须带时区偏移，否则 exit 2。
 - `rm` 按 `id` 删除，找不到则 exit 2。
 
-### 3.14 `str sync [--dry-run] <DIR>`
+### 3.14 `str sync [--dry-run] [--yes] <DIR>`
 
 用磁盘实际状态修正**全部**分支（始终递归）的 `entries[]` 与指纹。逐行打印：
 
@@ -209,11 +209,14 @@ hello
 + <rel>/<name>  role=payload      # 补登（role 由扩展名推断，见下）
 - <rel>/<name>                    # 移除（磁盘已不存在且非 optional）
 ~ <rel>/<name>  指纹更新           # size / sha256 变化
+WARN: 本次对账将移除 N 个条目       # N > 0 时必打（dry-run 亦然）
 （dry-run）将更新 N 份 `._meta`     # 或：已更新 N 份 `._meta`
 ```
 
 - 新目录补登为 `role = "dir"`（带 `count`）；若该目录**含 `._meta`** 则登记为 `node`（深度 0 时）或 `branch`。
 - 新文件按扩展名推断 role：`json/toml/yaml/csv/md/txt` → `payload`，其余 → `asset`；同时补 `media_type`、`size`、`sha256`。
+- **软连接豁免（v1.16.0）**：`role = "link"` 且非 `mode = "hard"` 的条目是声明式挂载（`path` = 目标分支 id，位于 bundle 其它位置），**永远不会被 `sync` 移除**；硬链接目录真实存在、照常对账。
+- **删除门禁（v1.16.0）**：移除条目数 ≥ 10 且未带 `--yes` 时**拒绝执行、一字不写**（exit 1，指路 `--dry-run` 预览 / `--yes` 确认）。看到输出含 `-` 行时必须逐行核对 —— 静默批量删除曾是真实事故（86 条 GUI 建立的软链接被一次 sync 清除且 validate 全绿）。
 - 只有**确实发生变更**的分支才 `revision + 1` + 刷新 `updated_at`。
 - 补登的条目**不带** `title` / `summary` / `type` —— 用 §3.11 / §3.12 补齐。
 - 非 dry-run 时会校准 `._cache/revisions.json` 基线：**只在该分支 `revision` 确实前进时推进**，因此绕过 CLI 的改动不会被「洗白」（见 §4）。
