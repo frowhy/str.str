@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use slint::{Model, ModelRc, SharedString, VecModel, Weak};
 use str_format::bundle::{Bundle, Scan, Visit};
-use str_format::meta::{Entry, Kind, Meta, MetaLoad};
+use str_format::meta::{Entry, Kind, Meta, MetaLoad, RefItem};
 use str_format::meta_edit;
 use str_format::util;
 use str_format::validate;
@@ -71,10 +71,10 @@ struct VisibleRow {
     has_children: bool,
     /// 是否含内容条目（`node` / `branch` 之外）：控制「展开 / 收起内容」可用性。
     has_entries: bool,
-    /// 软连接挂载行（规范 §4.6.1）：本行是挂载进来的视图，身份 = 目标分支。
+    /// 软链接挂载行（规范 §4.6.1）：本行是挂载进来的视图，身份 = 目标分支。
     /// 硬链接行也是挂载行形态（身份 = 目标），以 `hard` 区分。
     mounted: bool,
-    /// 硬链接行（表现与软连接一致：身份 / 信息 / 内容 = 目标，内容只读），
+    /// 硬链接行（表现与软链接一致：身份 / 信息 / 内容 = 目标，内容只读），
     /// 额外渲染**自有子分支**（见 `link_visit`）。
     hard: bool,
     /// 挂载点所在分支（真实行 = None），供「移除挂载」定位要摘的 `entries[]` 行。
@@ -89,8 +89,8 @@ struct VisibleRow {
 
 /// 挂载子分支（`role = "link"`）的解析结果：目标 visit 下标 + 挂载点别名。
 ///
-/// 软连接（`hard = false`）：目标的完整视图，身份 = 目标。
-/// 硬链接（`hard = true`）：**表现与软连接一致**（身份 = 目标：点行选中真身、
+/// 软链接（`hard = false`）：目标的完整视图，身份 = 目标。
+/// 硬链接（`hard = true`）：**表现与软链接一致**（身份 = 目标：点行选中真身、
 /// 信息 / 内容 / 展开态都指向目标、渲染目标的子树），仅多两件事 —— ① 在自身
 /// 之下渲染**自有子分支**（`link_idx` = 自身分支 visit，`path = id` 的真实分支），
 /// 新建子分支落自有结构；② 内容只读（`sel_hard` 守卫）。
@@ -99,7 +99,7 @@ struct MountChild {
     visit: usize,
     title: Option<String>,
     hard: bool,
-    /// 硬链接自身分支的 visit（自有子结构的磁盘父级）；软连接为 None。
+    /// 硬链接自身分支的 visit（自有子结构的磁盘父级）；软链接为 None。
     link_idx: Option<usize>,
 }
 
@@ -110,7 +110,7 @@ struct Editor {
     /// 子分支索引（见 `children_index`）：随 scan 一起建立，供行构建 / 导图布局
     /// 按节点 O(1) 取用。
     kids: Vec<Vec<usize>>,
-    /// 软连接挂载索引（见 `mount_index`）：父分支 → 挂载进来的子分支（规范 §4.6.1）。
+    /// 软链接挂载索引（见 `mount_index`）：父分支 → 挂载进来的子分支（规范 §4.6.1）。
     /// 与 `kids` 平行、随 scan 一起重建。
     mounts: Vec<Vec<MountChild>>,
     rows: Vec<VisibleRow>,
@@ -857,7 +857,7 @@ fn children_index(scan: &Scan) -> Vec<Vec<usize>> {
 /// 挂载索引（规范 §4.6.1）：父分支 visit 下标 → 其挂载的子分支，按 `entries[]`
 /// 顺序排列。目标经 `Scan::resolve` 解析；解析不到（悬空）、目标是 ROOT、或 id
 /// 重复（无法唯一指向）的挂载一律跳过 —— 校验器会另行报错。
-/// 硬链接同样进本索引（表现与软连接一致，身份 = 目标）；`link_idx` = 自身分支
+/// 硬链接同样进本索引（表现与软链接一致，身份 = 目标）；`link_idx` = 自身分支
 /// visit（自有子结构的挂载点）。目标悬空的硬链接降级为 `visit = link_idx`
 /// （显示自身 meta，内容为空），避免整行消失。
 fn mount_index(scan: &Scan) -> Vec<Vec<MountChild>> {
@@ -902,7 +902,7 @@ fn mount_index(scan: &Scan) -> Vec<Vec<MountChild>> {
     out
 }
 
-/// 软连接成环预检（与 CLI `link_add` / 校验器 `check_link_cycles` 同源）。
+/// 软链接成环预检（与 CLI `link_add` / 校验器 `check_link_cycles` 同源）。
 ///
 /// 图的边集 = **真实父子边**（父 → 子）∪ **挂载边**（挂载点 → 目标）。沿这个图从
 /// 目标出发能走到自己 ⇒ 渲染会无限递归。注意「挂进祖先」正因此而按环拒绝
@@ -949,16 +949,22 @@ fn link_would_cycle(scan: &Scan, src: usize, dst: usize) -> bool {
     false
 }
 
-/// 挂载目标的**禁选集合**（visit 下标）：ROOT、自身与祖先（挂进祖先 = 环）、
-/// id 重复或缺失者。硬链接目标不限（1.15.0 撤回「不得挂载自己的后代」：硬链接
-/// 不渲染目标结构、内容只读，目标位于挂载点子树内不产生自嵌套）。
-fn mount_banned(e: &Editor, _hard: bool) -> HashSet<usize> {
+/// 挂载 / 关联目标的**禁选集合**（visit 下标）：ROOT、id 重复或缺失者。
+/// 模式 `0`/`1`（软 / 硬挂载）再排除自身与祖先（挂进祖先 = 环）；硬链接目标
+/// 不限后代（1.15.0 撤回「不得挂载自己的后代」：硬链接不渲染目标结构、内容
+/// 只读，目标位于挂载点子树内不产生自嵌套）。模式 `2`（关联线 `refs[]`）只排除
+/// 自身——自关联非法（规范 §4.5），指向祖先 / 后代均合法（环判定只沿 `refs`
+/// 边，由校验器 `E_REF_CYCLE` 兜底）。
+fn mount_banned(e: &Editor, mode: i32) -> HashSet<usize> {
     let Some(scan) = e.scan.as_ref() else {
         return HashSet::new();
     };
     let mut banned: HashSet<usize> = HashSet::new();
     if let Some(src_idx) = e.selected_idx_in_visits() {
-        banned.extend(scan.ancestors(src_idx));
+        banned.insert(src_idx);
+        if mode != 2 {
+            banned.extend(scan.ancestors(src_idx));
+        }
     }
     if let Some(root) = scan.root_index {
         banned.insert(root);
@@ -980,11 +986,12 @@ fn mount_banned(e: &Editor, _hard: bool) -> HashSet<usize> {
 
 /// 挂载对话框的**逐行可选标记**（与选择器行模型平行，`sync_ui` 填进
 /// `BranchRow.pickable`）：候选 = 选择器可见行 ∩ 非禁选。
-fn mount_pickables(e: &Editor, hard: bool, rows: &[VisibleRow]) -> Vec<bool> {
+/// `mode`：0 = 软链接、1 = 硬链接、2 = 关联线（refs）。
+fn mount_pickables(e: &Editor, mode: i32, rows: &[VisibleRow]) -> Vec<bool> {
     if e.selected_idx_in_visits().is_none() {
         return vec![false; rows.len()];
     }
-    let banned = mount_banned(e, hard);
+    let banned = mount_banned(e, mode);
     rows.iter().map(|r| !banned.contains(&r.visit)).collect()
 }
 
@@ -1005,7 +1012,13 @@ fn row_content_px(depth: usize, title: &str, type_str: &str) -> f32 {
         + 6.0
 }
 
-fn branch_row_of(e: &Editor, r: &VisibleRow, pickable: bool) -> BranchRow {
+fn branch_row_of(
+    e: &Editor,
+    r: &VisibleRow,
+    pickable: bool,
+    ref_marks: &std::collections::HashSet<usize>,
+    spine_marks: &std::collections::HashSet<usize>,
+) -> BranchRow {
     BranchRow {
         visit: r.visit as i32,
         title: r.title.clone().into(),
@@ -1025,6 +1038,8 @@ fn branch_row_of(e: &Editor, r: &VisibleRow, pickable: bool) -> BranchRow {
             .as_deref()
             .zip(e.scan.as_ref())
             .is_some_and(|(key, scan)| visit_key(scan, r.visit) == key),
+        ref_mark: ref_marks.contains(&r.visit),
+        parent_mark: !ref_marks.contains(&r.visit) && spine_marks.contains(&r.visit),
         expanded: r.expanded,
         has_children: r.has_children,
         has_entries: r.has_entries,
@@ -1180,7 +1195,7 @@ fn rel_index(scan: &Scan) -> HashMap<String, usize> {
         .collect()
 }
 
-/// 行的呈现形态：真实位置，或挂载进来的视图（软连接 / 硬链接）。
+/// 行的呈现形态：真实位置，或挂载进来的视图（软链接 / 硬链接）。
 enum RowDisplay {
     Real,
     /// 挂载视图（软 / 硬）：身份 = 目标分支（点行选中真身、展开态与真身共享）。
@@ -1191,11 +1206,11 @@ enum RowDisplay {
 
 /// 递归渲染一个分支及其子树（真实孩子 + 链接挂载的孩子）。
 ///
-/// 软连接挂载行（`mounted = true`）的身份 = 目标分支（`visit` 即目标下标，点行 =
+/// 软链接挂载行（`mounted = true`）的身份 = 目标分支（`visit` 即目标下标，点行 =
 /// 选中真身，symlink 语义），渲染目标的整棵子树；硬链接行（`hard = true`）**仅内容
 /// 关联**：呈现为带「≡」识别标识的可展开真实分支（不渲染目标的子分支、内容只读）。
 /// 两种挂载行的展开态 / 身份都按目标分支的 rel 记账，与真实位置共享。
-/// **防环守卫**：`path` 是当前渲染链上的分支集合 —— 软连接目标已在链上（挂进自己的
+/// **防环守卫**：`path` 是当前渲染链上的分支集合 —— 软链接目标已在链上（挂进自己的
 /// 祖先 / 自身 / 互相挂载）就不再展开，否则无限递归（校验器 `E_LINK_CYCLE` 会报，
 /// 但 GUI 必须能安全打开**非法** bundle）。
 fn dfs_rows(
@@ -1255,9 +1270,9 @@ fn emit_branch(
         mounts.get(idx).map(|v| v.as_slice()).unwrap_or_default();
     // 硬链接分支（§4.6.1 `mode = "hard"`）：`hard_link_to` 标记其内容视图语义 ——
     // 有自己的身份与子分支（正常展开），内容面板显示目标内容且只读（`hard = true`
-    // 仅供守卫与标识用）。软挂载行（Mounted）恒为软连接（hard 已由真实分支承担）。
+    // 仅供守卫与标识用）。软挂载行（Mounted）恒为软链接（hard 已由真实分支承担）。
     // 硬链接分支（§4.6.1 `mode = "hard"`）不以普通子分支行出现：它的行是**挂载行
-    // 形态**（身份 = 目标，表现与软连接一致），由挂载父分支的递归经 mounts 渲染。
+    // 形态**（身份 = 目标，表现与软链接一致），由挂载父分支的递归经 mounts 渲染。
     if matches!(display, RowDisplay::Real) && visit.hard_link_to.is_some() {
         return;
     }
@@ -1267,7 +1282,7 @@ fn emit_branch(
         // 身份都是目标 —— 点行选中真身、展开态与真身共享；前缀只在行标题上，
         // `visit_title`（真身标题，状态栏 / 对话框用）保持干净。
         RowDisplay::Mounted { alias, parent, hard, link_idx } => (
-            // mounted 标记只给软连接（「移除挂载」走 unmount）；硬链接走
+            // mounted 标记只给软链接（「移除挂载」走 unmount）；硬链接走
             // delete-branch + op-visit（摘引用 + 删自有目录）。
             !*hard,
             *hard,
@@ -1366,7 +1381,7 @@ fn emit_branch(
         }
     }
     // 硬链接行：自有子分支渲染在目标子树之后（新建子分支落自有结构，在这里可见）；
-    // 可见性跟随行本身（= 目标的展开键），与软连接同款。
+    // 可见性跟随行本身（= 目标的展开键），与软链接同款。
     if let Some(li) = link_idx {
         path.push(li);
         for &c in kids.get(li).map(|v| v.as_slice()).unwrap_or_default() {
@@ -1486,6 +1501,9 @@ struct MindOut {
     edge_chunks: Vec<MindEdgeChunk>,
     /// 小地图连线：整图一条 Path（缩略图必须显示全图，无需分块）。
     mini_edge_chunks: Vec<MindEdgeChunk>,
+    /// refs 关联线（§4.5）：虚线 + 标签，逐条渲染（数量级远小于父子边）。
+    /// 只画两端都在当前布局里的关联 —— 折叠 / 离屏实例没有坐标可锚。
+    ref_edges: Vec<RefEdge>,
     w: f32,
     h: f32,
     /// 画布右缘为「外置子树按钮」预留的横向占位（有子分支的节点才留，否则 0）。
@@ -1822,6 +1840,7 @@ fn mind_layout(e: &Editor) -> MindOut {
         mini_edges: Vec::new(),
         edge_chunks: Vec::new(),
         mini_edge_chunks: Vec::new(),
+        ref_edges: Vec::new(),
         w: 0.0,
         h: 0.0,
         edge_offset: 0.0,
@@ -1855,7 +1874,7 @@ fn mind_layout(e: &Editor) -> MindOut {
         };
     }
     // 子树带高自深向浅递推。
-    // ⚠ 软连接会打破「孩子深度必大于父」的前提：挂载点（深层）可能挂入浅层目标，
+    // ⚠ 软链接会打破「孩子深度必大于父」的前提：挂载点（深层）可能挂入浅层目标，
     // 而浅层目标的 sub_hs 在深度序里**更晚**才最终化 —— 单趟递推会让挂载点用到
     // 陈旧（偏小）的目标高度，渲染时 `total > band_h` 直接把 `clamp` 崩掉
     // （min > max，真机 SIGABRT）。改为**迭代到不动点**：高度只增不减、有上界
@@ -1955,7 +1974,225 @@ fn mind_layout(e: &Editor) -> MindOut {
     // 连线几何一次算好后合并成 Path：Slint 侧只渲染少量 Path 元素（见 MindEdgeChunk）。
     out.edge_chunks = canvas_edge_chunks(&out.edges);
     out.mini_edge_chunks = mini_edge_chunks(&out.mini_edges);
+    out.ref_edges = build_ref_edges(e, &out.nodes);
+    // 注意：节点 `ref_mark`（选中驱动高亮）**不在这里算** —— 布局缓存签名与
+    // 选中无关，命中缓存时不会重算；高亮由 sync_ui 在模型刷新时按当前选中
+    // 动态回填（见 sel_ref_marked）。
     out
+}
+
+/// 与**当前选中分支**直接关联的 visit 集合（refs 语义，§4.5）：选中分支的
+/// refs 目标 ∪ 指向选中分支的关联线源分支。用于「选中时高亮关联项」——
+/// 高亮是选中驱动的渲染数据，不进布局缓存签名。
+fn sel_ref_marked(e: &Editor) -> std::collections::HashSet<usize> {
+    let mut marked = std::collections::HashSet::new();
+    let (Some(scan), Some(sel)) = (e.scan.as_ref(), e.selected_idx_in_visits()) else {
+        return marked;
+    };
+    if let Some(m) = scan.visits[sel].meta.as_ref() {
+        for r in &m.refs {
+            if let Some(t) = scan.resolve(&r.target) {
+                marked.insert(t);
+            }
+        }
+    }
+    if let Some(sel_id) = scan.visits[sel].meta.as_ref().and_then(|m| m.id.clone()) {
+        for (i, v) in scan.visits.iter().enumerate() {
+            if let Some(m) = v.meta.as_ref() {
+                if m.refs.iter().any(|r| r.target == sel_id) {
+                    marked.insert(i);
+                }
+            }
+        }
+    }
+    marked
+}
+
+/// 关联线管理对话框的行模型（双向）：正向 = 当前选中分支 `refs[]` 指向的
+/// 其它分支；反向 = 其它分支 `refs[]` 指向本分支（被关联项同样可见、可管理，
+/// 反向行的修改 / 删除落在**源分支** meta 上）。
+fn collect_ref_rows(e: &Editor) -> (Vec<RefRow>, String) {
+    let Some(scan) = e.scan.as_ref() else {
+        return (Vec::new(), String::new());
+    };
+    let Some(idx) = e.selected_idx_in_visits() else {
+        return (Vec::new(), String::new());
+    };
+    let visit = &scan.visits[idx];
+    let title = visit_title(visit);
+    let sel_id = visit.meta.as_ref().and_then(|m| m.id.clone());
+    let mut rows: Vec<RefRow> = Vec::new();
+    if let Some(m) = visit.meta.as_ref() {
+        for r in &m.refs {
+            let peer = scan
+                .resolve(&r.target)
+                .map(|i| visit_title(&scan.visits[i]))
+                .unwrap_or_else(|| format!("（未解析：{}）", r.target));
+            rows.push(make_ref_row(r, false, peer));
+        }
+    }
+    if let Some(sel_id) = sel_id {
+        for (i, v) in scan.visits.iter().enumerate() {
+            if i == idx {
+                continue;
+            }
+            if let Some(m) = v.meta.as_ref() {
+                for r in &m.refs {
+                    if r.target == sel_id {
+                        rows.push(make_ref_row(r, true, visit_title(v)));
+                    }
+                }
+            }
+        }
+    }
+    (rows, title)
+}
+
+fn make_ref_row(r: &RefItem, incoming: bool, peer: String) -> RefRow {
+    RefRow {
+        id: r.id.clone().into(),
+        target_title: peer.into(),
+        rel: r.rel.clone().into(),
+        label: r.title.clone().unwrap_or_default().into(),
+        incoming,
+    }
+}
+
+/// **关联项的祖先链**（父级）：父级高亮用（非常淡的一档）。
+///
+/// 语义 = 取 refs 关联项集合（[`sel_ref_marked`]）中每个分支的祖先链 ——
+/// 尤其是导图视图下目标分支被**折叠**（不在布局内、关联线画不出来）时，
+/// 淡高亮的祖先链能指出「关联项藏在哪个分支下」。**选中分支自身的祖先链
+/// （含 ROOT）整条排除** —— 那是「我在哪」的导航语义，不与关联高亮混色；
+/// ROOT 只在它**直接就是关联项**（ROOT 的 refs 指向选中分支）时走强高亮
+/// （`sel_ref_marked` 已收录）。关联项自身同样不入淡链（走强高亮）。
+fn sel_spine_marks(e: &Editor) -> std::collections::HashSet<usize> {
+    let mut set = std::collections::HashSet::new();
+    let ref_set = sel_ref_marked(e);
+    if ref_set.is_empty() {
+        return set;
+    }
+    let (Some(scan), Some(sel)) = (e.scan.as_ref(), e.selected_idx_in_visits()) else {
+        return set;
+    };
+    // 选中分支自身的完整祖先链（含 ROOT 与自身）：整条排除。
+    let own: std::collections::HashSet<usize> = scan.ancestors(sel).into_iter().collect();
+    for idx in &ref_set {
+        for a in scan.ancestors(*idx) {
+            if own.contains(&a) || ref_set.contains(&a) {
+                continue;
+            }
+            set.insert(a);
+        }
+    }
+    set
+}
+
+/// 导图上的 refs 关联线（规范 §4.5）：两端**锚定在节点矩形边界**（从中心连线
+/// 与矩形边的交点出发，而不是穿过节点内部 —— 中心连线会被节点层盖住，只在
+/// 节点间隙露出一小截，几乎不可见），中点放标签（ref 的 `title`，缺省用 `rel`）。
+/// 同一对节点的多条关联线互相重叠 —— 可接受（标签相同；管理入口在右键「关联线…」）。
+fn build_ref_edges(e: &Editor, nodes: &[MindNode]) -> Vec<RefEdge> {
+    let Some(scan) = e.scan.as_ref() else {
+        return Vec::new();
+    };
+    let pos: std::collections::HashMap<usize, (f32, f32, f32, f32)> = nodes
+        .iter()
+        .map(|n| (n.visit as usize, (n.x, n.y, n.w, n.h)))
+        .collect();
+    let mut out = Vec::new();
+    for n in nodes {
+        let Some(meta) = scan
+            .visits
+            .get(n.visit as usize)
+            .and_then(|v| v.meta.as_ref())
+        else {
+            continue;
+        };
+        for r in &meta.refs {
+            let Some(t_idx) = scan.resolve(&r.target) else {
+                continue;
+            };
+            if t_idx == n.visit as usize {
+                continue;
+            }
+            let Some(&(tx, ty, tw, th)) = pos.get(&t_idx) else {
+                continue;
+            };
+            let label = r.title.clone().unwrap_or_else(|| r.rel.clone());
+            let mut edge = make_ref_edge((n.x, n.y, n.w, n.h), (tx, ty, tw, th), &label);
+            edge.src_visit = n.visit;
+            edge.dst_visit = t_idx as i32;
+            out.push(edge);
+        }
+    }
+    out
+}
+
+/// 从矩形中心射向外部点 `(tx, ty)` 的线段与矩形边界的交点（关联线的出 / 入锚点）。
+fn rect_exit_point(x: f32, y: f32, w: f32, h: f32, tx: f32, ty: f32) -> (f32, f32) {
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (dx, dy) = (tx - cx, ty - cy);
+    if dx.abs() < f32::EPSILON && dy.abs() < f32::EPSILON {
+        return (cx, cy);
+    }
+    let mut best = f32::INFINITY;
+    if dx.abs() > f32::EPSILON {
+        best = best.min((w / 2.0) / dx.abs());
+    }
+    if dy.abs() > f32::EPSILON {
+        best = best.min((h / 2.0) / dy.abs());
+    }
+    (cx + dx * best, cy + dy * best)
+}
+
+/// 一条 refs 关联线的几何：沿「源矩形边界 → 目标矩形边界」的中轴直线拆成
+/// 「10px 实 6px 断」的虚线段（Slint Path 无 dasharray 属性），包络盒与命令串
+/// 口径同 `MindEdgeChunk`；标签放在可见段的中点（不会被节点盖住）。
+fn make_ref_edge(
+    src: (f32, f32, f32, f32),
+    dst: (f32, f32, f32, f32),
+    label: &str,
+) -> RefEdge {
+    use std::fmt::Write as _;
+    let (ax, ay) = rect_exit_point(src.0, src.1, src.2, src.3, dst.0 + dst.2 / 2.0, dst.1 + dst.3 / 2.0);
+    let (bx, by) = rect_exit_point(dst.0, dst.1, dst.2, dst.3, src.0 + src.2 / 2.0, src.1 + src.3 / 2.0);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if len > f32::EPSILON {
+        (dx / len, dy / len)
+    } else {
+        (1.0, 0.0)
+    };
+    let (x0, y0) = (ax.min(bx) - 2.0, ay.min(by) - 2.0);
+    let (dash, gap) = (10.0f32, 6.0f32);
+    let mut commands = String::with_capacity(((len / (dash + gap)) as usize + 2) * 32);
+    let mut t = 0.0f32;
+    while t < len {
+        let end = (t + dash).min(len);
+        let _ = write!(
+            commands,
+            "M {:.2} {:.2} L {:.2} {:.2} ",
+            ax + ux * t - x0,
+            ay + uy * t - y0,
+            ax + ux * end - x0,
+            ay + uy * end - y0
+        );
+        t = end + gap;
+    }
+    RefEdge {
+        x: x0,
+        y: y0,
+        w: dx.abs() + 4.0,
+        h: dy.abs() + 4.0,
+        commands: commands.into(),
+        label_x: (ax + bx) / 2.0,
+        label_y: (ay + by) / 2.0,
+        label: label.into(),
+        src_visit: -1,
+        dst_visit: -1,
+        mark: false,
+    }
 }
 
 /// 节点（visit 下标）是否为当前选中分支。
@@ -2317,7 +2554,7 @@ fn mind_dfs(
         Vec::new()
     };
 
-    // 标识字形与结构树同款：软连接「⤷」（目标完整视图）、硬链接「≡」（内容引用）。
+    // 标识字形与结构树同款：软链接「⤷」（目标完整视图）、硬链接「≡」（内容引用）。
     let title = if hard {
         format!("≡ {}", alias.clone().unwrap_or_else(|| visit_title(visit)))
     } else if mounted {
@@ -2358,7 +2595,7 @@ fn mind_dfs(
         let mut cursor = (y - total / 2.0).clamp(lo, hi);
         for (ch, &cb) in children.iter().zip(&bands) {
             path.push(idx);
-            // 挂载进来的孩子（软连接 = 完整视图，标题由 mind_dfs 加「⤷」标识），
+            // 挂载进来的孩子（软链接 = 完整视图，标题由 mind_dfs 加「⤷」标识），
             // 父都记为**挂载声明的真正所在分支**（ch.mount_parent：普通节点 =
             // 本节点；硬链接节点自有结构下 = link 分支 li —— 与 ctx_child_band
             // 的键组合、树侧 emit_branch 的 `parent: li` 一致。此前传 idx（=
@@ -2419,6 +2656,8 @@ fn mind_dfs(
         expand_key: expand_key.clone().into(),
         depth: depth as i32,
         has_entries: has_any_entries,
+        ref_mark: false,
+        parent_mark: false,
         entry_rows: apply_node_entry_rows(e, idx, rows),
     });
 
@@ -4716,7 +4955,7 @@ fn tree_mount_drop_ok(
 
 /// 重挂载：把挂载声明（软 / 硬）从 `mount_parent_idx` 摘下、插入为
 /// `new_parent_idx` 的**第一个子分支**。硬链接的自有目录随挂载点一起搬家
-/// （fs 移动 + kind 随新深度同步）；软连接不动任何磁盘内容。目标分支与数据
+/// （fs 移动 + kind 随新深度同步）；软链接不动任何磁盘内容。目标分支与数据
 /// 始终不动。
 fn mount_move_into_child(
     e: &mut Editor,
@@ -4771,9 +5010,8 @@ fn mount_move_into_child(
     old_meta.save(&bundle.meta_path(&old_parent_dir))
         .map_err(|err| err.to_string())?;
     let mut new_meta = read_meta(&bundle, &new_parent_dir)?;
-    let mut ne = entry;
-    ne.order = Some(first_child_order(&new_meta));
-    new_meta.upsert_entry(&ne);
+    new_meta.upsert_entry(&entry);
+    make_first_branch(&mut new_meta, &entry.path);
     new_meta.touch();
     new_meta.save(&bundle.meta_path(&new_parent_dir))
         .map_err(|err| err.to_string())?;
@@ -4844,14 +5082,36 @@ fn sync_moved_branch_kind(bundle: &Bundle, moved_dir: &Path, role: &str) -> Resu
 /// 的最小 `order` 减一；全无 `order` 时用 1（显示排序中 `None` 视为最大，
 /// 新行仍排最前）。末尾位置由「最后一个子分支的下半区」覆盖，二者合起来
 /// 子分支序列的所有位置都可达。
-fn first_child_order(meta: &Meta) -> i64 {
-    meta.entries
+/// 把 `path` 指定的行落位为**第一个子分支**：移到子分支区（`branch` / `link`）最前，
+/// 并按现行相对顺序对全子分支区重新**连续编号**（0..n-1）。
+///
+/// 为什么不用 `min - 1` 抢位：规范 §4.6 要求 `order` 为 **≥ 0 的整数**，反复
+/// 「移为第一个子分支」会让 `order` 一路减到负值（现场已出现）。重排保持既有
+/// 相对顺序不变，代价只是同区其余行的 `order` 值被规整 —— 排序结果（§4.9 按
+/// `(order, path)`）不受影响。
+fn make_first_branch(meta: &mut Meta, path: &str) {
+    // 摘出目标行（其 `order` 将由重排统一给出）。
+    let item = match meta.entries.iter().position(|en| en.path == path) {
+        Some(i) => meta.entries.remove(i),
+        None => return,
+    };
+    let mut rows: Vec<Entry> = meta
+        .entries
         .iter()
         .filter(|en| en.is_branch() || en.is_link())
-        .filter_map(|en| en.order)
-        .min()
-        .map(|m| m - 1)
-        .unwrap_or(1)
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.order.unwrap_or(i64::MAX), a.path.as_str()).cmp(&(
+            b.order.unwrap_or(i64::MAX),
+            b.path.as_str(),
+        ))
+    });
+    rows.insert(0, item);
+    for (i, en) in rows.iter_mut().enumerate() {
+        en.order = Some(i as i64);
+        meta.upsert_entry(en);
+    }
 }
 
 /// 分支结构移动：把 `src` 分支移入 `target` 分支作为**第一个子分支**
@@ -4895,16 +5155,15 @@ fn branch_move_into_child(e: &mut Editor, src: usize, target: usize) -> Result<S
         .map_err(|err| err.to_string())?;
     // 目标分支登记为第一个子分支（上半区嵌套语义；末尾走最后子分支的下半区）。
     let mut tm = read_meta(&bundle, &target_dir)?;
-    let first_order = first_child_order(&tm);
     tm.upsert_entry(&Entry {
         path: name.clone(),
         role: new_role.to_string(),
         id: src_meta.id.clone(),
         r#type: src_meta.r#type.clone(),
         title: src_meta.title.clone(),
-        order: Some(first_order),
         ..Default::default()
     });
+    make_first_branch(&mut tm, &name);
     tm.touch();
     tm.save(&bundle.meta_path(&target_dir))
         .map_err(|err| err.to_string())?;
@@ -6195,6 +6454,11 @@ fn main() -> Result<(), slint::PlatformError> {
             drop(guard);
             return;
         };
+        // refs 关联项高亮（选中驱动）：与当前选中分支直接关联的节点标 ref_mark；
+        // 父级链（祖先）标 parent_mark（更淡）。每次都算（布局缓存签名与选中
+        // 无关），高亮随选中即时亮 / 灭。
+        let marked = sel_ref_marked(e);
+        let spine = sel_spine_marks(e);
         if fresh {
             // 内容尺寸与节点数必须**先**写回：小地图的映射参数（比例 / 盒尺寸 / 密度
             // 判据）都是 Slint 侧按这几个值算的绑定，晚写就会读到上一轮布局的旧值。
@@ -6213,6 +6477,21 @@ fn main() -> Result<(), slint::PlatformError> {
                 mind.mini_edge_chunks.clone(),
             ))));
         }
+        // refs 关联线模型：**每次都重建**（数量级小）—— mark 随选中变化，而选中
+        // 变化不触发布局重算（不进缓存签名），故不能只在 fresh 分支写。
+        let ref_edges: Vec<RefEdge> = mind
+            .ref_edges
+            .iter()
+            .map(|r| {
+                let mut r2 = r.clone();
+                r2.mark = e
+                    .selected_idx_in_visits()
+                    .map(|s| s as i32 == r.src_visit || s as i32 == r.dst_visit)
+                    .unwrap_or(false);
+                r2
+            })
+            .collect();
+        app.set_mind_ref_edges(ModelRc::from(Rc::new(VecModel::from(ref_edges))));
         // 节点模型尽量原地更新：整体替换会重建所有节点组件，正在显示右键
         // 菜单的那个节点被销毁 → 菜单项点击失效（首次右键选中分支即触发，
         // 与结构树 rows_model 同款问题）。节点数变化时（展开/收起等）才整体替换。
@@ -6221,12 +6500,16 @@ fn main() -> Result<(), slint::PlatformError> {
             Some(handle) if handle.row_count() == mind.nodes.len() => {
                 if fresh {
                     for (i, n) in mind.nodes.iter().enumerate() {
-                        handle.set_row_data(i, n.clone());
+                        let mut n2 = n.clone();
+                        n2.ref_mark = marked.contains(&(n.visit as usize));
+                        n2.parent_mark =
+                            !n2.ref_mark && spine.contains(&(n.visit as usize));
+                        handle.set_row_data(i, n2);
                     }
                 } else {
-                    // 缓存命中：几何不变，只把选中标记与节点内容行数据刷新到位。
-                    // 行模型句柄保持不动（内容行原地更新 → 节点内右键菜单 / 拖拽
-                    // 所在组件不会被销毁）。
+                    // 缓存命中：几何不变，只把选中标记 / 关联高亮与节点内容行数据
+                    // 刷新到位。行模型句柄保持不动（内容行原地更新 → 节点内右键
+                    // 菜单 / 拖拽所在组件不会被销毁）。
                     for (i, n) in mind.nodes.iter().enumerate() {
                         let mut patch: Option<MindNode> = None;
                         let sel = node_is_selected(e, n.visit as usize);
@@ -6238,6 +6521,17 @@ fn main() -> Result<(), slint::PlatformError> {
                         if handle.row_data(i).map(|m| m.is_selected) != Some(sel) {
                             let x = patch.get_or_insert_with(|| n.clone());
                             x.is_selected = sel;
+                        }
+                        let want_mark = marked.contains(&(n.visit as usize));
+                        if handle.row_data(i).map(|m| m.ref_mark) != Some(want_mark) {
+                            let x = patch.get_or_insert_with(|| n.clone());
+                            x.ref_mark = want_mark;
+                        }
+                        let want_spine =
+                            !want_mark && spine.contains(&(n.visit as usize));
+                        if handle.row_data(i).map(|m| m.parent_mark) != Some(want_spine) {
+                            let x = patch.get_or_insert_with(|| n.clone());
+                            x.parent_mark = want_spine;
                         }
                         if n.expanded && n.has_entries {
                             let none = HashSet::new();
@@ -6258,7 +6552,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
             }
             _ => {
-                let handle = Rc::new(VecModel::from(mind.nodes.clone()));
+                let handle = Rc::new(VecModel::from(
+                    mind.nodes
+                        .iter()
+                        .map(|n| {
+                            let mut n2 = n.clone();
+                            n2.ref_mark = marked.contains(&(n.visit as usize));
+                            n2.parent_mark =
+                                !n2.ref_mark && spine.contains(&(n.visit as usize));
+                            n2
+                        })
+                        .collect::<Vec<_>>(),
+                ));
                 app.set_mind_nodes(ModelRc::from(handle.clone()));
                 *e.mind_nodes_model.borrow_mut() = Some(handle);
             }
@@ -6597,7 +6902,14 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
     }
 
     fn sync_ui(app: &AppWindow, e: &Editor) {
-        let row_model: Vec<BranchRow> = e.rows.iter().map(|r| branch_row_of(e, r, false)).collect();
+        // 选中驱动的两套标记：refs 关联项（强）/ 父级链（淡）。
+        let ref_marks = sel_ref_marked(e);
+        let spine_marks = sel_spine_marks(e);
+        let row_model: Vec<BranchRow> = e
+            .rows
+            .iter()
+            .map(|r| branch_row_of(e, r, false, &ref_marks, &spine_marks))
+            .collect();
         // 横向滚动：行内容最大自然宽（viewport-width = max(视口, 该值)）。
         let content_px = row_model
             .iter()
@@ -6623,12 +6935,15 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         // 挂载选择器的**独立**行模型：按 `pick_expanded` 建的 `pick_rows`，与树
         // 互不影响；仅在对话框可见时维护（行内无右键菜单，直接整体换模型即可）。
         if app.get_mount_dialog_visible() {
-            let pickables = mount_pickables(e, app.get_m_mode_index() == 1, &e.pick_rows);
+            let pickables = mount_pickables(e, app.get_m_mode_index(), &e.pick_rows);
             let pick_model: Vec<BranchRow> = e
                 .pick_rows
                 .iter()
                 .enumerate()
-                .map(|(i, r)| branch_row_of(e, r, pickables.get(i).copied().unwrap_or(false)))
+                .map(|(i, r)| {
+                    let empty = std::collections::HashSet::new();
+                    branch_row_of(e, r, pickables.get(i).copied().unwrap_or(false), &empty, &empty)
+                })
                 .collect();
             app.set_pick_rows(ModelRc::from(Rc::new(VecModel::from(pick_model))));
         }
@@ -6752,6 +7067,8 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     e.rows.get(row as usize).map(|r| r.expand_key.to_string());
                 // 原地更新选中标记（不重建模型，保留双击手势状态）。
                 let sel = e.selected_idx_in_visits();
+                let ref_marks = sel_ref_marked(&e);
+                let spine_marks = sel_spine_marks(&e);
                 if let Some(model) = &*e.rows_model.borrow() {
                     for i in 0..model.row_count() {
                         if let Some(mut r) = model.row_data(i) {
@@ -6760,8 +7077,19 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                                 .get(i)
                                 .map(|vr| Some(vr.visit) == sel)
                                 .unwrap_or(false);
-                            if r.is_selected != new_sel {
+                            // 关联项 / 父级链高亮同为选中驱动的渲染数据：
+                            // 选中变化必须同步刷新（ref 优先于 parent）。
+                            let visit_now =
+                                e.rows.get(i).map(|vr| vr.visit).unwrap_or(usize::MAX);
+                            let new_ref = ref_marks.contains(&visit_now);
+                            let new_parent = !new_ref && spine_marks.contains(&visit_now);
+                            if r.is_selected != new_sel
+                                || r.ref_mark != new_ref
+                                || r.parent_mark != new_parent
+                            {
                                 r.is_selected = new_sel;
+                                r.ref_mark = new_ref;
+                                r.parent_mark = new_parent;
                                 model.set_row_data(i, r);
                             }
                         }
@@ -7365,7 +7693,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             }
             // child-parent-visit ≥ 0：右键菜单对**硬链接行**新建子分支时传入自身
             // 分支 visit（此时选中是目标真身）——子分支落硬链接自有结构；
-            // -1 = 落当前选中分支（常规流程，含软连接视图 = 落目标）。
+            // -1 = 落当前选中分支（常规流程，含软链接视图 = 落目标）。
             let child_parent = app.get_child_parent_visit();
             app.set_child_parent_visit(-1);
             let title = app.get_child_title().trim().to_string();
@@ -7487,7 +7815,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             app.set_op_visit(-1);
             // 菜单栏 ⌘⇧⌫ / 信息页「删除分支」作用于**当前选中分支**，而挂载行 /
             // 硬链接行的选中身份 = 目标真身 —— 此前会直接删掉目标分支（指向它的
-            // 挂载再被悬空清理一并摘除），表现为「移除软连接把目标也删了」。现与
+            // 挂载再被悬空清理一并摘除），表现为「移除软链接把目标也删了」。现与
             // 右键菜单同语义改道：软挂载 → 只摘引用；硬链接 → 移除挂载。
             if op_visit < 0 {
                 let sel_mount_parent = editor.borrow().sel_mount_parent;
@@ -7567,7 +7895,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .ok_or("无法取得分支 id")?;
-                // 软连接清理（删除前先算）：分支连同后代一起消失后，全 bundle 内指向
+                // 软链接清理（删除前先算）：分支连同后代一起消失后，全 bundle 内指向
                 // 它们的 `role = "link"` 会变成悬空（规范 §4.6.1 规则 6 要求 MUST 摘除）。
                 let doomed: HashSet<usize> = subtree_indices(e, visit_idx).into_iter().collect();
                 let doomed_ids: HashSet<String> = doomed
@@ -8451,7 +8779,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 let mut e = editor.borrow_mut();
                 e.pick_expanded = e.expanded.clone();
                 e.rebuild();
-                let picks = mount_pickables(&e, app.get_m_mode_index() == 1, &e.pick_rows);
+                let picks = mount_pickables(&e, app.get_m_mode_index(), &e.pick_rows);
                 let first = e
                     .pick_rows
                     .iter()
@@ -8477,7 +8805,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             // 并让 sync_ui 按新形态重算行上的 pickable。
             {
                 let e = editor.borrow();
-                let picks = mount_pickables(&e, mode == 1, &e.pick_rows);
+                let picks = mount_pickables(&e, mode, &e.pick_rows);
                 let first = e
                     .pick_rows
                     .iter()
@@ -8518,7 +8846,16 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             // 目标分支（否则目标分支与硬链接行两处都出现该链接）；-1 = 常规流程。
             let mount_parent = app.get_mount_parent_visit();
             app.set_mount_parent_visit(-1);
-            let hard = app.get_m_mode_index() == 1;
+            let mode = app.get_m_mode_index();
+            let hard = mode == 1;
+            // 关联线语义（规范 §5.3）：与 CLI `str ref add` 的 `--rel` 同一枚举。
+            let rel = match app.get_m_rel_index() {
+                1 => "depends_on",
+                2 => "instance_of",
+                3 => "derived_from",
+                4 => "ref",
+                _ => "related",
+            };
             let alias = app.get_m_title().trim().to_string();
             let result = with_editor(&editor, |e| {
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
@@ -8544,7 +8881,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 let dst_visit = pick_visit as usize;
                 // 打开对话框后树可能已变（展开收起 / 其他窗口改动）：写前按
                 // **当下**禁选集合复核一次，不可选即拒绝。
-                if mount_banned(e, hard).contains(&dst_visit) {
+                if mount_banned(e, mode).contains(&dst_visit) {
                     return Err("目标分支当前不可挂载（自身 / 祖先 / ROOT / id 重复等）".into());
                 }
                 let target_id = scan
@@ -8566,7 +8903,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     ));
                 }
                 if scan.visits[dst_idx].depth == 0 {
-                    return Err("链接的目标不得是 ROOT".into());
+                    return Err("关联目标不得是 ROOT".into());
                 }
                 if dst_idx == src_idx {
                     return Err("不能把分支挂载到它自己下面".into());
@@ -8579,8 +8916,34 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 let src = &scan.visits[src_idx];
                 let src_title = visit_title(src);
                 let dst_title = visit_title(&scan.visits[dst_idx]);
+                // 关联线（refs，规范 §4.5）：只画一条跨树关联线，不进结构树、
+                // 不写 `entries` —— 与挂载（§4.6.1）是两种正交意图，按此处分流。
+                // 自关联已被禁选集合挡住；指向祖先 / 后代合法（环判定只沿 `refs`
+                // 边，由校验器 `E_REF_CYCLE` 兜底）；同一目标多条关联线允许。
+                if mode == 2 {
+                    let id_version = scan
+                        .visits
+                        .first()
+                        .and_then(|v| v.meta.as_ref())
+                        .map(|m| m.policies.id_version)
+                        .unwrap_or(7);
+                    let mut meta = read_meta(bundle, &src.dir)?;
+                    meta.push_ref(&RefItem {
+                        id: util::new_uuid(id_version),
+                        target: target_id.clone(),
+                        rel: rel.into(),
+                        title: if alias.is_empty() { None } else { Some(alias) },
+                        order: Some(meta.refs.len() as i64 + 1),
+                        note: None,
+                    });
+                    meta.touch();
+                    meta.save(&bundle.meta_path(&src.dir))
+                        .map_err(|err| err.to_string())?;
+                    e.rescan()?;
+                    return Ok((src_title, dst_title, format!("关联线（{rel}）")));
+                }
                 let mut meta = read_meta(bundle, &src.dir)?;
-                // 重复挂载检查仅对软连接（path = target）；硬链接 path = 新生成的
+                // 重复挂载检查仅对软链接（path = target）；硬链接 path = 新生成的
                 // 自身 id，天然不重复。**任何角色**的同 path 条目都冲突：目标若是
                 // 本分支的真实子分支，upsert 会把真身的登记替换成链接行 —— 拒绝。
                 if !hard
@@ -8593,7 +8956,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                         "「{dst_title}」已是本分支的真实子分支或挂载，无法重复挂载"
                     ));
                 }
-                // 软连接：`path` = 目标 id，**不带 id**（身份由 target 给出，声明式，
+                // 软链接：`path` = 目标 id，**不带 id**（身份由 target 给出，声明式，
                 // 磁盘不新建目录）。硬链接：有身份的真实分支 —— `path` = `id` =
                 // 自身目录名，现在创建目录与 `._meta`；内容所有权仍在目标分支
                 // （自有 entries 只允许子分支，内容面板显示目标内容且只读）。
@@ -8613,7 +8976,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                         Kind::Branch
                     };
                     // 别名留空时，硬链接自身的标题默认取**目标标题**（显示语义与
-                    // 软连接一致：不填别名就显示目标的名字）。
+                    // 软链接一致：不填别名就显示目标的名字）。
                     let own_title = if alias.is_empty() {
                         dst_title.clone()
                     } else {
@@ -8650,20 +9013,28 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 meta.save(&bundle.meta_path(&src.dir))
                     .map_err(|err| err.to_string())?;
                 e.rescan()?;
-                Ok((src_title, dst_title))
+                Ok((
+                    src_title,
+                    dst_title,
+                    if hard { "硬链接" } else { "软链接" }.to_string(),
+                ))
             });
             match result {
-                Ok((src_title, dst_title)) => {
+                Ok((src_title, dst_title, kind)) => {
                     app.set_m_title("".into());
                     app.set_mount_dialog_visible(false);
                     sync_ui(&app, &editor.borrow());
-                    let kind = if hard { "硬链接" } else { "软连接" };
-                    show_status(
-                        &app,
-                        format!("已挂载（{kind}）：「{dst_title}」→「{src_title}」之下。").into(),
-                    );
+                    let msg = if mode == 2 {
+                        format!("已创建关联线（{kind}）：「{src_title}」→「{dst_title}」。")
+                    } else {
+                        format!("已挂载（{kind}）：「{dst_title}」→「{src_title}」之下。")
+                    };
+                    show_status(&app, msg.into());
                 }
-                Err(msg) => show_status(&app, format!("挂载失败：{msg}").into()),
+                Err(msg) => {
+                    let noun = if mode == 2 { "关联" } else { "挂载" };
+                    show_status(&app, format!("{noun}失败：{msg}").into())
+                }
             }
         });
     }
@@ -8692,6 +9063,175 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     );
                 }
                 Err(msg) => show_status(&app, format!("移除挂载失败：{msg}").into()),
+            }
+        });
+    }
+    {
+        // 关联线管理（refs[]，规范 §4.5，双向）：查看 / 修改 / 删除当前选中
+        // 分支的关联线 —— 正向（本分支 refs）与反向（其它分支指向本分支）；
+        // 反向行的修改与删除都落在**源分支**的 meta 上。创建走「创建链接…」
+        // 对话框「关联线」形态。
+        let editor = editor.clone();
+        let editor_delete = editor.clone();
+        let editor_edit = editor.clone();
+        let editor_edit_save = editor.clone();
+        let app_weak = app.as_weak();
+        let app_weak_close = app_weak.clone();
+        let app_weak_delete = app_weak.clone();
+        let app_weak_edit_open = app_weak.clone();
+        let app_weak_edit_save = app_weak.clone();
+        let app_weak_edit_cancel = app_weak.clone();
+        // 重建行模型（对话框停留时复用）：rescan 后 visit 下标漂移，统一按
+        // e.selected 的 rel 键重新解析。
+        fn refresh_refs_dialog(app: &AppWindow, e: &Editor) {
+            let (rows, branch_title) = collect_ref_rows(e);
+            app.set_refs_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+            app.set_refs_branch_title(branch_title.into());
+        }
+        app.on_refs_dialog_open(move || {
+            let app = app_weak.upgrade().unwrap();
+            let (rows, branch_title) = {
+                let e = editor.borrow();
+                collect_ref_rows(&e)
+            };
+            app.set_refs_rows(ModelRc::from(Rc::new(VecModel::from(rows))));
+            app.set_refs_branch_title(branch_title.into());
+            app.set_refs_dialog_visible(true);
+        });
+        app.on_refs_dialog_close(move || {
+            let app = app_weak_close.upgrade().unwrap();
+            app.set_refs_dialog_visible(false);
+        });
+        // 按关联线 id 在全 bundle 定位持有它的源分支（对话框行可以是反向的 ——
+        // 此时源分支不是当前选中分支，与 CLI `str ref rm` 的全 bundle 定位同口径）。
+        fn locate_ref_source(e: &Editor, ref_id: &str) -> Result<PathBuf, String> {
+            let scan = e.scan.as_ref().ok_or("未选择分支")?;
+            e.bundle.as_ref().ok_or("未打开 bundle")?;
+            for v in &scan.visits {
+                if let Some(m) = v.meta.as_ref() {
+                    if m.refs.iter().any(|r| r.id == ref_id) {
+                        return Ok(v.dir.clone());
+                    }
+                }
+            }
+            Err("关联线不存在（可能已被删除）".into())
+        }
+        app.on_ref_delete(move |ref_id| {
+            let app = app_weak_delete.upgrade().unwrap();
+            if batch_busy_guard(&app) {
+                return;
+            }
+            let ref_id = ref_id.to_string();
+            let result = with_editor(&editor_delete, |e| {
+                let dir = locate_ref_source(e, &ref_id)?;
+                let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+                let mut meta = read_meta(&bundle, &dir)?;
+                if !meta.remove_ref(&ref_id) {
+                    return Err("关联线不存在（可能已被删除）".into());
+                }
+                meta.touch();
+                meta.save(&bundle.meta_path(&dir))
+                    .map_err(|err| err.to_string())?;
+                e.rescan()?;
+                Ok(())
+            });
+            match result {
+                Ok(()) => {
+                    // 停留在此对话框：按当前选中分支重建行模型（rescan 后重新解析）。
+                    refresh_refs_dialog(&app, &editor_delete.borrow());
+                    sync_ui(&app, &editor_delete.borrow());
+                    show_status(&app, "已删除关联线（只摘引用，目标分支与数据不动）。".into());
+                }
+                Err(msg) => show_status(&app, format!("删除关联线失败：{msg}").into()),
+            }
+        });
+        app.on_ref_edit_open(move |ref_id, peer, incoming| {
+            let app = app_weak_edit_open.upgrade().unwrap();
+            let ref_id = ref_id.to_string();
+            {
+                let e = editor_edit.borrow();
+                // 从源分支 meta 读当前值（扫描快照里有 refs，直接取，无需再读盘）。
+                let item = e.scan.as_ref().and_then(|scan| {
+                    scan.visits.iter().find_map(|v| {
+                        v.meta
+                            .as_ref()
+                            .and_then(|m| m.refs.iter().find(|r| r.id == ref_id))
+                    })
+                });
+                let Some(r) = item else {
+                    show_status(&app, "关联线不存在（可能已被删除）".into());
+                    return;
+                };
+                app.set_ref_edit_id(r.id.clone().into());
+                app.set_ref_edit_peer(peer);
+                app.set_ref_edit_incoming(incoming);
+                app.set_ref_edit_rel_index(match r.rel.as_str() {
+                    "depends_on" => 1,
+                    "instance_of" => 2,
+                    "derived_from" => 3,
+                    "ref" => 4,
+                    "related" => 0,
+                    // x-* 等自定义 rel：下拉「自定义…」，保存时保持原值。
+                    _ => 5,
+                });
+                app.set_ref_edit_label(r.title.clone().unwrap_or_default().into());
+            }
+            app.set_ref_edit_visible(true);
+        });
+        app.on_ref_edit_cancel({
+            let app_weak = app_weak_edit_cancel.clone();
+            move || {
+                let app = app_weak.upgrade().unwrap();
+                app.set_ref_edit_visible(false);
+            }
+        });
+        app.on_ref_edit_save({
+            let app_weak = app_weak_edit_save.clone();
+            move || {
+                let app = app_weak.upgrade().unwrap();
+                if batch_busy_guard(&app) {
+                    return;
+                }
+                let ref_id = app.get_ref_edit_id().to_string();
+                let label = app.get_ref_edit_label().trim().to_string();
+                let rel_index = app.get_ref_edit_rel_index();
+                let result = with_editor(&editor_edit_save, |e| {
+                    let dir = locate_ref_source(e, &ref_id)?;
+                    let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
+                    let mut meta = read_meta(&bundle, &dir)?;
+                    {
+                        let Some(r) = meta.refs.iter_mut().find(|r| r.id == ref_id) else {
+                            return Err("关联线不存在（可能已被删除）".into());
+                        };
+                        // rel-index 5 = 自定义 rel（x-* 等）：下拉框无法表达，保持原值。
+                        if rel_index != 5 {
+                            r.rel = match rel_index {
+                                0 => "related",
+                                1 => "depends_on",
+                                2 => "instance_of",
+                                3 => "derived_from",
+                                _ => "ref",
+                            }
+                            .into();
+                        }
+                        r.title = if label.is_empty() { None } else { Some(label) };
+                    }
+                    meta.touch();
+                    meta.save(&bundle.meta_path(&dir))
+                        .map_err(|err| err.to_string())?;
+                    e.rescan()?;
+                    Ok(())
+                });
+                match result {
+                    Ok(()) => {
+                        app.set_ref_edit_visible(false);
+                        // 管理对话框仍开着：按当前选中分支重建行模型。
+                        refresh_refs_dialog(&app, &editor_edit_save.borrow());
+                        sync_ui(&app, &editor_edit_save.borrow());
+                        show_status(&app, "已更新关联线（只改声明，目标分支与数据不动）。".into());
+                    }
+                    Err(msg) => show_status(&app, format!("修改关联线失败：{msg}").into()),
+                }
             }
         });
     }
@@ -11709,6 +12249,8 @@ mod mini_density_tests {
             expand_key: String::new().into(),
             depth: 0,
             has_entries: false,
+            ref_mark: false,
+            parent_mark: false,
             entry_rows: ModelRc::from(Rc::new(VecModel::<EntryRow>::default())),
         };
         MindOut {
@@ -11722,6 +12264,7 @@ mod mini_density_tests {
             mini_edges: Vec::new(),
             edge_chunks: Vec::new(),
             mini_edge_chunks: Vec::new(),
+            ref_edges: Vec::new(),
             w: 300.0,
             h: 20.0,
             edge_offset: 0.0,
@@ -12403,7 +12946,7 @@ mod mount_tests {
         let body_a = "{\"a\":1}\n";
         let body_b = "{\"b\":2}\n";
         let mode = if hard { "mode = \"hard\"\n" } else { "" };
-        // 软连接：path = target、无 id、无目录；硬链接：path = id = 自身目录名
+        // 软链接：path = target、无 id、无目录；硬链接：path = id = 自身目录名
         //（目录真实存在，内含自有 `._meta`），内容来自 target。
         let link = if hard {
             format!(
@@ -12507,7 +13050,7 @@ mod mount_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 硬链接行：身份 = 目标分支（visit = B，与软连接一致）、带「≡」识别标识、
+    /// 硬链接行：身份 = 目标分支（visit = B，与软链接一致）、带「≡」识别标识、
     /// 内容面板显示**目标**的内容条目（只读视图，写操作由 sel_hard 守卫拦截）；
     /// `mounted = false`（移除挂载走 delete-branch + op-visit），`link_visit` =
     /// 自身分支 visit（「新建子分支」落自有结构）。
@@ -12532,7 +13075,7 @@ mod mount_tests {
             "硬链接行带 → 识别标识：{:?}",
             hard_rows[0].title
         );
-        assert!(!hard_rows[0].mounted, "mounted 标记只给软连接");
+        assert!(!hard_rows[0].mounted, "mounted 标记只给软链接");
         // 内容面板 = 目标 B 的内容条目（b.json）。
         let rows = build_entry_rows_for(&e, link_idx);
         assert!(
@@ -12546,7 +13089,7 @@ mod mount_tests {
 
     /// 挂载落点解析（菜单栏兜底路径）：选中经由硬链接行进入（sel_hard，选中 =
     /// 目标真身）时，`selected_hard_link_idx` 必须解析到硬链接**自身分支**；
-    /// 软连接行不参与解析（返回 None）。
+    /// 软链接行不参与解析（返回 None）。
     #[test]
     fn selected_hard_link_resolves_to_own_branch() {
         // 硬链接：选中 = 目标 B ⇒ 落点 = 自身分支。
@@ -12563,14 +13106,14 @@ mod mount_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
 
-        // 软连接：没有硬链接挂载指向 B ⇒ None（调用方按普通分支落点处理）。
+        // 软链接：没有硬链接挂载指向 B ⇒ None（调用方按普通分支落点处理）。
         let dir = bundle_with_mount("softresolve", None, false);
         let e = opened(&dir);
         let b_idx = e.visit_idx(RB).expect("B");
         assert_eq!(
             selected_hard_link_idx(&e, b_idx),
             Ok(None),
-            "软连接行不参与硬链接落点解析"
+            "软链接行不参与硬链接落点解析"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -12717,8 +13260,8 @@ mod mount_tests {
         assert_eq!(link_row.mode.as_deref(), Some("hard"), "mode = hard 保留");
         assert_eq!(
             link_row.order,
-            Some(1),
-            "重挂载插入为第一个子分支（ROOT 现有结构行均无 order）"
+            Some(0),
+            "重挂载插入为第一个子分支（ROOT 现有结构行均无 order，连续编号从 0 起）"
         );
         assert!(e.visit_idx(RB).is_some(), "目标分支完好");
         let _ = std::fs::remove_dir_all(&dir);
@@ -12810,8 +13353,8 @@ mod mount_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 上半区嵌套 = 插入为**第一个子分支**：新子分支的 `order` 取目标分支现有
-    /// 结构行最小 `order` 减一，排在所有既有子分支之前。
+    /// 上半区嵌套 = 插入为**第一个子分支**：移入的子分支排最前（order 0），
+    /// 既有结构行按相对顺序连续重排 —— 全区 `order` 均 ≥ 0（规范 §4.6）。
     #[test]
     fn branch_move_into_child_inserts_as_first_child() {
         let dir = bundle_with_mount("firstchild", None, true);
@@ -12838,8 +13381,203 @@ mod mount_tests {
             .find(|en| en.path == RB)
             .and_then(|en| en.order)
             .expect("移入的 B 已登记");
-        assert_eq!(b_order, 4, "新子分支 = 最小 order 减一");
-        assert!(b_order < 5, "B 排在既有硬链接声明（order 5）之前");
+        assert_eq!(b_order, 0, "移入的子分支 = 第一个子分支（编号从 0 起）");
+        let link_order = a_meta
+            .entries
+            .iter()
+            .find(|en| en.is_link())
+            .and_then(|en| en.order)
+            .expect("既有声明行仍在");
+        assert_eq!(link_order, 1, "既有结构行按相对顺序重排为 1");
+        assert!(
+            a_meta
+                .entries
+                .iter()
+                .filter(|en| en.is_branch() || en.is_link())
+                .all(|en| en.order.unwrap_or(0) >= 0),
+            "全部 order ≥ 0（规范 §4.6）：{:?}",
+            a_meta.entries
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：反复「移为第一个子分支」不得让 `order` 走到负值 —— 旧实现用
+    /// `min - 1` 抢位，四次操作即产生 -1（现场已出现）；新实现连续编号 0..n-1。
+    #[test]
+    fn make_first_branch_never_produces_negative_order() {
+        let text = meta_text(
+            "branch",
+            RA,
+            &format!(
+                "[[entries]]\npath = \"x\"\nrole = \"branch\"\nid = \"x\"\norder = 3\n\
+                 [[entries]]\npath = \"y\"\nrole = \"branch\"\nid = \"y\"\norder = 5\n\
+                 [[entries]]\npath = \"z\"\nrole = \"branch\"\nid = \"z\"\n"
+            ),
+        );
+        let mut m = meta_edit::meta_from_text(&text).unwrap();
+        for _ in 0..4 {
+            make_first_branch(&mut m, "z");
+        }
+        let mut orders: Vec<(String, i64)> = m
+            .entries
+            .iter()
+            .filter(|en| en.is_branch())
+            .map(|en| (en.path.clone(), en.order.unwrap_or(i64::MIN)))
+            .collect();
+        orders.sort_by_key(|(_, o)| *o);
+        assert_eq!(
+            orders,
+            vec![
+                ("z".to_string(), 0),
+                ("x".to_string(), 1),
+                ("y".to_string(), 2)
+            ],
+            "z 恒为第一个子分支，全区连续编号且 ≥ 0"
+        );
+    }
+
+    /// ROOT 作为**关联线源**（ROOT 的 refs 指向 A），选中 A 时 ROOT 应入
+    /// 强高亮集合（ref_mark → 导图节点 2px 粉边框）。
+    #[test]
+    fn root_as_ref_source_marks_root_node() {
+        let dir = bundle_with_mount("rootrefdbg", None, false);
+        let mut e = opened(&dir);
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let root_dir = e.scan.as_ref().unwrap().visits[0].dir.clone();
+        let mut rm = read_meta(&bundle, &root_dir).unwrap();
+        rm.push_ref(&RefItem {
+            id: "01928f3a-7c4b-400b-8a0b-00000000000b".into(),
+            target: RA.into(),
+            rel: "related".into(),
+            title: None,
+            order: Some(1),
+            note: None,
+        });
+        rm.touch();
+        rm.save(&bundle.meta_path(&root_dir)).unwrap();
+        e.rescan().unwrap();
+        let a_idx = e.visit_idx(RA).unwrap();
+        let rel_of = |i: usize| e.scan.as_ref().unwrap().visits[i].rel.clone();
+        e.selected = Some(rel_of(a_idx));
+        let marked = sel_ref_marked(&e);
+        assert!(marked.contains(&0), "ROOT（关联线源）应高亮");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 导图 refs 关联线：A、B 都在布局内 → 画出一条虚线边，标签取 ref 的
+    /// `title`（缺省回退 `rel`）；两端不同时可见则不画。
+    #[test]
+    fn mind_ref_edges_render_when_both_endpoints_visible() {
+        let dir = bundle_with_mount("refedge", None, false);
+        let mut e = opened(&dir);
+        let a_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RA).unwrap()]
+            .dir
+            .clone();
+        let bundle = e.bundle.as_ref().unwrap().clone();
+        let mut am = read_meta(&bundle, &a_dir).unwrap();
+        am.push_ref(&RefItem {
+            id: "01928f3a-7c4b-4009-8a09-000000000009".into(),
+            target: RB.into(),
+            rel: "depends_on".into(),
+            title: Some("关联标签".into()),
+            order: Some(1),
+            note: None,
+        });
+        am.touch();
+        am.save(&bundle.meta_path(&a_dir)).unwrap();
+        e.rescan().unwrap();
+
+        let mind = mind_layout(&e);
+        assert_eq!(mind.ref_edges.len(), 1, "{:?}", mind.ref_edges);
+        assert_eq!(mind.ref_edges[0].label, "关联标签");
+        assert!(mind.ref_edges[0].w > 0.0 && mind.ref_edges[0].h > 0.0);
+        // 命令串含至少一段 M/L（虚线段）。
+        assert!(
+            mind.ref_edges[0].commands.contains("M ") && mind.ref_edges[0].commands.contains("L ")
+        );
+        // 高亮是**选中驱动**：选中 A（持有关联线）→ 高亮集 = {A, B}；无选中 → 空。
+        // ref_mark 本身由 sync_ui 回填（布局缓存签名与选中无关），布局产物恒 false。
+        let a_idx = e.visit_idx(RA).unwrap();
+        let b_idx = e.visit_idx(RB).unwrap();
+        assert!(
+            mind.nodes.iter().all(|n| !n.ref_mark),
+            "布局产物不携带选中高亮（由 sync_ui 回填）"
+        );
+        let rel_of = |i: usize| {
+            e.scan
+                .as_ref()
+                .unwrap()
+                .visits[i]
+                .rel
+                .clone()
+        };
+        e.selected = Some(rel_of(a_idx));
+        let marked = sel_ref_marked(&e);
+        assert!(
+            marked.contains(&b_idx) && !marked.contains(&a_idx),
+            "选中 A：被指向的 B 高亮（A 自身走选中态，不重复标记）"
+        );
+        e.selected = Some(rel_of(b_idx));
+        let marked_b = sel_ref_marked(&e);
+        assert!(marked_b.contains(&a_idx), "选中 B：指向 B 的源分支 A 应高亮");
+        // 父级链（非常淡的一档）= 关联项的祖先链，但**整条排除选中分支自身的
+        // 祖先链（含 ROOT）**：选中 A（refs 指向 B，B 在 ROOT 下）→
+        // ancestors(B) = {ROOT, B}，其中 ROOT ∈ own（选中链）、B ∈ ref_set
+        //（走强高亮）⇒ spine 为空。ROOT 仅在它**直接是关联项**（refs 的源）
+        // 时才走强高亮（见 root_as_ref_source_marks_root_node）。
+        e.selected = Some(rel_of(a_idx));
+        let spine = sel_spine_marks(&e);
+        assert!(!spine.contains(&0), "选中分支自身的父级链（含 ROOT）不高亮");
+        assert!(!spine.contains(&b_idx), "关联项自身不入 spine（走 ref 强高亮）");
+        e.selected = None;
+        assert!(sel_ref_marked(&e).is_empty(), "无选中不高亮");
+        assert!(sel_spine_marks(&e).is_empty(), "无选中无父级高亮");
+
+        // 对话框行模型（双向）：选中被关联项 B → 应看到 A 指向 B 的**反向**
+        // 关联线（incoming = true，对端 = A）；选中 A → 正向行。
+        e.selected = Some(rel_of(b_idx));
+        let (rows, _) = collect_ref_rows(&e);
+        assert_eq!(rows.len(), 1, "被关联项应看到反向关联线：{rows:?}");
+        assert!(rows[0].incoming, "该行应标记为反向");
+        e.selected = Some(rel_of(a_idx));
+        let (rows, _) = collect_ref_rows(&e);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].incoming, "选中 A 看到的是正向关联线");
+        // 端点锚定在节点边界（而不是穿过节点的中心连线）：解码第一段虚线的起点，
+        // 断言它落在源节点矩形的边界上（四边之一，容差 0.6px）。
+        let a = mind.nodes.iter().find(|n| n.visit as usize == a_idx).unwrap();
+        let re = &mind.ref_edges[0];
+        let first: Vec<f32> = re
+            .commands
+            .split_whitespace()
+            .filter_map(|tok| tok.parse::<f32>().ok())
+            .take(2)
+            .collect();
+        assert_eq!(first.len(), 2, "命令串首段应为 `M x y`");
+        let (p1x, p1y) = (re.x + first[0], re.y + first[1]);
+        let on_border = (p1x - a.x).abs() < 0.6
+            || (p1x - (a.x + a.w)).abs() < 0.6
+            || (p1y - a.y).abs() < 0.6
+            || (p1y - (a.y + a.h)).abs() < 0.6;
+        assert!(on_border, "出锚点 ({p1x},{p1y}) 应在源节点边界上（A = {:?}）", (a.x, a.y, a.w, a.h));
+
+        // 标签缺省回退 rel：清掉 title 再布局。
+        let mut am2 = read_meta(&bundle, &a_dir).unwrap();
+        am2.remove_ref("01928f3a-7c4b-4009-8a09-000000000009");
+        am2.push_ref(&RefItem {
+            id: "01928f3a-7c4b-400a-8a0a-00000000000a".into(),
+            target: RB.into(),
+            rel: "related".into(),
+            title: None,
+            order: Some(1),
+            note: None,
+        });
+        am2.touch();
+        am2.save(&bundle.meta_path(&a_dir)).unwrap();
+        e.rescan().unwrap();
+        let mind2 = mind_layout(&e);
+        assert_eq!(mind2.ref_edges.len(), 1);
+        assert_eq!(mind2.ref_edges[0].label, "related");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13915,7 +14653,7 @@ mod mount_tests {
     fn mount_into_ancestor_does_not_recurse_forever() {
         let dir = bundle_with_mount("cycle", None, false);
         let mut e = opened(&dir);
-        // 在 B 的 `._meta` 里追加一条指向 A 的软连接（A 是 B 的「父级」方向的分支）。
+        // 在 B 的 `._meta` 里追加一条指向 A 的软链接（A 是 B 的「父级」方向的分支）。
         let b_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RB).unwrap()].dir.clone();
         let p = b_dir.join("._meta");
         let text = std::fs::read_to_string(&p).unwrap();

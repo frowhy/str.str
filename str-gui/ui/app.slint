@@ -257,11 +257,15 @@ export struct BranchRow {
     has-children: bool,
     // 是否含内容条目（`node`/`branch` 之外）：控制「展开 / 收起内容」菜单项可用性。
     has-entries: bool,
-    // 链接行（`role = "link"`，规范 §4.6.1）：`mounted` = 软连接视图（身份 = 目标
+    // refs 关联项高亮（§4.5，**选中驱动**）：本行是选中分支的关联项（refs 目标 /
+    // 指向它的源分支）→ 行底紫罗兰淡 tint；父级链 → 更淡（ref 优先于 parent）。
+    ref-mark: bool,
+    parent-mark: bool,
+    // 链接行（`role = "link"`，规范 §4.6.1）：`mounted` = 软链接视图（身份 = 目标
     // 分支，点它 = 选中真身；`mount-parent` = 挂载点分支，供「移除挂载」定位）；
-    // `hard` = 硬链接（表现与软连接一致：身份 / 信息 / 内容 = 目标且内容只读，
+    // `hard` = 硬链接（表现与软链接一致：身份 / 信息 / 内容 = 目标且内容只读，
     // 标题带「≡」），额外渲染自有子分支 —— `link-visit` = 自身分支 visit
-    //（「新建子分支」的落点），软连接为 -1。
+    //（「新建子分支」的落点），软链接为 -1。
     mounted: bool,
     hard: bool,
     mount-parent: int,
@@ -328,6 +332,33 @@ export struct MindEdgeChunk {
     commands: string,
 }
 
+/// 导图上的 refs 关联线（规范 §4.5）：虚线段 Path（commands 相对包络盒，
+/// 同 MindEdgeChunk 口径）+ 中点标签（内容坐标系）。
+export struct RefEdge {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    commands: string,
+    label-x: float,
+    label-y: float,
+    label: string,
+    // 两端节点的 visit（选中驱动高亮：mark = 端点之一是当前选中分支）。
+    src-visit: int,
+    dst-visit: int,
+    mark: bool,
+}
+
+/// 关联线管理对话框的一行（当前分支相关的某条 `refs[]`，双向）。
+/// `incoming` = 反向关联线（其它分支的 refs 指向本分支）。
+export struct RefRow {
+    id: string,
+    target-title: string,
+    rel: string,
+    label: string,
+    incoming: bool,
+}
+
 /// 导图节点内的内容条目：直接携带完整 EntryRow 模型（与列表视图同一数据结构）。
 export struct MindNode {
     visit: int,
@@ -344,8 +375,8 @@ export struct MindNode {
     // 子树是否展开（控制行首 ›/⌄ 箭头）。
     children-expanded: bool,
     has-children: bool,
-    // 链接节点（规范 §4.6.1）：`mounted` = 软连接视图（⤷ 标记，身份 = 目标）；
-    // `hard` = 硬链接（表现与软连接一致 + 内容只读，标题带「≡」），自有子分支
+    // 链接节点（规范 §4.6.1）：`mounted` = 软链接视图（⤷ 标记，身份 = 目标）；
+    // `hard` = 硬链接（表现与软链接一致 + 内容只读，标题带「≡」），自有子分支
     // 渲染在其下 —— `link-visit` = 自身分支 visit（「新建子分支」落点）。
     mounted: bool,
     hard: bool,
@@ -358,6 +389,13 @@ export struct MindNode {
     depth: int,
     // 是否存在内容条目（无论展开与否，控制内容按钮可见性）。
     has-entries: bool,
+    // refs 关联项高亮（§4.5，**选中驱动**）：当前选中的分支有 refs / 被关联线
+    // 指向 / 是某关联线端点时，与其直接相连的节点由 sync_ui 回填 true ——
+    // 边框用 c-ref 1.5px（与选中态 accent 2px 区分）。无选中时全部 false。
+    ref-mark: bool,
+    // 父级链高亮（选中驱动）：**refs 关联项**的祖先链 → c-ref-dim 1px（非常淡）。
+    // 目标分支折叠（不在布局内）时，淡链仍能指出关联项藏在哪个分支下。
+    parent-mark: bool,
     entry-rows: [EntryRow],
 }
 
@@ -1335,6 +1373,13 @@ export component AppWindow inherits Window {
     in property <color> c-badge-text: root.dark-mode ? #a5b4fc : #4f46e5;
     in property <color> c-status-bg: root.dark-mode ? #26282e : #eceef1;
     in property <color> c-accent: root.dark-mode ? #4f7cff : #1d4ed8;
+    // refs 关联线 / 关联项高亮（§4.5）：**异色**于选中的 accent 蓝 —— macOS 粉色（色板「粉色」），
+    // 一眼区分「选中」与「被关联」。父级链用同色系加深档（边框 70% 透明度、
+    // 树行底 14% —— 用户反馈 35% 太淡）。
+    in property <color> c-ref: root.dark-mode ? #ff5fa8 : #ff2d92;
+    in property <color> c-ref-dim: root.dark-mode ? #ff5fa8b3 : #ff2d92b3;
+    in property <color> c-ref-bg: root.dark-mode ? #ff5fa81f : #ff2d9217;
+    in property <color> c-spine-bg: root.dark-mode ? #ff5fa833 : #ff2d9224;
     // 行底令牌（结构树 / 内容列表共用同一套「Finder 式行」）：未选中行统一浅灰
     // 圆角色块；选中行用 c-accent 实心填充，其上的文字与箭头一律 c-on-accent。
     in property <color> c-row-bg: root.dark-mode ? #2a2d34 : #f4f5f5;
@@ -1352,6 +1397,8 @@ export component AppWindow inherits Window {
     in property <bool> has-bundle: false;
     in property <[BranchRow]> rows;
     in property <bool> view-mind: false;
+    // 导图视图是否渲染 refs 关联线（§4.5）：菜单栏「视图 → 显示关联线」切换。
+    in-out property <bool> mind-show-refs: true;
 
     // ── 详情（信息页）──
     in-out property <string> d-title;
@@ -1391,8 +1438,11 @@ export component AppWindow inherits Window {
     in property <[BranchRow]> pick-rows;
     in-out property <int> branch-pick-visit: -1;
     in-out property <bool> branch-pick-ok: false;
-    // 链接形态：0 = 软连接（目标完整视图，缺省）；1 = 硬链接（仅内容关联、只读）。
+    // 链接形态：0 = 软链接（目标完整视图，缺省）；1 = 硬链接（仅内容关联、只读）；
+    // 2 = 关联线（refs[]，规范 §4.5：只画跨树关联线，不进结构树）。
     in-out property <int> m-mode-index: 0;
+    // 关联线语义（仅形态 2 生效，规范 §5.3 枚举，与 CLI `str ref add --rel` 一致）。
+    in-out property <int> m-rel-index: 0;
     in-out property <bool> mount-dialog-visible: false;
     in-out property <string> m-title;
 
@@ -1408,6 +1458,8 @@ export component AppWindow inherits Window {
     // 画布 / 小地图连线（分块 Path，见 MindEdgeChunk）。
     in property <[MindEdgeChunk]> mind-edge-chunks;
     in property <[MindEdgeChunk]> mind-mini-edge-chunks;
+    // refs 关联线（§4.5）：虚线 + 标签，只画两端都在当前布局内的关联。
+    in property <[RefEdge]> mind-ref-edges;
     // 小地图有两种形态，映射真源都在这里（Rust 侧烘焙密度位图时回读同一组数值，
     // 避免「面板里画的位置」与「位图里的位置」两处公式漂移）：
     //   块状（内容还能分辨出单个节点）：等比缩放，面板随内容长宽比自适应；
@@ -1634,6 +1686,26 @@ export component AppWindow inherits Window {
     callback mount-mode-changed(int);
     callback mount-create();
     callback unmount(int);
+    // 关联线管理（refs[]）：查看 / 删除当前选中分支的关联线；创建走挂载
+    // 对话框的「关联线」形态（m-mode-index == 2）。
+    callback refs-dialog-open();
+    callback refs-dialog-close();
+    callback ref-delete(string);
+    // 关联线编辑弹窗：`ref-edit-open` 带当前值（id / 对端标题 / 是否反向），
+    // 语义与标签在弹窗内修改，`ref-edit-save` 落盘。
+    callback ref-edit-open(string, string, bool);
+    callback ref-edit-cancel();
+    callback ref-edit-save();
+    in-out property <bool> ref-edit-visible: false;
+    in-out property <string> ref-edit-id: "";
+    in-out property <string> ref-edit-peer: "";
+    in-out property <bool> ref-edit-incoming: false;
+    // 语义下拉（0-4 = §5.3 枚举；5 = 自定义 rel，保存时保持原值）。
+    in-out property <int> ref-edit-rel-index: 0;
+    in-out property <string> ref-edit-label: "";
+    in-out property <bool> refs-dialog-visible: false;
+    in-out property <string> refs-branch-title: "";
+    in property <[RefRow]> refs-rows;
     callback dialog-browse();
     callback dialog-create();
     callback dialog-cancel();
@@ -1785,10 +1857,10 @@ export component AppWindow inherits Window {
                 activated => { root.branch-rename-open(); }
             }
             MenuItem {
-                // 把别的分支挂载到本分支下：软连接（声明式，磁盘不新建目录）或
+                // 把别的分支挂载到本分支下：软链接（声明式，磁盘不新建目录）或
                 // 硬链接（自有目录 + 内容来自目标）。硬链接视图下同样可用
                 //（硬链接有自有结构，挂载行落进它自己的 entries）。
-                title: "挂载已有分支…";
+                title: "创建链接…";
                 enabled: root.has-selection;
                 activated => { root.mount-dialog-open(); }
             }
@@ -1855,6 +1927,13 @@ export component AppWindow inherits Window {
                 shortcut: @keys(Control + Digit2);
                 enabled: root.has-bundle;
                 activated => { root.set-view(true); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                // refs 关联线（§4.5）的显示 / 隐藏：纯视图状态（不写盘）。
+                title: root.mind-show-refs ? "✓ 显示关联线" : "　显示关联线";
+                enabled: root.has-bundle && root.view-mind;
+                activated => { root.mind-show-refs = !root.mind-show-refs; }
             }
             MenuSeparator { }
             // 画布缩放：仅在导图视图可用（列表视图没有画布），档位与滚轮一致。
@@ -2014,10 +2093,14 @@ export component AppWindow inherits Window {
                                     width: parent.width - 8px;
                                     height: parent.height;
                                     border-radius: 6px;
+                                    // 关联项 = **实色**粉底（同选中行的 Finder 语义，
+                                    // 异色粉），文字整行反白；父级链只保留淡 tint。
                                     background: drag-hover ? c-badge-bg
                                         : (row.is-selected ? c-row-sel
-                                            : (Math.mod(index, 2) == 0
-                                                ? transparent : c-row-bg));
+                                            : (row.ref-mark ? c-ref
+                                                : (row.parent-mark ? c-spine-bg
+                                                    : (Math.mod(index, 2) == 0
+                                                        ? transparent : c-row-bg))));
                                 }
                                 Rectangle {
                                     x: 4px;
@@ -2050,7 +2133,7 @@ export component AppWindow inherits Window {
                                         MenuItem {
                                             // 硬链接行：挂载落**自有结构**（link-visit）；
                                             // 其余行 link-visit = -1，落当前选中分支。
-                                            title: "挂载已有分支…";
+                                            title: "创建链接…";
                                             activated => {
                                                 root.mount-parent-visit = row.link-visit;
                                                 root.mount-dialog-open();
@@ -2098,6 +2181,10 @@ export component AppWindow inherits Window {
                                                     root.delete-branch();
                                                 }
                                             }
+                                        }
+                                        MenuItem {
+                                            title: "关联线…";
+                                            activated => { root.refs-dialog-open(); }
                                         }
                                     }
                                 }
@@ -2290,7 +2377,8 @@ export component AppWindow inherits Window {
                                     RowChevron {
                                         expandable: row.has-children;
                                         expanded: row.expanded;
-                                        fg: row.is-selected ? c-on-accent : c-sub;
+                                        fg: row.is-selected || row.ref-mark
+                                            ? c-on-accent : c-sub;
                                         clicked => { root.toggle-expand(index); }
                                     }
                                     Text {
@@ -2301,8 +2389,9 @@ export component AppWindow inherits Window {
                                         text: row.title;
                                         vertical-alignment: center;
                                         overflow: elide;
-                                        font-weight: row.is-selected ? 600 : 400;
-                                        color: row.is-selected ? c-on-accent : c-text;
+                                        font-weight: row.is-selected || row.ref-mark ? 600 : 400;
+                                        color: row.is-selected || row.ref-mark
+                                            ? c-on-accent : c-text;
                                         horizontal-stretch: 0;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
@@ -2310,8 +2399,8 @@ export component AppWindow inherits Window {
                                         text: row.type-str;
                                         vertical-alignment: center;
                                         // 与标题同字号（Finder 各列同字号，只以颜色分层）；
-                                        // 选中时副列是**白 70%**，不是纯白（同内容列表）。
-                                        color: row.is-selected
+                                        // 选中 / 关联项时副列是**白 70%**，不是纯白（同内容列表）。
+                                        color: row.is-selected || row.ref-mark
                                             ? c-on-accent.transparentize(0.3) : c-sub;
                                         overflow: elide;
                                     }
@@ -2586,6 +2675,11 @@ export component AppWindow inherits Window {
                             fill: transparent;
                         }
 
+                        // refs 关联线（§4.5）：虚线 + 中点标签（XMind「关联」语义）。
+                        // 数量级小（相对父子边），逐条一个 Path 即可；虚线由 Rust 侧
+                        // 直接写进命令串（Slint Path 无 dasharray 属性）。
+                        // refs 关联线渲染在节点层**之后**（最上层）—— 见节点循环之后。
+
                         for node[i] in root.mind-nodes: Rectangle {
                             // 容器：与节点等大同位、不裁剪，承载节点主体 + 两个外置按钮。
                             x: node.x * 1px + root.mind-off-x;
@@ -2747,7 +2841,7 @@ export component AppWindow inherits Window {
                                         }
                                         MenuItem {
                                             // 硬链接节点：挂载落**自有结构**（link-visit）。
-                                            title: "挂载已有分支…";
+                                            title: "创建链接…";
                                             activated => {
                                                 root.sel-hard = node.hard;
                                                 root.sel-expand-key = node.expand-key;
@@ -2830,6 +2924,10 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                         }
+                                        MenuItem {
+                                            title: "关联线…";
+                                            activated => { root.refs-dialog-open(); }
+                                        }
                                     }
                                 }
                                 // 节点手势（先声明在底层）：点标题行选中、双击伸缩子树、右键弹菜单。
@@ -2889,8 +2987,13 @@ export component AppWindow inherits Window {
                                             // 识别标识由 Rust 侧统一加（见结构树行）。
                                             text: node.title;
                                             font-size: 12px;
-                                            font-weight: node.is-root || node.is-selected ? 700 : 500;
-                                            color: node.is-selected ? c-sel-text : c-text;
+                                            font-weight: node.is-root || node.is-selected
+                                                ? 700 : (node.ref-mark ? 600 : 500);
+                                            // 关联项：粉字（实色填充只用于结构树行；
+                                            // 导图节点仅边框，粉字配合 2px 粉边框）。
+                                            color: node.ref-mark
+                                                ? c-ref
+                                                : (node.is-selected ? c-sel-text : c-text);
                                             overflow: elide;
                                             vertical-alignment: center;
                                             horizontal-stretch: 1;
@@ -2898,7 +3001,8 @@ export component AppWindow inherits Window {
                                         Text {
                                             text: node.type-str;
                                             font-size: 10px;
-                                            color: c-sub;
+                                            color: node.ref-mark
+                                                ? c-ref.transparentize(0.3) : c-sub;
                                             overflow: elide;
                                             visible: node.type-str != "";
                                             vertical-alignment: center;
@@ -2936,11 +3040,15 @@ export component AppWindow inherits Window {
                                     width: 100%;
                                     height: 100%;
                                     border-radius: 8px;
+                                    // 关联项 = 2px **实线**粉边框（与选中同粗、异色；
+                                    // 曾试过实色填充，用户反馈导图只需边框线）。
                                     border-width:
-                                        nodebody.node-hover || node.is-selected ? 2px : 1px;
-                                    border-color: nodebody.node-hover
+                                        nodebody.node-hover || node.is-selected ? 2px
+                                        : (node.ref-mark ? 2px : 1px);
+                                    border-color: nodebody.node-hover || node.is-selected
                                         ? c-accent
-                                        : (node.is-selected ? c-accent : c-line);
+                                        : (node.ref-mark ? c-ref
+                                            : (node.parent-mark ? c-ref-dim : c-line));
                                     background: transparent;
                                 }
                             }
@@ -2961,6 +3069,46 @@ export component AppWindow inherits Window {
                                 clicked => { root.toggle-node-content(node.visit); }
                             }
                         }
+                        }
+
+                        // ── refs 关联线（§4.5）：渲染在节点层**之后** = 最上层 ──
+                        // 跨子树的关联线必然途经其它不透明卡片，压在节点层下会被
+                        // 遮挡（现场反馈「依然被遮挡」）；改画在最上层（XMind 关联
+                        // 线同款）。虚线由 Rust 侧写进命令串（Slint Path 无
+                        // dasharray）。`mark` = 端点之一是当前选中分支 → 加粗。
+                        // 「视图 → 显示关联线」可整体隐藏。
+                        for re in root.mind-ref-edges: Path {
+                            visible: root.mind-show-refs;
+                            x: re.x * 1px + root.mind-off-x;
+                            y: re.y * 1px + root.mind-off-y;
+                            width: re.w * 1px;
+                            height: re.h * 1px;
+                            fit: preserve;
+                            commands: re.commands;
+                            stroke: c-ref;
+                            stroke-width: re.mark ? 3px : 2px;
+                            stroke-line-cap: round;
+                            fill: transparent;
+                        }
+                        for re in root.mind-ref-edges: Rectangle {
+                            visible: root.mind-show-refs;
+                            x: re.label-x * 1px + root.mind-off-x - self.width / 2;
+                            y: re.label-y * 1px + root.mind-off-y - self.height / 2;
+                            width: lb.preferred-width + 14px;
+                            height: lb.preferred-height + 7px;
+                            border-radius: 6px;
+                            background: re.mark ? c-ref : c-panel;
+                            border-width: re.mark ? 1.5px : 1px;
+                            border-color: c-ref;
+                            lb := Text {
+                                text: re.label;
+                                font-size: 11px;
+                                font-weight: 600;
+                                color: re.mark ? #ffffff : c-ref;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
                         }
                     }
 
@@ -3658,19 +3806,21 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── 挂载已有分支（软 / 硬链接）对话框 ──
-    // 入口三处：分支菜单「挂载已有分支…」/ 结构树行右键 / 导图节点右键。
+    // ── 创建链接（软 / 硬链接 / 关联线）对话框 ──
+    // 入口三处：分支菜单「创建链接…」/ 结构树行右键 / 导图节点右键。
     // 目标**只能从分支树里挑**（不可选者置灰仅展示：ROOT / 自身 / 祖先 / 硬链接时
     // 的后代 / id 重复者），不手输 UUID。
     if root.mount-dialog-visible: Rectangle {
         background: #00000066;
         TouchArea { clicked => { } }
-        // Esc 关闭（焦点在输入框内时按键沿父链冒泡到此）。
+        // Esc 关闭。必须主动持有焦点，Esc 才能进到 key-pressed（与其它对话框
+        // 一致）：本对话框的输入框不自动聚焦，靠这里兜底 —— 否则 ESC 无效。
         FocusScope {
             width: 100%;
             height: 100%;
             focus-on-click: false;
             focus-on-tab-navigation: false;
+            init => { self.focus(); }
             key-pressed(event) => {
                 if (event.text == "\u{1b}") {
                     root.mount-dialog-close();
@@ -3687,21 +3837,31 @@ export component AppWindow inherits Window {
                     padding: 20px;
                     spacing: 8px;
                     Text {
-                        text: "挂载已有分支";
+                        text: root.m-mode-index == 2 ? "新建关联线（refs）" : "创建链接";
                         font-size: 17px;
                         font-weight: 700;
                         color: c-text;
                         vertical-stretch: 0;
                     }
                     ComboBox {
-                        // 链接形态（规范 §4.6.1）：soft = 目标完整视图；hard = 仅内容关联。
-                        model: ["软连接（完整视图，可挂后代）", "硬链接（仅内容关联，只读）"];
+                        // 链接形态（规范 §4.6.1）：soft = 目标完整视图；hard = 仅内容关联；
+                        // refs（§4.5）= 跨树关联线（不进结构树）。
+                        model: ["软链接（完整视图，可挂后代）", "硬链接（仅内容关联，只读）", "关联线（refs，只画线不进树）"];
                         current-index <=> root.m-mode-index;
                         selected => { root.mount-mode-changed(self.current-index); }
                         vertical-stretch: 0;
                     }
+                    ComboBox {
+                        // 关联语义（规范 §5.3），仅形态 2（关联线）生效。
+                        model: ["related（弱关联）", "depends_on（依赖）", "instance_of（实例化）", "derived_from（派生自）", "ref（纯引用/再出现）"];
+                        current-index <=> root.m-rel-index;
+                        visible: root.m-mode-index == 2;
+                        vertical-stretch: 0;
+                    }
                     Text {
-                        text: "选择要挂载的分支（置灰者不可选）";
+                        text: root.m-mode-index == 2
+                            ? "选择关联目标（置灰者不可选）"
+                            : "选择要链接的分支（置灰者不可选）";
                         font-size: 12px;
                         color: c-sub;
                         vertical-stretch: 0;
@@ -3739,10 +3899,16 @@ export component AppWindow inherits Window {
                                 }
                                 // 行级 TouchArea 必须先声明，否则会盖住展开箭头的
                                 // 点击区（同结构树；箭头在后，天然行内最上层）。
+                                // 双击 = 展开 / 收起（与结构树行同一语义，不要求可选）。
                                 TouchArea {
                                     clicked => {
                                         if (row.pickable) {
                                             root.branch-pick-visit = row.visit;
+                                        }
+                                    }
+                                    double-clicked => {
+                                        if (row.has-children) {
+                                            root.pick-toggle-expand(index);
                                         }
                                     }
                                 }
@@ -3782,7 +3948,9 @@ export component AppWindow inherits Window {
                         }
                     }
                     LineEdit {
-                        placeholder-text: "挂载点别名（可选，留空显示目标标题）";
+                        placeholder-text: root.m-mode-index == 2
+                            ? "关联线标签（可选，导图连线上显示）"
+                            : "挂载点别名（可选，留空显示目标标题）";
                         text <=> root.m-title;
                         vertical-stretch: 0;
                         accepted(text) => { root.mount-create(); }
@@ -3793,10 +3961,220 @@ export component AppWindow inherits Window {
                         vertical-stretch: 0;
                         Button { text: "取消"; clicked => { root.mount-dialog-close(); } }
                         Button {
-                            text: "挂载";
+                            text: root.m-mode-index == 2 ? "创建关联线" : "创建链接";
                             enabled: root.branch-pick-ok;
                             clicked => { root.mount-create(); }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 关联线管理对话框（refs[]，规范 §4.5，双向）──
+    // 入口：结构树行 / 导图节点右键「关联线…」。列出当前分支的**全部关联线**：
+    // 正向（本分支 refs → 其它分支）与**反向**（其它分支 refs → 本分支，
+    // 被关联项同样可见）；每条可修改语义 / 标签、可删除（含反向，删在源分支）。
+    // 创建走「创建链接…」对话框「关联线」形态。
+    if root.refs-dialog-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        FocusScope {
+            width: 100%;
+            height: 100%;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            init => { self.focus(); }
+            // 编辑弹窗关闭后焦点不会自动回来（其 FocusScope 销毁即失焦，而本
+            // 对话框的 init 不会重跑）：镜像其显隐属性，关回本对话框时重新聚焦，
+            // ESC 才能继续生效。
+            property <bool> edit-overlay-visible <=> root.ref-edit-visible;
+            changed edit-overlay-visible => {
+                if (!self.edit-overlay-visible) {
+                    self.focus();
+                }
+            }
+            key-pressed(event) => {
+                if (event.text == "\u{1b}") {
+                    root.refs-dialog-close();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+            Rectangle {
+                width: 560px;
+                height: 380px;
+                background: c-panel;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 20px;
+                    spacing: 8px;
+                    Text {
+                        text: "关联线 — " + root.refs-branch-title;
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: c-text;
+                        vertical-stretch: 0;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.refs-rows.length == 0
+                            ? "本分支暂无关联线。在「创建链接…」对话框中选择「关联线（refs）」形态即可创建。"
+                            : "双向显示：→ 正向（本分支指向别人）/ ← 反向（别人指向本分支）。修改语义或标签后点「保存」。";
+                        font-size: 12px;
+                        color: c-sub;
+                        vertical-stretch: 0;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        width: 100%;
+                        height: 210px;
+                        border-width: 1px;
+                        border-color: c-line;
+                        border-radius: 6px;
+                        vertical-stretch: 0;
+                        clip: true;
+                        visible: root.refs-rows.length > 0;
+                        ListView {
+                            width: 100%;
+                            height: 100%;
+                            for r[index] in root.refs-rows: Rectangle {
+                                height: 50px;
+                                Rectangle {
+                                    x: 4px;
+                                    width: parent.width - 8px;
+                                    height: parent.height;
+                                    border-radius: 6px;
+                                    background: mod(index, 2) == 0 ? transparent : c-row-bg;
+                                }
+                                HorizontalLayout {
+                                    height: 100%;
+                                    padding-left: 10px;
+                                    padding-right: 8px;
+                                    spacing: 6px;
+                                    // 左列：方向 + 对端 + 当前语义（只读展示）。
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 1px;
+                                        alignment: center;
+                                        Text {
+                                            text: r.label == "" ? "（无标签）" : r.label;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            color: c-text;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: r.incoming
+                                                ? "←「" + r.target-title + "」→ 本分支（" + r.rel + "）"
+                                                : "本分支 →「" + r.target-title + "」（" + r.rel + "）";
+                                            font-size: 11px;
+                                            color: c-sub;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    Button {
+                                        text: "编辑";
+                                        height: 26px;
+                                        vertical-stretch: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        clicked => { root.ref-edit-open(r.id, r.target-title, r.incoming); }
+                                    }
+                                    Button {
+                                        text: "删除";
+                                        height: 26px;
+                                        vertical-stretch: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        clicked => { root.ref-delete(r.id); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        vertical-stretch: 0;
+                        Button { text: "关闭"; clicked => { root.refs-dialog-close(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 关联线编辑弹窗（单条，修改语义 / 标签）──
+    // 从关联线管理对话框「编辑」进入；保存落盘回管理对话框。
+    if root.ref-edit-visible: Rectangle {
+        background: #00000066;
+        TouchArea { clicked => { } }
+        FocusScope {
+            width: 100%;
+            height: 100%;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if (event.text == "\u{1b}") {
+                    root.ref-edit-cancel();
+                    return EventResult.accept;
+                }
+                return EventResult.reject;
+            }
+            Rectangle {
+                width: 440px;
+                height: 300px;
+                background: c-panel;
+                border-radius: 12px;
+                VerticalBox {
+                    padding: 20px;
+                    spacing: 8px;
+                    Text {
+                        text: "编辑关联线";
+                        font-size: 17px;
+                        font-weight: 700;
+                        color: c-text;
+                        vertical-stretch: 0;
+                    }
+                    Text {
+                        text: root.ref-edit-incoming
+                            ? "←「" + root.ref-edit-peer + "」→ 本分支"
+                            : "本分支 →「" + root.ref-edit-peer + "」";
+                        font-size: 12px;
+                        color: c-sub;
+                        vertical-stretch: 0;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "关联语义";
+                        font-size: 12px;
+                        color: c-sub;
+                        vertical-stretch: 0;
+                    }
+                    ComboBox {
+                        model: ["related（弱关联）", "depends_on（依赖）", "instance_of（实例化）", "derived_from（派生自）", "ref（纯引用/再出现）", "自定义…"];
+                        current-index <=> root.ref-edit-rel-index;
+                        vertical-stretch: 0;
+                    }
+                    Text {
+                        text: "关联线标签（留空 = 不显示标签）";
+                        font-size: 12px;
+                        color: c-sub;
+                        vertical-stretch: 0;
+                    }
+                    LineEdit {
+                        text <=> root.ref-edit-label;
+                        placeholder-text: "标签";
+                        init => { self.focus(); }
+                        accepted(text) => { root.ref-edit-save(); }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        vertical-stretch: 0;
+                        Button { text: "取消"; clicked => { root.ref-edit-cancel(); } }
+                        Button { text: "保存"; clicked => { root.ref-edit-save(); } }
                     }
                 }
             }
