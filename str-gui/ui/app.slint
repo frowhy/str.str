@@ -204,6 +204,9 @@ export global EntryApi {
     callback entry-cut();
     callback entry-duplicate();
     in-out property <string> menu-targets;
+    // 内容重命名弹窗的显隐镜像：面板 FocusScope 据此在弹窗关闭时夺回焦点
+    // （弹窗 FocusScope 销毁即失焦，空格预览等键需要面板重新持有焦点）。
+    in-out property <bool> rename-overlay: false;
     // 右键目标所属分支（visits 下标）：右键会先激活所在节点，故此属性随
     // fill 刷新为激活分支；跨节点右键后动作作用于新激活分支的选中行。
     in-out property <int> menu-target-visit: -1;
@@ -656,6 +659,14 @@ component EntryListPanel inherits Rectangle {
         // 行点击处显式聚焦本 FocusScope（`keys.focus()`）：Slint 的 focus-on-click
         // 只在点击事件**到达 FocusScope 自身**时生效（input_items.rs:669-685），
         // 而行 TouchArea / DragArea 会把点击消费掉 —— 不显式聚焦就永远收不到空格。
+        // 重命名弹窗（本面板发起）关闭后焦点随其 FocusScope 销毁而丢失 → 镜像
+        // 其显隐属性，关闭时若本面板仍是动作目标分支则重新聚焦，空格恢复可用。
+        property <bool> rename-overlay <=> EntryApi.rename-overlay;
+        changed rename-overlay => {
+            if (!self.rename-overlay && src-visit == EntryApi.menu-target-visit) {
+                self.focus();
+            }
+        }
         key-pressed(event) => {
             // Esc 关闭快速查看（面板不抢 key，故按键由本面板接住）。
             if (event.text == Key.Escape && EntryApi.quick-look-open) {

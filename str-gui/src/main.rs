@@ -9853,6 +9853,8 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 // （内容文件夹的子行），带目录会让用户连带改掉路径。
                 app.set_rename_name(basename(&path).into());
                 app.set_rename_visible(true);
+                // 镜像显隐：面板据此在弹窗关闭时夺回焦点（空格预览等键依赖）。
+                app.global::<EntryApi>().set_rename_overlay(true);
             });
         }
         {
@@ -9865,6 +9867,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     return;
                 }
                 app.set_rename_visible(false);
+                app.global::<EntryApi>().set_rename_overlay(false);
                 let Some((dir, old_path)) = pending.borrow_mut().take() else {
                     return;
                 };
@@ -9946,7 +9949,9 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         {
             let app_weak = app.as_weak();
             app.on_rename_cancel(move || {
-                app_weak.upgrade().unwrap().set_rename_visible(false);
+                let app = app_weak.upgrade().unwrap();
+                app.set_rename_visible(false);
+                app.global::<EntryApi>().set_rename_overlay(false);
             });
         }
     }
