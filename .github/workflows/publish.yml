@@ -22,7 +22,7 @@ name: publish-crates
 #
 # 注意：`str-format` 通过 `include_str!("../schema/…")` 内嵌三份 Schema，
 # 而 crates.io 只打包 crate 目录内的文件 —— 故 crate 内 `schema/` 是仓库根
-# `._schema/` 的派生副本，由 `bash scripts/sync-schema.sh` 生成、
+# `.str.schema/` 的派生副本，由 `bash scripts/sync-schema.sh` 生成、
 # 由 `tests/schema_sync.rs` 守卫一致性（见下方「打包内容自检」步骤）。
 #
 # 本地演练（不上传）：

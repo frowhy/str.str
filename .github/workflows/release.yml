@@ -6,7 +6,7 @@ name: release
 # crates.io 的发布由 publish.yml 负责（同一个 v* tag 也会触发它）；两者互不依赖，
 # 可各自重跑——crates.io 侧出问题不应阻塞 GitHub Release，反之亦然。
 #
-# 注意：str-cli 通过 `include_str!("../../._schema/…")` 内嵌三份 Schema，
+# 注意：str-cli 通过 `include_str!("../../.str.schema/…")` 内嵌三份 Schema，
 # 编译期需要完整的仓库布局，因此 checkout 必须是整个仓库（不能只 checkout str-cli/）。
 
 on:
@@ -18,7 +18,7 @@ on:
       tag:
         description: "要发布的 tag（例如 v0.3.0）"
         required: true
-        default: "v0.9.0"
+        default: "v0.10.0"
 
 permissions:
   contents: write
@@ -48,7 +48,7 @@ jobs:
         run: cargo test --locked --all-targets
 
       # 规范 §12 DoD 19/20 的门禁：仓库自举与示例 bundle 都必须「校验 0 error」且
-      # 「每个 ._meta 已是 §4.9 规范形式」（确定性序列化）。
+      # 「每个 .str.toml 已是 §4.9 规范形式」（确定性序列化）。
       - name: 自举门禁（仓库自身 + 示例 bundle）
         run: |
           cargo build --release --locked --manifest-path str-cli/Cargo.toml
@@ -202,7 +202,7 @@ jobs:
         自动定位（必要时构建）二进制。GUI 与 `str` CLI 读写同一套 bundle，可混用。
 
         规范正文、三份 JSON Schema 与示例 bundle 见 GitHub 自动提供的源码归档
-        （Source code）中的 `STR-FORMAT-PROMPT.md`、`._schema/` 与 `examples/`。
+        （Source code）中的 `STR-FORMAT-PROMPT.md`、`.str.schema/` 与 `examples/`。
     steps:
       - uses: actions/checkout@v4
         with:

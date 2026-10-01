@@ -2,13 +2,13 @@
 .DS_Store
 Thumbs.db
 desktop.ini
-# macOS AppleDouble 伴生文件（exFAT/SMB/zip 解压产物）
+# macOS AppleDouble 伴生文件（exFAT/SMB/zip 解压产物；v1.17.0 起与格式名零冲突，纯噪声）
 **/._*
-# ⚠ STR 格式自身就使用 ._ 前缀，规范文件必须入库（顺序敏感：后者覆盖前者）
-!**/._meta
-!**/._schema/
+# ⚠ 格式文件必须入库（顺序敏感：后者覆盖前者；.str.* 不命中上面的 ._ 模式，取反仅为显式声明）
+!**/.str.toml
+!**/.str.schema/
 # 派生缓存不入库（规范 §7.4）
-**/._cache/
+**/.str.cache/
 **/.lock
 
 # ── 实现产物（str-cli/ 为 Rust 工程根）────────────────────

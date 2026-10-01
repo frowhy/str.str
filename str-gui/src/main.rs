@@ -1,6 +1,6 @@
 //! STR bundle GUI 编辑器（Rust + Slint）。
 //!
-//! 所有 `._meta` 的读取与写回均经由 `str-format` 库，
+//! 所有 `.str.toml` 的读取与写回均经由 `str-format` 库，
 //! 写出字节一律是规范 §4.9 的 canonical 形式，保证 Git diff 干净、校验器零告警。
 
 // Windows release 构建不附带控制台（「命令提示符」）窗口。
@@ -370,7 +370,7 @@ enum ContentOp {
 ///    批量删除耗时 ≈ 8.5 分钟（≈0.55s/项）的**主因**；原生 `NSFileManager.trashItem`
 ///    实测仅 **0.9 ms/项**。故这里改为攒批后 `trash::delete_all(paths)`（一次调用），
 ///    既保留 Finder 语义（「放回原处」可用、声音一次），又把进程 spawn 次数从 n 降到 n/200。
-/// 2. `._meta` 的解析/重写是 O(bundle 内容)，逐项做即 O(n²) 写放大。
+/// 2. `.str.toml` 的解析/重写是 O(bundle 内容)，逐项做即 O(n²) 写放大。
 ///
 /// 崩溃安全：每 `FLUSH_EVERY` 项落盘一次；废纸篓成功后才撤登记（失败则保留登记）。
 struct WriteSession {
@@ -426,7 +426,7 @@ impl WriteSession {
     }
 
     /// 一次把队列里的条目交给废纸篓；**成功后才撤登记**（失败则登记保留，
-    /// 磁盘与 `._meta` 不会不一致），随后按需落盘。
+    /// 磁盘与 `.str.toml` 不会不一致），随后按需落盘。
     fn commit_trash(&mut self) -> Result<(), String> {
         if self.trash_queue.is_empty() {
             return Ok(());
@@ -489,7 +489,7 @@ fn trash_delete_all(paths: &[PathBuf]) -> Result<(), String> {
             }
         }
         // Finder 失败可能**已经删掉一部分**，降级前按存在性过滤：否则对已入废纸篓的路径
-        // 再次调用会让整批报错，进而让「已删文件」仍留在登记里（磁盘/`._meta` 不一致）。
+        // 再次调用会让整批报错，进而让「已删文件」仍留在登记里（磁盘/`.str.toml` 不一致）。
         let rest: Vec<&PathBuf> = paths.iter().filter(|p| p.exists()).collect();
         if rest.is_empty() {
             return Ok(());
@@ -512,7 +512,7 @@ impl ContentOp {
     /// 成功返回 (提示文案, 落地后的登记路径)。
     ///
     /// `session`：Trash / Rename 复用同一个 `WriteSession`（整批一次 `Bundle::new`，
-    /// `._meta` 内存累积、按阈值与收尾落盘）；Paste 走 `apply_clip_at` 自管读写，忽略之。
+    /// `.str.toml` 内存累积、按阈值与收尾落盘）；Paste 走 `apply_clip_at` 自管读写，忽略之。
     fn run_with(
         &self,
         session: &mut Option<WriteSession>,
@@ -587,9 +587,9 @@ impl ContentOp {
                     let dst = folder_fs.join(&name);
                     if clip.is_cut {
                         move_file(&clip.src_path, &dst)?;
-                        // 源若是**分支**（有 ._meta）撤登记；内容文件夹子行本就不登记。
+                        // 源若是**分支**（有 .str.toml）撤登记；内容文件夹子行本就不登记。
                         if let Some(sp) = clip.src_path.parent() {
-                            if sp.starts_with(bundle_root) && sp.join("._meta").exists() {
+                            if sp.starts_with(bundle_root) && sp.join(".str.toml").exists() {
                                 let mut sm = read_meta(&bundle, sp)?;
                                 sm.remove_entry_path(&clip.name);
                                 sm.touch();
@@ -618,7 +618,7 @@ impl ContentOp {
     }
 }
 
-/// 后台线程执行批量操作：顺序逐项（`._meta` 登记写回需要互斥），
+/// 后台线程执行批量操作：顺序逐项（`.str.toml` 登记写回需要互斥），
 /// 逐项推进进度（`invoke_from_event_loop` **直写状态栏**，不再有模态进度浮层），
 /// 结束后把结果写入 `results_slot`，仅在**有失败**时弹汇总对话框并触发 rescan。
 ///
@@ -1177,7 +1177,7 @@ fn has_content_entries(scan: &Scan, visit: &Visit) -> bool {
 /// 分支身份键 = `Visit::rel`（bundle 内相对路径）。
 ///
 /// **不用 `meta.id`**：id 可被复制 —— 在 Finder 里把分支目录复制到别处（⌥ 拖拽）时
-/// `._meta` 一并被复制，于是两个**同名**分支共享同一 id（规范侧由 `E_ID_DUP` 报错）。
+/// `.str.toml` 一并被复制，于是两个**同名**分支共享同一 id（规范侧由 `E_ID_DUP` 报错）。
 /// 这时任何 `id → 下标` 的解析都落到「首次命中」：点第二个同名分支会激活第一个，
 /// 且按 id 比较的选中判定会把两个同名节点**同时点亮** —— 即「同名会产生激活意外」。
 /// `rel` 由目录结构决定、天然唯一且跨 rescan 稳定，故 GUI 内一切分支记账（选中 /
@@ -1482,7 +1482,7 @@ fn visit_type(visit: &Visit) -> String {
                 }
             })
         })
-        .unwrap_or_else(|| "（._meta 解析失败）".into())
+        .unwrap_or_else(|| "（.str.toml 解析失败）".into())
 }
 
 // ── 思维导图布局：水平树 + 子树垂直带（band）模型 ──
@@ -2717,7 +2717,7 @@ fn read_meta(bundle: &Bundle, dir: &Path) -> Result<Meta, String> {
     match bundle.read_meta(dir).map_err(|e| e.to_string())? {
         MetaLoad::Ok(m, _) => Ok(*m),
         MetaLoad::Failed(issues) => Err(format!(
-            "._meta 解析失败：{}",
+            ".str.toml 解析失败：{}",
             issues
                 .first()
                 .map(|i| i.message.clone())
@@ -2767,7 +2767,7 @@ fn dedup_name(existing: &HashSet<String>, name: &str) -> String {
     candidate
 }
 
-/// 递归复制目录（不含 `._meta` 语义，仅内容容器）。
+/// 递归复制目录（不含 `.str.toml` 语义，仅内容容器）。
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -2783,7 +2783,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 递归复制分支：重建 `._meta`（新 id、新 ref id、修正子分支指向），payload 按位拷贝。
+/// 递归复制分支：重建 `.str.toml`（新 id、新 ref id、修正子分支指向），payload 按位拷贝。
 ///
 /// 返回新分支 id；`depth` 为目标父分支深度（用于决定 node/branch）。
 fn copy_branch_recursive(
@@ -3813,7 +3813,7 @@ fn e_bundle_root(editor: &Rc<RefCell<Editor>>) -> Option<PathBuf> {
     editor.borrow().bundle.as_ref().map(|b| b.root.clone())
 }
 
-/// 从系统剪贴板的文件路径反推应用内条目：角色取自源分支 `._meta` 的登记
+/// 从系统剪贴板的文件路径反推应用内条目：角色取自源分支 `.str.toml` 的登记
 /// （系统剪贴板是唯一事实来源，内部剪贴板只服务非 macOS 平台）。
 /// 路径不在 bundle 内 → None（外部文件走导入分支）。
 fn derive_clip(scan: &Scan, src: &Path, is_cut: bool) -> Option<ClipItem> {
@@ -4194,7 +4194,7 @@ fn apply_clip_at(
     let mut meta = read_meta(bundle, visit_dir)?;
     let existing: HashSet<String> = meta.entries.iter().map(|x| x.path.clone()).collect();
     // 状态栏「来源 → 目标」用：目标 = 目的地分支标题；来源 = 剪切时的源分支标题。
-    // 复制/粘贴的来源是剪贴板本身，故不读源 `._meta`（避免在后台批量线程里多一次 IO）。
+    // 复制/粘贴的来源是剪贴板本身，故不读源 `.str.toml`（避免在后台批量线程里多一次 IO）。
     let dst_title = meta.title.clone().unwrap_or_default();
     let src_title = if cut {
         clip.src_path
@@ -4305,9 +4305,9 @@ fn apply_clip_at(
     // 剪切：移除源分支的 entries 登记。
     if cut {
         let src_parent = clip.src_path.parent().ok_or("无法定位源分支目录")?;
-        // 仅当源目录是**分支**（有 ._meta）才需要撤登记 —— 内容文件夹的子行本就
-        // 不登记；对无 ._meta 的目录做 read_meta+save 会凭空把该目录变成分支。
-        if src_parent.starts_with(&bundle.root) && src_parent.join("._meta").exists() {
+        // 仅当源目录是**分支**（有 .str.toml）才需要撤登记 —— 内容文件夹的子行本就
+        // 不登记；对无 .str.toml 的目录做 read_meta+save 会凭空把该目录变成分支。
+        if src_parent.starts_with(&bundle.root) && src_parent.join(".str.toml").exists() {
             let mut sm = read_meta(bundle, src_parent)?;
             sm.remove_entry_path(&clip.name);
             sm.touch();
@@ -4323,7 +4323,7 @@ fn apply_clip_at(
 
 /// 粘贴到**内容文件夹**（文件夹行右键「粘贴」）。
 ///
-/// 内容文件夹不是分支、没有 `._meta`，其子项**不登记**（与拖拽移入同规则）：
+/// 内容文件夹不是分支、没有 `.str.toml`，其子项**不登记**（与拖拽移入同规则）：
 /// 只做文件系统落地 + 维护该 dir 条目的 count；**不得**对文件夹目录做
 /// read_meta+save —— 会凭空把它变成分支。返回成功落地的新路径（分支内相对
 /// 路径 "文件夹/文件名"）。剪切成源目录 == 目标文件夹时跳过（原地剪切 = 无效）。
@@ -4371,10 +4371,10 @@ fn paste_into_folder(
         } else {
             std::fs::copy(&clip.src_path, &dst).map_err(|err| err.to_string())?;
         }
-        // 剪切：源若是**分支**（有 ._meta）撤登记；内容文件夹子行本就不登记。
+        // 剪切：源若是**分支**（有 .str.toml）撤登记；内容文件夹子行本就不登记。
         if clip.is_cut {
             if let Some(sp) = clip.src_path.parent() {
-                if sp.starts_with(&bundle.root) && sp.join("._meta").exists() {
+                if sp.starts_with(&bundle.root) && sp.join(".str.toml").exists() {
                     let mut sm = read_meta(&bundle, sp)?;
                     sm.remove_entry_path(&clip.name);
                     sm.touch();
@@ -5061,7 +5061,7 @@ fn mount_reorder(
     Ok("已调整挂载顺序。".into())
 }
 
-/// 移动分支后按新深度同步其自身 `._meta` 的 `kind`（深度 1 = node，≥2 = branch）。
+/// 移动分支后按新深度同步其自身 `.str.toml` 的 `kind`（深度 1 = node，≥2 = branch）。
 /// kind 已正确（深度未变化）时空操作。`role` 为父级登记所用 role 字面量
 /// （node/branch，与 moved 新深度的 kind 同规则），否则校验报
 /// E_KIND_DEPTH / E_ENTRY_ROLE_DEPTH。
@@ -5116,7 +5116,7 @@ fn make_first_branch(meta: &mut Meta, path: &str) {
 
 /// 分支结构移动：把 `src` 分支移入 `target` 分支作为**第一个子分支**
 /// （fs 目录移动 + 源父级撤登记 + 目标登记；角色随新深度 node/branch）。
-/// 分支自身 `._meta` 随目录移动，内部条目相对路径不受影响。
+/// 分支自身 `.str.toml` 随目录移动，内部条目相对路径不受影响。
 fn branch_move_into_child(e: &mut Editor, src: usize, target: usize) -> Result<String, String> {
     let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?.clone();
     let scan = e.scan.as_ref().ok_or("未打开 bundle")?;
@@ -6839,7 +6839,7 @@ fn main() -> Result<(), slint::PlatformError> {
     /// 4. **术语与量词**：`Finder`（禁「访达」）、`拷贝`（禁「复制」）；条目 = 项、
     ///    路径 = 条、目录 = 个、分支 = 个；名称与路径一律 `「」` 包裹；
     ///    数字与中文之间保留**一个半角空格**（`已移动 3 项`），`「」` 两侧不加空格。
-    /// 5. **禁止内部实现术语**：canonical、写回、sha256、`._meta`、fs / IO 细节
+    /// 5. **禁止内部实现术语**：canonical、写回、sha256、`.str.toml`、fs / IO 细节
     ///    （`revision` 属 STR 规范概念，可保留）。
     ///
     /// 取标题 / 名称一律复用 `visit_title` / `title_of_dir` / `name_list`
@@ -6886,7 +6886,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
 }
 
 
-    /// 批量执行期间的**写入互斥**：批量在后台线程写 `._meta` / 移动文件，
+    /// 批量执行期间的**写入互斥**：批量在后台线程写 `.str.toml` / 移动文件，
     /// 此时任何新的写盘入口都必须被拒绝（此前靠模态进度遮罩挡住点击，
     /// 遮罩移除后改为显式门禁）。返回 `true` = 已提示、调用方应立即 `return`。
     ///
@@ -7509,7 +7509,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
         });
     }
 
-    // ── 重命名分支（只改 `._meta.title`；分支目录名是 UUID，不可变）──
+    // ── 重命名分支（只改 `.str.toml.title`；分支目录名是 UUID，不可变）──
     {
         let editor = editor.clone();
         let app_weak = app.as_weak();
@@ -8131,7 +8131,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
             }
             .to_string();
             let result = with_editor(&editor, |e| {
-                if path.contains('/') || path.starts_with('.') || path == "._meta" {
+                if path.contains('/') || path.starts_with('.') || path == ".str.toml" {
                     return Err("路径必须是单段文件名，且不得以 . 开头".into());
                 }
                 let bundle = e.bundle.as_ref().ok_or("未打开 bundle")?;
@@ -8529,7 +8529,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     if new_name.is_empty()
                         || new_name.contains('/')
                         || new_name.starts_with('.')
-                        || new_name == "._meta"
+                        || new_name == ".str.toml"
                     {
                         show_status(&app, format!("名称无效：「{new_name}」（{path}）。").into());
                         return;
@@ -8958,7 +8958,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 }
                 // 软链接：`path` = 目标 id，**不带 id**（身份由 target 给出，声明式，
                 // 磁盘不新建目录）。硬链接：有身份的真实分支 —— `path` = `id` =
-                // 自身目录名，现在创建目录与 `._meta`；内容所有权仍在目标分支
+                // 自身目录名，现在创建目录与 `.str.toml`；内容所有权仍在目标分支
                 // （自有 entries 只允许子分支，内容面板显示目标内容且只读）。
                 let (entry_path, entry_id, entry_title) = if hard {
                     let id_version = scan
@@ -9894,7 +9894,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     if new_name.is_empty()
                         || new_name.contains('/')
                         || new_name.starts_with('.')
-                        || new_name == "._meta"
+                        || new_name == ".str.toml"
                     {
                         return Err(format!("无效名称：{new_name}"));
                     }
@@ -10699,7 +10699,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                                 // 移回**分支根** = 顶层清单来自 meta.entries，必须登记 ——
                                 // 与「拖到分支 / 节点」的既有路径同规则（role=payload +
                                 // size + sha256，见同文件上方那段）。少了这步文件在磁盘上、
-                                // 列表里却查不到（用户报告：「已移动但未登记到 ._meta
+                                // 列表里却查不到（用户报告：「已移动但未登记到 .str.toml
                                 // 导致无法显示」）。落到已登记的**内容文件夹**内不单独登记，
                                 // 只由下方的 count 维护负责。
                                 if target == visit_dir {
@@ -11479,9 +11479,9 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                     return Err("拖拽载荷中没有文件".into());
                 }
                 let paths: Vec<PathBuf> = files.lines().map(PathBuf::from).collect();
-                // 未打开 bundle 时：拖入 .str 目录（含 ._meta 的目录）= 直接打开，而非导入报错。
+                // 未打开 bundle 时：拖入 .str 目录（含 .str.toml 的目录）= 直接打开，而非导入报错。
                 if e.bundle.is_none() {
-                    match paths.iter().find(|p| p.is_dir() && p.join("._meta").is_file()) {
+                    match paths.iter().find(|p| p.is_dir() && p.join(".str.toml").is_file()) {
                         Some(first) => {
                             e.open(first)?;
                             drop_opened = Some(canonical_bundle_path(first));
@@ -11611,7 +11611,7 @@ fn hard_view_guard(app: &AppWindow, e: &Editor) -> bool {
                 let created = util::now_rfc3339();
                 let text =
                     meta_edit::render_root_meta(&name, Some(&name), None, &root_id, &created, 7);
-                std::fs::write(bundle_dir.join("._meta"), text).map_err(|err| err.to_string())?;
+                std::fs::write(bundle_dir.join(".str.toml"), text).map_err(|err| err.to_string())?;
                 Ok(())
             })();
             match result.and_then(|()| with_editor(&editor, |e| e.open(&bundle_dir))) {
@@ -12691,8 +12691,8 @@ mod move_group_tests {
     use super::*;
 
     /// 临时复制的示例 bundle（写盘测试不能污染仓库里的示例）。
-    /// `._cache` 是派生数据（revisions 基线），必须剔除 —— 手工 upsert 后的
-    /// `._meta` 与陈旧基线放一起会报 `E_REVISION_STALE`。
+    /// `.str.cache` 是派生数据（revisions 基线），必须剔除 —— 手工 upsert 后的
+    /// `.str.toml` 与陈旧基线放一起会报 `E_REVISION_STALE`。
     fn temp_editor() -> (PathBuf, Editor) {
         let src =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/客户运营.str");
@@ -12703,7 +12703,7 @@ mod move_group_tests {
         let dst = std::env::temp_dir()
             .join(format!("str-gui-move-group-{}-{nanos}.str", std::process::id()));
         copy_dir_recursive(&src, &dst).expect("复制示例 bundle");
-        let _ = std::fs::remove_dir_all(dst.join("._cache"));
+        let _ = std::fs::remove_dir_all(dst.join(".str.cache"));
         let mut e = Editor::new();
         e.open(&dst).expect("打开临时 bundle");
         (dst, e)
@@ -12809,7 +12809,7 @@ mod move_group_tests {
                 scan.visits[dst_visit].dir.clone(),
             )
         };
-        // 只落磁盘、不写 `._meta`：模拟内容文件夹的子文件夹。
+        // 只落磁盘、不写 `.str.toml`：模拟内容文件夹的子文件夹。
         let folder = "未登记文件夹";
         let _ = std::fs::remove_dir_all(src_dir.join(folder));
         std::fs::create_dir_all(src_dir.join(folder)).unwrap();
@@ -12952,7 +12952,7 @@ mod mount_tests {
         let body_b = "{\"b\":2}\n";
         let mode = if hard { "mode = \"hard\"\n" } else { "" };
         // 软链接：path = target、无 id、无目录；硬链接：path = id = 自身目录名
-        //（目录真实存在，内含自有 `._meta`），内容来自 target。
+        //（目录真实存在，内含自有 `.str.toml`），内容来自 target。
         let link = if hard {
             format!(
                 "[[entries]]\npath = \"{RL}\"\nrole = \"link\"\nid = \"{RL}\"\ntarget = \"{RB}\"\n{mode}"
@@ -12968,7 +12968,7 @@ mod mount_tests {
             }
         };
         std::fs::write(
-            root.join("._meta"),
+            root.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000003",
@@ -12983,7 +12983,7 @@ mod mount_tests {
         // ROOT 的 payload 条目是占位（无磁盘文件、非 optional 会报 ghost），
         // 但 Editor::open 不做严格校验 —— 直接换成正确的登记。
         std::fs::write(
-            root.join("._meta"),
+            root.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000003",
@@ -12995,22 +12995,22 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(RA).join("._meta"),
+            root.join(RA).join(".str.toml"),
             meta_text("node", RA, &format!("{}{}", payload_entry("a.json", body_a), link)),
         )
         .unwrap();
         std::fs::write(root.join(RA).join("a.json"), body_a).unwrap();
         if hard {
-            // 硬链接分支的自有目录与 `._meta`（只有子分支登记，无内容条目）。
+            // 硬链接分支的自有目录与 `.str.toml`（只有子分支登记，无内容条目）。
             std::fs::create_dir_all(root.join(RA).join(RL)).unwrap();
             std::fs::write(
-                root.join(RA).join(RL).join("._meta"),
+                root.join(RA).join(RL).join(".str.toml"),
                 meta_text("branch", RL, "title = \"硬链接视图\"\n"),
             )
             .unwrap();
         }
         std::fs::write(
-            root.join(RB).join("._meta"),
+            root.join(RB).join(".str.toml"),
             meta_text("node", RB, &payload_entry("b.json", body_b)),
         )
         .unwrap();
@@ -13124,7 +13124,7 @@ mod mount_tests {
     }
 
     /// 摘引用（`unmount_link`）：软挂载只从挂载点 `entries[]` 移除 link 行 ——
-    /// 目标分支目录、`._meta` 与内容完好（回归：菜单栏 / 信息页删除入口曾在
+    /// 目标分支目录、`.str.toml` 与内容完好（回归：菜单栏 / 信息页删除入口曾在
     /// 挂载行选中态下误删目标真身）。
     #[test]
     fn unmount_link_keeps_target_branch() {
@@ -13134,8 +13134,8 @@ mod mount_tests {
         let b_idx = e.visit_idx(RB).expect("B");
         let b_dir = e.scan.as_ref().unwrap().visits[b_idx].dir.clone();
         let (_pt, _dt) = unmount_link(&mut e, a_idx, b_idx).expect("摘引用成功");
-        // 目标分支完好：目录、`._meta` 与内容文件都在，且仍可解析。
-        assert!(b_dir.join("._meta").exists(), "目标分支 `._meta` 仍在");
+        // 目标分支完好：目录、`.str.toml` 与内容文件都在，且仍可解析。
+        assert!(b_dir.join(".str.toml").exists(), "目标分支 `.str.toml` 仍在");
         assert!(b_dir.join("b.json").exists(), "目标内容仍在");
         assert!(
             e.visit_idx(RB).is_some(),
@@ -13227,11 +13227,11 @@ mod mount_tests {
             a_meta.entries.iter().all(|en| !en.is_link()),
             "旧挂载点的声明已摘除"
         );
-        assert!(b_dir.join("._meta").exists(), "目标分支完好");
+        assert!(b_dir.join(".str.toml").exists(), "目标分支完好");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 重挂载（硬）：自有目录随挂载点搬家（`._meta` 的 target 不变），旧挂载点
+    /// 重挂载（硬）：自有目录随挂载点搬家（`.str.toml` 的 target 不变），旧挂载点
     /// 摘登记、新挂载点登记；目标分支与数据不动。
     #[test]
     fn mount_move_hard_relocates_own_dir() {
@@ -13251,7 +13251,7 @@ mod mount_tests {
         let b_idx = e.visit_idx(RB).unwrap();
         mount_move_into_child(&mut e, a_idx, b_idx, root_idx).expect("重挂载成功");
         let new_dir = root_dir.join(RL);
-        assert!(new_dir.join("._meta").exists(), "硬链接自有目录已随迁");
+        assert!(new_dir.join(".str.toml").exists(), "硬链接自有目录已随迁");
         assert!(!a_dir.join(RL).exists(), "旧位置目录已移走");
         let bundle = e.bundle.as_ref().unwrap();
         // target 绑定在新挂载点（ROOT）的 link 声明行上，且 mode = hard 保留。
@@ -13902,7 +13902,7 @@ mod mount_tests {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(
-            root.join("._meta"),
+            root.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000003",
@@ -13917,7 +13917,7 @@ mod mount_tests {
         .unwrap();
         let link_a = format!("[[entries]]\npath = \"{RA}\"\nrole = \"link\"\ntarget = \"{RA}\"\n");
         std::fs::write(
-            root.join(r1).join("._meta"),
+            root.join(r1).join(".str.toml"),
             meta_text(
                 "node",
                 r1,
@@ -13929,7 +13929,7 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(RA).join("._meta"),
+            root.join(r1).join(RA).join(".str.toml"),
             meta_text(
                 "branch",
                 RA,
@@ -13938,18 +13938,18 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(RA).join(a1).join("._meta"),
+            root.join(r1).join(RA).join(a1).join(".str.toml"),
             meta_text("branch", a1, "title = \"A1\"\n"),
         )
         .unwrap();
         std::fs::write(
-            root.join(r2).join("._meta"),
+            root.join(r2).join(".str.toml"),
             meta_text("node", r2, &link_a),
         )
         .unwrap();
         // B：硬链接 ≡A（自有目录 hl）+ 软挂载 ⤷A。
         std::fs::write(
-            root.join(RB).join("._meta"),
+            root.join(RB).join(".str.toml"),
             meta_text(
                 "node",
                 RB,
@@ -13961,12 +13961,12 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(RB).join(hl).join("._meta"),
+            root.join(RB).join(hl).join(".str.toml"),
             meta_text("branch", hl, "title = \"硬A\"\n"),
         )
         .unwrap();
         std::fs::write(
-            root.join(r3).join("._meta"),
+            root.join(r3).join(".str.toml"),
             meta_text("node", r3, "title = \"R3\"\n"),
         )
         .unwrap();
@@ -14067,7 +14067,7 @@ mod mount_tests {
                 std::fs::create_dir_all(&dir).unwrap();
                 let kind = if parent.is_none() { "node" } else { "branch" };
                 std::fs::write(
-                    dir.join("._meta"),
+                    dir.join(".str.toml"),
                     meta_text(kind, id, "title = \"N\"\n"),
                 )
                 .unwrap();
@@ -14081,7 +14081,7 @@ mod mount_tests {
                 })
                 .collect();
             std::fs::write(
-                root.join("._meta"),
+                root.join(".str.toml"),
                 meta_text("root", "01928f3a-7c4b-4000-8000-000000000000", &top_list.concat()),
             )
             .unwrap();
@@ -14102,7 +14102,7 @@ mod mount_tests {
                     None => root.join(id),
                 };
                 std::fs::write(
-                    dir.join("._meta"),
+                    dir.join(".str.toml"),
                     meta_text("branch", id, &kid_list),
                 )
                 .unwrap();
@@ -14151,7 +14151,7 @@ mod mount_tests {
                     if is_ancestor(target, parent) || target == parent {
                         continue; // 环 / 自我挂载：跳过。
                     }
-                    let meta_path = dir_of(parent).join("._meta");
+                    let meta_path = dir_of(parent).join(".str.toml");
                     let mut text = std::fs::read_to_string(&meta_path).unwrap();
                     // 同挂载点同目标只挂一次（软链接 path = 目标 id）。
                     if text.contains(&format!("path = \"{target}\"")) {
@@ -14170,7 +14170,7 @@ mod mount_tests {
                             let hc = format!("01928f3a-7c4b-4000-8000-{hl_seq:012}");
                             std::fs::create_dir_all(hdir.join(&hc)).unwrap();
                             std::fs::write(
-                                hdir.join(&hc).join("._meta"),
+                                hdir.join(&hc).join(".str.toml"),
                                 meta_text("branch", &hc, "title = \"硬子\"\n"),
                             )
                             .unwrap();
@@ -14188,7 +14188,7 @@ mod mount_tests {
                                 ));
                             }
                         }
-                        std::fs::write(hdir.join("._meta"), meta_text("branch", &hl, &hl_tables))
+                        std::fs::write(hdir.join(".str.toml"), meta_text("branch", &hl, &hl_tables))
                             .unwrap();
                         text.push_str(&format!(
                             "[[entries]]\npath = \"{hl}\"\nrole = \"link\"\nid = \"{hl}\"\n\
@@ -14306,7 +14306,7 @@ mod mount_tests {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(
-            root.join("._meta"),
+            root.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000000",
@@ -14315,7 +14315,7 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join("._meta"),
+            root.join(r1).join(".str.toml"),
             meta_text(
                 "node",
                 r1,
@@ -14330,12 +14330,12 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(t).join("._meta"),
+            root.join(r1).join(t).join(".str.toml"),
             meta_text("branch", t, "title = \"T\"\n"),
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(t2).join("._meta"),
+            root.join(r1).join(t2).join(".str.toml"),
             meta_text(
                 "branch",
                 t2,
@@ -14344,18 +14344,18 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(t2).join(t2a).join("._meta"),
+            root.join(r1).join(t2).join(t2a).join(".str.toml"),
             meta_text("branch", t2a, "title = \"T2A\"\n"),
         )
         .unwrap();
         std::fs::write(
-            root.join(r1).join(s).join("._meta"),
+            root.join(r1).join(s).join(".str.toml"),
             meta_text("branch", s, "title = \"S\"\n"),
         )
         .unwrap();
         // HL 自有结构：软挂载 ⤷T2。
         std::fs::write(
-            root.join(r1).join(hl).join("._meta"),
+            root.join(r1).join(hl).join(".str.toml"),
             meta_text(
                 "branch",
                 hl,
@@ -14477,7 +14477,7 @@ mod mount_tests {
                 let t2 = &all[(i * 11 + 5) % all.len()];
                 if top_of(&parent_of, t2) != top_of(&parent_of, &hl) {
                     std::fs::write(
-                        hdir.join("._meta"),
+                        hdir.join(".str.toml"),
                         meta_text(
                             "branch",
                             &hl,
@@ -14488,7 +14488,7 @@ mod mount_tests {
                     )
                     .unwrap();
                 } else {
-                    std::fs::write(hdir.join("._meta"), meta_text("branch", &hl, "title = \"硬\"\n"))
+                    std::fs::write(hdir.join(".str.toml"), meta_text("branch", &hl, "title = \"硬\"\n"))
                         .unwrap();
                 }
                 hard.push((id.clone(), target.clone(), hl));
@@ -14498,7 +14498,7 @@ mod mount_tests {
         }
         // ── 落盘 `_meta` 与载荷 ──
         std::fs::write(
-            root.join("._meta"),
+            root.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000000",
@@ -14541,7 +14541,7 @@ mod mount_tests {
                 "[[entries]]\npath = \"data.json\"\nrole = \"payload\"\nsize = 12\nsha256 = \"{}\"\n",
                 "0".repeat(64)
             ));
-            std::fs::write(dir.join("._meta"), meta_text(kind, id, &tables)).unwrap();
+            std::fs::write(dir.join(".str.toml"), meta_text(kind, id, &tables)).unwrap();
             std::fs::write(dir.join("data.json"), "{\"v\":1}\n").unwrap();
         }
         eprintln!(
@@ -14658,9 +14658,9 @@ mod mount_tests {
     fn mount_into_ancestor_does_not_recurse_forever() {
         let dir = bundle_with_mount("cycle", None, false);
         let mut e = opened(&dir);
-        // 在 B 的 `._meta` 里追加一条指向 A 的软链接（A 是 B 的「父级」方向的分支）。
+        // 在 B 的 `.str.toml` 里追加一条指向 A 的软链接（A 是 B 的「父级」方向的分支）。
         let b_dir = e.scan.as_ref().unwrap().visits[e.visit_idx(RB).unwrap()].dir.clone();
-        let p = b_dir.join("._meta");
+        let p = b_dir.join(".str.toml");
         let text = std::fs::read_to_string(&p).unwrap();
         std::fs::write(
             &p,
@@ -14710,7 +14710,7 @@ mod mount_tests {
             std::fs::create_dir_all(dir.join(&d)).unwrap();
         }
         std::fs::write(
-            dir.join("._meta"),
+            dir.join(".str.toml"),
             meta_text(
                 "root",
                 "01928f3a-7c4b-4000-8000-000000000003",
@@ -14723,7 +14723,7 @@ mod mount_tests {
         .unwrap();
         // A 下挂载 B（挂载点在 C 更深处的场景由 C 承载 link —— 这里把 link 放 C）。
         std::fs::write(
-            dir.join(ra).join("._meta"),
+            dir.join(ra).join(".str.toml"),
             meta_text(
                 "node",
                 ra,
@@ -14732,7 +14732,7 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            dir.join(ra).join(rc).join("._meta"),
+            dir.join(ra).join(rc).join(".str.toml"),
             meta_text(
                 "branch",
                 rc,
@@ -14741,7 +14741,7 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            dir.join(rb).join("._meta"),
+            dir.join(rb).join(".str.toml"),
             meta_text(
                 "node",
                 rb,
@@ -14750,7 +14750,7 @@ mod mount_tests {
         )
         .unwrap();
         std::fs::write(
-            dir.join(rb).join(rd).join("._meta"),
+            dir.join(rb).join(rd).join(".str.toml"),
             meta_text("branch", rd, ""),
         )
         .unwrap();
@@ -14946,7 +14946,7 @@ mod pick_expand_tests {
                     i + 1
                 ));
             }
-            std::fs::write(dir.join("._meta"), meta).unwrap();
+            std::fs::write(dir.join(".str.toml"), meta).unwrap();
         }
         let mut e = Editor::new();
         e.open(&tmp).expect("打开合成 bundle");

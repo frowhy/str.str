@@ -1,25 +1,25 @@
 # STR 格式规范精要
 
-> 本文是 `SPEC.md`（**唯一真源**，v1.16.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
+> 本文是 `SPEC.md`（**唯一真源**，v1.17.0）的提炼，供 Agent 离线快速查阅。两者冲突时以规范正文与 `str --help` 的实际输出为准，并请提 issue 修正本文件。
 > 本文件描述**规范要求**；命令面与实现细节见 `cli-reference.md`，两者已逐步对齐（残留的规范内部不一致在该文「规范内部不一致」一节列出）。
 
 ## 1. 一句话模型
 
-`.str` 是一个**目录 bundle**：目录树 = 分支树，每个分支目录内的 `._meta`（TOML）记录自己的元信息与内容清单，跨枝关系用 `._meta.refs[]` 声明。**目录层级只决定「身份」，不决定「能否存数据」**。
+`.str` 是一个**目录 bundle**：目录树 = 分支树，每个分支目录内的 `.str.toml`（TOML）记录自己的元信息与内容清单，跨枝关系用 `.str.toml.refs[]` 声明。**目录层级只决定「身份」，不决定「能否存数据」**。
 
 ## 2. 目录形态与深度语义
 
 ```
 <名称>.str/
-├── ._meta                        # ROOT 元数据（kind = root）
-├── ._schema/                     # 保留名：本 bundle 的 JSON Schema
-├── ._cache/                      # 保留名：可选派生缓存（可删，建议 gitignore）
+├── .str.toml                        # ROOT 元数据（kind = root）
+├── .str.schema/                     # 保留名：本 bundle 的 JSON Schema
+├── .str.cache/                      # 保留名：可选派生缓存（可删，建议 gitignore）
 ├── <UUID-v7>/                    # 独立节点（深度 1，kind = node）
-│   ├── ._meta
+│   ├── .str.toml
 │   ├── <任意 payload / asset>
-│   ├── <普通子目录>/              # role = dir；内含 ._meta 即成关联分支
+│   ├── <普通子目录>/              # role = dir；内含 .str.toml 即成关联分支
 │   └── <UUID-v7>/                # 关联分支（深度 2，kind = branch）
-│       ├── ._meta
+│       ├── .str.toml
 │       └── <UUID-v7>/            # 更深关联分支（深度 3+，仍为 branch）
 └── <UUID-v7>/                    # 更多独立节点
 ```
@@ -30,7 +30,7 @@
 | 1 | 独立节点 | `node` | **允许** | ROOT 的 `entries[]` | 一等实体，全局唯一可寻址，可被任意分支 `refs` 关联 |
 | ≥2 | 关联分支 | `branch` | **允许** | **父分支**的 `entries[]` | 依附父分支；可无限嵌套；不得升级为一等实体 |
 
-**只有带 `._meta` 的子目录才是分支**（`role` = `node`/`branch`）；其余子目录都是普通内容容器（`role` = `dir`）。不存在「素材目录」概念——节点/分支目录本身就是素材目录。普通子目录内含 `._meta` 时，父级 `entries` 的 `role` **必须**同步改为 `branch`/`node`，否则 `E_ENTRY_ROLE_DEPTH`。
+**只有带 `.str.toml` 的子目录才是分支**（`role` = `node`/`branch`）；其余子目录都是普通内容容器（`role` = `dir`）。不存在「素材目录」概念——节点/分支目录本身就是素材目录。普通子目录内含 `.str.toml` 时，父级 `entries` 的 `role` **必须**同步改为 `branch`/`node`，否则 `E_ENTRY_ROLE_DEPTH`。
 
 ## 3. 命名规则
 
@@ -38,10 +38,10 @@
 | --- | --- | --- |
 | bundle 根目录 | `<名称>.str`（扩展名小写） | `W_BUNDLE_SUFFIX` |
 | 分支目录（node/branch） | UUID 规范小写连字符，版本须等于 `policies.id_version`（`4` 或 `7`，缺省 v7）：`xxxxxxxx-xxxx-7xxx-[89ab]xxx-xxxxxxxxxxxx` | `E_ID_NOT_UUID` / `E_ID_VERSION` |
-| 元数据文件 | 固定 `._meta`，目录内唯一，普通文件 | `E_META_MISSING` |
-| 保留名 | 以 `._` 开头（`._meta` / `._schema` / `._cache` / 未来扩展）；业务条目**不得**以 `._` 开头 | `E_RESERVED_NAME` |
+| 元数据文件 | 固定 `.str.toml`，目录内唯一，普通文件 | `E_META_MISSING` |
+| 保留名 | 以 `._` 开头（`.str.toml` / `.str.schema` / `.str.cache` / 未来扩展）；业务条目**不得**以 `._` 开头 | `E_RESERVED_NAME` |
 | 锁文件 | `.lock`（短生命周期，**不得提交**） | — |
-| 其它点文件 | 仅 `._meta` / `.lock` 合法 | `W_DOTFILE` |
+| 其它点文件 | 仅 `.str.toml` / `.lock` 合法 | `W_DOTFILE` |
 | 豁免项 | `._*` **普通文件**（AppleDouble）、`.DS_Store`、`Thumbs.db`、`desktop.ini`、版本控制元数据（`.git/`、`.gitignore` 等） | 一律忽略 |
 
 **UUID 必须与目录名一致**：`node`/`branch` 的 `id` 字段 = 所在目录名（`E_ID_MISMATCH`）；`root` 的 `id` 由工具生成，与目录名无关。
@@ -53,7 +53,7 @@
 - 父 bundle 的扫描 / 校验**不进入**其内部；内部自成 `kind = root` 体系；
 - 父级 `entries` 中应登记为 **`role = "bundle"`**（要求目录名以 `.str` 结尾）；登记为 `dir` 会报 `E_ENTRY_ROLE_DEPTH`。
 
-## 5. `._meta` 载体要求
+## 5. `.str.toml` 载体要求
 
 | 项 | 规定 |
 | --- | --- |
@@ -113,14 +113,14 @@
 
 ### `[[entries]]`（内容清单，核心）
 
-`entries[]` 是本目录内**除 `._meta` 之外全部条目**的完整清单，是本目录内容的**唯一权威描述**；文件系统是**存在性权威**。二者由校验器双向比对。
+`entries[]` 是本目录内**除 `.str.toml` 之外全部条目**的完整清单，是本目录内容的**唯一权威描述**；文件系统是**存在性权威**。二者由校验器双向比对。
 
 | 字段 | 类型 | 必填 | 适用 role | 说明 |
 | --- | --- | --- | --- | --- |
 | `path` | string | ✅ | 全部 | 相对本目录的**单段路径**（不含 `/`），不得重复 |
 | `role` | enum | ✅ | 全部 | 见下表 |
 | `id` | uuid | ✅ | `node`/`branch` | 必须与 `path` 一致 |
-| `type` | string | 否 | `node`/`branch` | 便于只读父级 `._meta` 完成路由 |
+| `type` | string | 否 | `node`/`branch` | 便于只读父级 `.str.toml` 完成路由 |
 | `title` / `summary` | string | 否 | `node`/`branch` | 展示名 / 摘要 |
 | `order` | integer ≥ 0 | 建议 | `node`/`branch` | 同层排序键 |
 | `media_type` | string | 建议 | `payload`/`asset` | IANA 媒体类型 |
@@ -131,7 +131,7 @@
 | `optional` | boolean | 否 | 全部 | 缺失是否允许（默认 `false`） |
 | `note` | string | 否 | 全部 | 备注 |
 
-`role` 枚举：`node`（深度 1 子分支）、`branch`（深度 ≥2 子分支）、`payload`（结构化数据文件）、`asset`（附属素材）、`dir`（普通内容容器）、`schema`（`._schema/` 目录）、`cache`（派生缓存）、`other`（需 `note` 说明）。
+`role` 枚举：`node`（深度 1 子分支）、`branch`（深度 ≥2 子分支）、`payload`（结构化数据文件）、`asset`（附属素材）、`dir`（普通内容容器）、`schema`（`.str.schema/` 目录）、`cache`（派生缓存）、`other`（需 `note` 说明）。
 **只有 `node` / `branch` 计入分支结构。**
 
 ### `[policies]`（仅 root）
@@ -143,7 +143,7 @@
 | `manifest` | `strict` | `strict` = 清单不一致为 error；`advisory` = 仅 warning |
 | `sha256` | **`required`** | 是否强制 `payload`/`asset` 带 `size` + `sha256`；`optional`/`off` 仅编辑期临时降级，**不得**出现在已提交状态 |
 | `ignore` | `[]` | **忽略名单**（v1.13.0）：gitignore 语义模式（`*` / `**` / `!` 取反 / 尾随 `/` 仅目录 / 含 `/` 锚定），匹配 bundle 内相对路径；命中条目不参与清单比对、`sync` 不补登、遍历不进入；已显式登记的条目不受影响 |
-| `gitignore` | `true` | 自动检测并应用 `.gitignore`（v1.13.0）：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；由外向内叠加，内层命中覆盖外层。**系统级忽略层**（`._meta` / `._schema/` / `._cache/` / `._` 保留命名空间 / `.lock` / OS 与 VCS 元数据）恒为最内层、常开，用户 `!` 取反不能恢复 |
+| `gitignore` | `true` | 自动检测并应用 `.gitignore`（v1.13.0）：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；由外向内叠加，内层命中覆盖外层。**系统级忽略层**（`.str.toml` / `.str.schema/` / `.str.cache/` / `._` 保留命名空间 / `.lock` / OS 与 VCS 元数据）恒为最内层、常开，用户 `!` 取反不能恢复 |
 | `large_asset_bytes` | `10485760` | 超过告警 `W_LARGE_ASSET` |
 | `deep_tree_warn` | `16` | 超过告警 `W_DEEP_TREE` |
 
@@ -187,20 +187,20 @@ TOML 要求裸键写在任何表头之前，因此书写顺序固定：
 
 ## 9. AI 读取与写入协议（§8）
 
-**渐进式披露**：① 读 `ROOT/._meta` 的 `name/title/summary` + `entries[role=node]` → ② 按 `type/tags/title/summary` 选目标分支 → ③ 读该分支 `._meta` → ④ 仅在需要时下钻 `entries[role=branch]` 或读 `payload` → ⑤ 需要横向关系时读 `refs[]`。
+**渐进式披露**：① 读 `ROOT/.str.toml` 的 `name/title/summary` + `entries[role=node]` → ② 按 `type/tags/title/summary` 选目标分支 → ③ 读该分支 `.str.toml` → ④ 仅在需要时下钻 `entries[role=branch]` 或读 `payload` → ⑤ 需要横向关系时读 `refs[]`。
 **禁止**未经筛选地递归读取整个 bundle 的所有 payload。裁剪上下文用 `str context [dir] [uuid] --depth n --budget c`（`[uuid]` 缺省为当前节点：`[dir]` 为 bundle 根时即 ROOT，指向分支目录时即该分支）。
 
-**写入约束**：① 不得修改/新建 UUID 目录名；② 在已有子目录内创建 `._meta` 会使其成为关联分支，必须同步把父级 `entries[]` 该项 `role` 由 `dir` 改为 `branch` 并补 `id`/`kind`；③ 可在任意深度新增文件/文件夹，但必须同步登记进 `entries[]`（或随后 `str sync`）；④ 修改后必须 `revision + 1`、更新 `updated_at`、按 §4.9 键序重排；⑤ 不得把深度 ≥2 的分支「提升」为独立节点；⑥ 删除他人 `owner` 的分支前必须显式确认；⑦ 字段语义不明时**必须提问**，禁止发明新字段（`ext` 除外）。
+**写入约束**：① 不得修改/新建 UUID 目录名；② 在已有子目录内创建 `.str.toml` 会使其成为关联分支，必须同步把父级 `entries[]` 该项 `role` 由 `dir` 改为 `branch` 并补 `id`/`kind`；③ 可在任意深度新增文件/文件夹，但必须同步登记进 `entries[]`（或随后 `str sync`）；④ 修改后必须 `revision + 1`、更新 `updated_at`、按 §4.9 键序重排；⑤ 不得把深度 ≥2 的分支「提升」为独立节点；⑥ 删除他人 `owner` 的分支前必须显式确认；⑦ 字段语义不明时**必须提问**，禁止发明新字段（`ext` 除外）。
 
 **对 AI 友好的分支**至少要有：`type`、`title`、`summary`，以及 `entries[]` 中每项的 `role`（分支项还应有 `summary` 与 `type`）。
 
 ## 10. `E_REVISION_STALE`：历史相关判定怎么落地
 
-「`updated_at` 变化但 `revision` 未前进」**无法**只看一份 `._meta` 判定（文件不含「上一版」）。规范 §6.1.1 只要求「可判定」，不限定手段；参考实现的做法：
+「`updated_at` 变化但 `revision` 未前进」**无法**只看一份 `.str.toml` 判定（文件不含「上一版」）。规范 §6.1.1 只要求「可判定」，不限定手段；参考实现的做法：
 
-1. **写入端登记基线**：每次成功写盘后，把该分支的 `(revision, updated_at)` 快照写进 `._cache/revisions.json`（bundle 根下，`role = cache` 的派生数据：不入 `entries` 清单、`.gitignore` 已排除、可随时删除）；
+1. **写入端登记基线**：每次成功写盘后，把该分支的 `(revision, updated_at)` 快照写进 `.str.cache/revisions.json`（bundle 根下，`role = cache` 的派生数据：不入 `entries` 清单、`.gitignore` 已排除、可随时删除）；
 2. **校验端比对**：`str validate` 读基线，`updated_at` 变了而 `revision` 未前进 → `E_REVISION_STALE`；
 3. **`str sync` 只在 `revision` 确实前进时推进基线** —— 违规因此**跨 `sync` 持续可见**，直到有人真正修正 `revision`（若 sync 无条件覆盖，它会顺手把刚犯下的违规洗白）；
-4. **无基线则跳过**：从未被工具写过的 bundle 该条件跳过，不误报；删掉 `._cache/` 即关闭这项历史检查。
+4. **无基线则跳过**：从未被工具写过的 bundle 该条件跳过，不误报；删掉 `.str.cache/` 即关闭这项历史检查。
 
 另两个条件是自描述的，任何实现都必须直接判定：`revision` 是 ≥ 1 的整数、`updated_at` 不早于 `created_at`。

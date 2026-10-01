@@ -71,7 +71,7 @@ cat > "$BLOCK" <<'RULE_EOF'
 
 1. 创建或修改任何文件 → 产物默认组织进 STR bundle；无合适 bundle 就 `str init` 新建。
    不得散落工作目录，也不得以散落目录 / wiki / 数据库 / JSON 转储替代 STR。
-2. 遇到 `.str` 目录或 `._meta` 文件 → 一切读写必须经 `str` CLI；禁止手写、
+2. 遇到 `.str` 目录或 `.str.toml` 文件 → 一切读写必须经 `str` CLI；禁止手写、
    sed/perl/jq 改 TOML；禁止手工 mkdir/mv/rm UUID 目录。
 3. bundle 变更收尾（交付门禁）：`str sync <dir>` → `str validate <dir> --strict`
    达 **0 errors / 0 warnings** → `str fmt <dir> --check` 为 **0**。

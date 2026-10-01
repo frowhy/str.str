@@ -4,7 +4,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 #
 # `VERSIONS.toml` 是版本唯一真源（SSOT），但版本号在仓库里是**多点真相**：
-# 光规范版本就散落在正文头部、仓库根 `._meta`、Rust 常量、Schema description、
+# 光规范版本就散落在正文头部、仓库根 `.str.toml`、Rust 常量、Schema description、
 # 示例生成脚本、README 等处。本脚本把「真源 ↔ 各声明点」逐点比对，任一处不一致
 # 即失败并打印可定位的修复指引 —— 与 `tests/schema_sync.rs` 守卫 Schema 派生副本
 # 是同一套思路：真源可以复制，但必须可验证。
@@ -117,10 +117,10 @@ check "str-cli/src/lib.rs 的 SPEC_VERSION" "${SPEC_VER}" \
   "$(x str-cli/src/lib.rs 's/^pub const SPEC_VERSION: &str = "\(.*\)";$/\1/p')"
 check "str-cli/src/lib.rs 的 STR_MAJOR" "${SPEC_MAJOR}" \
   "$(x str-cli/src/lib.rs 's/^pub const STR_MAJOR: i64 = \([0-9]*\);$/\1/p')"
-check "仓库根 ._meta 的 spec" "${SPEC_VER}" \
-  "$(x ._meta 's/^spec = "\([^"]*\)"$/\1/p')"
-check "仓库根 ._meta 的 str" "${SPEC_MAJOR}" \
-  "$(x ._meta 's/^str = \([0-9]*\)$/\1/p')"
+check "仓库根 .str.toml 的 spec" "${SPEC_VER}" \
+  "$(x .str.toml 's/^spec = "\([^"]*\)"$/\1/p')"
+check "仓库根 .str.toml 的 str" "${SPEC_MAJOR}" \
+  "$(x .str.toml 's/^str = \([0-9]*\)$/\1/p')"
 check "SPEC.md 头部「规范版本」" "${SPEC_VER}" \
   "$(x SPEC.md 's/^| 规范版本 | \*\*v\([0-9.]*\)\*\*.*/\1/p')"
 check "SPEC.md 头部「主版本号」" "${SPEC_MAJOR}" \
@@ -139,16 +139,16 @@ README_VER_SET="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' README.md \
 check_set "README.md 中出现的全部版本号（应为 spec / cli / skill / gui 四者）" \
   "$(uniq_set "${SPEC_VER}" "${CLI_VER}" "${SKILL_VER}" "${GUI_VER}")" "${README_VER_SET}"
 
-# 三份 Schema 的 description 写明「对应 STR 规范 vX」——真源在 ._schema/（派生的
+# 三份 Schema 的 description 写明「对应 STR 规范 vX」——真源在 .str.schema/（派生的
 # str-cli/schema/ 由 tests/schema_sync.rs 守卫逐字节一致）
-SCHEMA_VER_SET="$(for f in ._schema/*.schema.json; do
+SCHEMA_VER_SET="$(for f in .str.schema/*.schema.json; do
   x "${f}" 's/.*对应 STR 规范 v\([0-9.]*\) 第 4 章.*/\1/p'
 done | sort -u | paste -sd, -)"
-check_set "._schema/*.json description 的规范版本" "${SPEC_VER}" "${SCHEMA_VER_SET}"
+check_set ".str.schema/*.json description 的规范版本" "${SPEC_VER}" "${SCHEMA_VER_SET}"
 
 # 示例 bundle 是产物，其 spec 由生成脚本写入
 check "examples/客户运营.str 的 spec" "${SPEC_VER}" \
-  "$(x "examples/客户运营.str/._meta" 's/^spec = "\([^"]*\)"$/\1/p')"
+  "$(x "examples/客户运营.str/.str.toml" 's/^spec = "\([^"]*\)"$/\1/p')"
 BLD_VER_SET="$(grep -oE 'spec = "[0-9.]+"' scripts/build-example.sh \
   | sed 's/.*"\([0-9.]*\)"/\1/' | sort -u | paste -sd, -)"
 check_set "scripts/build-example.sh 生成模板的 spec" "${SPEC_VER}" "${BLD_VER_SET}"

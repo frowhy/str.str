@@ -1557,7 +1557,7 @@ export component AppWindow inherits Window {
     in property <bool> rename-visible: false;
     in-out property <string> rename-name;
 
-    // ── 重命名分支对话框（只改显示名 `._meta.title`）──
+    // ── 重命名分支对话框（只改显示名 `.str.toml.title`）──
     in property <bool> branch-rename-visible: false;
     in-out property <string> branch-rename-name;
 
@@ -1666,7 +1666,7 @@ export component AppWindow inherits Window {
     callback collapse-all-subtrees();
     callback expand-all-contents();
     callback collapse-all-contents();
-    // 分支重命名（只改 `._meta.title`；目录名是 UUID，不参与重命名）。
+    // 分支重命名（只改 `.str.toml.title`；目录名是 UUID，不参与重命名）。
     callback branch-rename-open();
     callback branch-rename-confirm();
     callback branch-rename-cancel();
@@ -1819,7 +1819,7 @@ export component AppWindow inherits Window {
             }
             MenuItem {
                 // 条目重命名 = 改磁盘文件名 / 目录名（与「分支 → 重命名分支…」
-                // 只改 `._meta.title` 不同），标题里写明作用对象以免混淆。
+                // 只改 `.str.toml.title` 不同），标题里写明作用对象以免混淆。
                 title: "重命名条目…";
                 enabled: root.entry-cmd-ok;
                 activated => { EntryApi.entry-rename-open(); }
@@ -4250,7 +4250,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    // ── 重命名分支对话框（改的是显示名 `._meta.title`，不是磁盘目录名）──
+    // ── 重命名分支对话框（改的是显示名 `.str.toml.title`，不是磁盘目录名）──
     if root.branch-rename-visible: Rectangle {
         background: #00000066;
         TouchArea { clicked => { } }
@@ -4281,7 +4281,7 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     Text { text: "重命名分支"; font-size: 17px; font-weight: 700; color: c-text; }
                     Text {
-                        text: "只改显示名（`._meta.title`）；分支目录名是 UUID，不参与重命名。留空即清除标题。";
+                        text: "只改显示名（`.str.toml.title`）；分支目录名是 UUID，不参与重命名。留空即清除标题。";
                         font-size: 11px;
                         color: c-sub;
                         wrap: TextWrap.word-wrap;

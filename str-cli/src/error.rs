@@ -28,9 +28,9 @@ impl Level {
 /// 规范 6.1 章的错误码常量。
 pub mod code {
     // ── 结构 / 身份 ──────────────────────────────────────────
-    /// `._meta` 非法 TOML / 编码非 UTF-8 / 含 BOM / 时间未带时区偏移。
+    /// `.str.toml` 非法 TOML / 编码非 UTF-8 / 含 BOM / 时间未带时区偏移。
     pub const PARSE: &str = "E_PARSE";
-    /// 分支目录缺失 `._meta`。
+    /// 分支目录缺失 `.str.toml`。
     pub const META_MISSING: &str = "E_META_MISSING";
     /// `str` 主版本不受支持。
     pub const SPEC_UNSUPPORTED: &str = "E_SPEC_UNSUPPORTED";
@@ -88,7 +88,7 @@ pub mod code {
     pub const MANIFEST_DIGEST_MISSING: &str = "E_MANIFEST_DIGEST_MISSING";
     /// `entries[].path` 重复。
     pub const MANIFEST_DUP: &str = "E_MANIFEST_DUP";
-    /// 业务条目以 `._` 开头。
+    /// 业务条目使用 `.str.` 保留命名空间或 AppleDouble `._` 命名模式。
     pub const RESERVED_NAME: &str = "E_RESERVED_NAME";
     /// `revision` 非递增整数，或 `updated_at` 早于 `created_at`。
     pub const REVISION_STALE: &str = "E_REVISION_STALE";
@@ -98,7 +98,7 @@ pub mod code {
     // ── 告警 ────────────────────────────────────────────────
     /// 根目录名未以 `.str` 结尾。
     pub const BUNDLE_SUFFIX: &str = "W_BUNDLE_SUFFIX";
-    /// 出现非 `._meta` / `.lock` 的点文件。
+    /// 出现非 `.str.toml` / `.lock` 的点文件。
     pub const DOTFILE: &str = "W_DOTFILE";
     /// ROOT 下出现既非分支目录也非保留名的条目。
     pub const ROOT_STRAY: &str = "W_ROOT_STRAY";

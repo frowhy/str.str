@@ -17,6 +17,7 @@
 
 | tag | 日期 | 规范 | CLI | 技能包 | GUI |
 | --- | --- | --- | --- | --- | --- |
+| [`v0.10.0`](https://github.com/frowhy/str.str/releases/tag/v0.10.0) | 2026-10-01 | 1.17.0 | 0.10.0 | 0.7.0 | 0.7.0 |
 | [`v0.9.0`](https://github.com/frowhy/str.str/releases/tag/v0.9.0) | 2026-10-01 | 1.16.0 | 0.9.0 | 0.6.0 | 0.6.0 |
 | [`v0.8.1`](https://github.com/frowhy/str.str/releases/tag/v0.8.1) | 2026-10-01 | 1.15.0 | 0.8.1 | 0.5.1 | 0.5.2 |
 | [`v0.8.0`](https://github.com/frowhy/str.str/releases/tag/v0.8.0) | 2026-09-29 | 1.15.0 | 0.8.0 | 0.5.0 | 0.5.1 |
@@ -30,6 +31,28 @@
 
 > 发行 tag = `v` + CLI 版本（锚定规则，见 `VERSIONS.toml`）；规范与技能包**不各自打 tag**，
 > 它们的版本随发行一起冻结在该矩阵里。
+
+## [`v0.10.0`](https://github.com/frowhy/str.str/releases/tag/v0.10.0) — 2026-10-01
+
+规范 1.17.0 · CLI 0.10.0 · 技能包 0.7.0 · GUI 0.7.0
+
+### 破坏性变更（spec 1.17.0 / cli 0.10.0 / gui 0.7.0）
+
+- **格式保留名整体迁移：`._` 前缀 → `.str.` 前缀**：`._meta` → `.str.toml`、`._schema` →
+  `.str.schema`、`._cache` → `.str.cache`（ADR-5 重写）。根治与 macOS AppleDouble 伴生文件
+  的同名冲突：Finder 在枚举层硬过滤 `._` 形式的文件（⌘⇧. 亦无效），部分 WebDAV 端会将其
+  丢弃；`.str.` 前缀零冲突，元数据文件可见、可同步。
+- `E_RESERVED_NAME` 改判：业务条目不得占用 `.str.` 命名空间；未登记的 `._*` 普通文件退化为
+  纯噪声豁免（已登记条目 / 人为 `._` 目录仍报）。
+- **迁移**：既有 bundle 手工改名三个保留名（内容不变）→ 删除 `._cache/` → 用 ≥ v0.10.0 工具
+  `str spec set 1.17.0` → `str sync` → `str validate --strict`。旧版工具无法读取新 bundle。
+  上述流程已脚本化：`scripts/migrate-reserved-names.sh [--dry-run] <bundle-dir>...`（幂等，
+  自动跳过已迁移 bundle；改名后自动完成 spec set / sync / validate / fmt 四步对账）。
+
+### 变更（skill 0.7.0）
+
+- `str-skill` 全文保留名改写；`README.md` 修正适配规范（v1.14.0 → v1.17.0）与依赖 CLI
+  （>= 0.3.0 → >= 0.8.0，对齐 `requires_cli`）两处既有文档缺口。
 
 ## [`v0.9.0`](https://github.com/frowhy/str.str/releases/tag/v0.9.0) — 2026-10-01
 

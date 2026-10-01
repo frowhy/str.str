@@ -26,23 +26,23 @@
 #                       major = 交互或数据写入行为不兼容
 #
 # 维护流程：改本文件 → 按 `scripts/check-versions.sh` 的报错同步各声明点 → 门禁转绿 → 提交。
-# 注意：仓库根 `._meta` 登记了本文件（payload），所以改完本文件必须 `str sync .` 刷新摘要。
+# 注意：仓库根 `.str.toml` 登记了本文件（payload），所以改完本文件必须 `str sync .` 刷新摘要。
 
 [release]
 # 发行 tag = "v" + cli.version（锚定规则，由门禁强制）。
 # status = "released" 表示该 tag 已推送；"unreleased" 表示工作区领先于已发布版本。
-tag = "v0.9.0"
+tag = "v0.10.0"
 status = "released"
 # 最近一次真正发布出去的 tag，用于对照「工作区领先了哪些内容」。
-last_published = "v0.9.0"
+last_published = "v0.10.0"
 
 [spec]
 # 规范正文当前版本。必须同时等于：
-#   SPEC.md 头部表、仓库根 ._meta 的 `spec`、str-cli/src/lib.rs 的
-#   SPEC_VERSION、README.md 的「规范版本」、._schema/*.json 的 description、
-#   scripts/build-example.sh 的生成模板、examples/客户运营.str 的 ._meta。
-version = "1.16.0"
-# 格式主版本：写入每份 `._meta` 的 `str` 字段。工具只强校验这一个值（规范 §13 规则 1），
+#   SPEC.md 头部表、仓库根 .str.toml 的 `spec`、str-cli/src/lib.rs 的
+#   SPEC_VERSION、README.md 的「规范版本」、.str.schema/*.json 的 description、
+#   scripts/build-example.sh 的生成模板、examples/客户运营.str 的 .str.toml。
+version = "1.17.0"
+# 格式主版本：写入每份 `.str.toml` 的 `str` 字段。工具只强校验这一个值（规范 §13 规则 1），
 # `spec` 仅供人类追溯。
 major = 1
 
@@ -50,7 +50,7 @@ major = 1
 # crate `str-format` 的版本。必须同时等于：
 #   str-cli/Cargo.toml、Cargo.lock、str-skill/scripts/ensure-str.sh 的 DEFAULT_VERSION，
 #   以及技能包文档中 `str --version` 的示例输出。
-version = "0.9.0"
+version = "0.10.0"
 min_rust = "1.88"
 # 本实现对应的规范主版本（= spec.major）
 implements_spec_major = 1
@@ -59,7 +59,7 @@ implements_spec_major = 1
 # 技能包自身的版本（str-skill/SKILL.md frontmatter 的 `version`）。
 # **与 release.tag / cli.version 无绑定关系**：技能包只在自己内容变化时升版，
 # 因此三者常常不相等 —— 这是设计，不是漂移。
-version = "0.6.0"
+version = "0.7.0"
 # 技能包能正常工作的最低 CLI 版本（SKILL.md 会用到的命令自该版本起可用）。
 requires_cli = ">=0.8.0"
 # SkillHub 发布身份，键名与 SKILL.md frontmatter 一致（平台只认这两个名字）。
@@ -73,7 +73,7 @@ displayName = "STR 资源树"
 # **与 release.tag 无绑定关系**：不单独打 tag，版本随发行矩阵冻结；
 # 只在 GUI 自身内容变化时升版，因此常与 cli.version 不相等 —— 这是设计，不是漂移。
 # 必须同时等于：str-gui/Cargo.toml、str-gui/Cargo.lock。
-version = "0.6.0"
+version = "0.7.0"
 # GUI 随附（链接）的 str-format 库最低版本：写操作与校验走同一代码路径，
 # 新增 CLI 命令 / 修复指纹逻辑后应同步升此约束。
-uses_cli_format = ">=0.6.0"
+uses_cli_format = ">=0.10.0"

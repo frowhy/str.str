@@ -487,21 +487,35 @@ impl<'a> Checker<'a> {
         for (name, is_dir) in &actual {
             let ep = format!("{rel}/{name}");
             if util::is_meta_file(name) || util::is_lock_file(name) {
-                continue; // `._meta` / `.lock` 不参与清单
+                continue; // `.str.toml` / `.lock` 不参与清单
             }
             if util::is_reserved_name(name) {
-                // 保留命名空间判定（规范 v1.12.0 §1.3 约束 5 / §4.8：保留目录免登记、不参与清单比对）：
-                // - `._schema` / `._cache` 是已知保留目录 → **免登记**、放行（显式登记亦合法，属可选声明）；
-                // - 业务**目录**以 `._` 开头 → 必然不是 AppleDouble（该机制只产生文件）→ `E_RESERVED_NAME`；
-                // - 其余以 `._` 开头且**已登记**或为**目录**者 → 作者显式声明为业务内容 → `E_RESERVED_NAME`；
-                // - 其余 `._*` **普通文件** → 视为 macOS AppleDouble 噪声，豁免（规范 3.4）。
+                // `.str.` 保留命名空间（规范 v1.17.0 §1.3 约束 5 / §4.8：保留目录免登记、
+                // 不参与清单比对）：
+                // - `.str.schema` / `.str.cache` 是已知保留目录 → **免登记**、放行（显式登记亦合法，属可选声明）；
+                // - 其余 `.str.*`（无论目录 / 文件、登记与否）→ 占用保留命名空间 → `E_RESERVED_NAME`。
                 let known = name == crate::util::SCHEMA_DIR || name == crate::util::CACHE_DIR;
-                let declared_here = entries.iter().any(|e| e.path == *name);
-                if !known && (*is_dir || declared_here) {
+                if !known {
                     self.err(
                         code::RESERVED_NAME,
                         ep.clone(),
-                        "业务条目不得以 `._` 开头（`._` 为格式保留命名空间）",
+                        "业务条目不得使用 `.str.` 保留命名空间",
+                    );
+                }
+                continue;
+            }
+            if name.starts_with("._") {
+                // AppleDouble 伴生文件命名模式（规范 v1.17.0：格式保留名已改用 `.str.` 前缀，
+                // `._*` 与格式名零冲突，退化为纯噪声豁免）：
+                // - 未登记的 `._*` 普通文件 → macOS 跨文件系统拷贝噪声 → 豁免；
+                // - 业务**目录**以 `._` 开头（AppleDouble 只产生文件，必然是人为创建）或
+                //   **已登记**的 `._*` 条目 → 作者显式声明为业务内容 → `E_RESERVED_NAME`。
+                let declared_here = entries.iter().any(|e| e.path == *name);
+                if declared_here || *is_dir {
+                    self.err(
+                        code::RESERVED_NAME,
+                        ep.clone(),
+                        "业务条目不得以 `._` 开头（该命名模式为 macOS AppleDouble 伴生文件保留）",
                     );
                 }
                 continue;
@@ -523,7 +537,7 @@ impl<'a> Checker<'a> {
                 self.warn(
                     code::DOTFILE,
                     ep.clone(),
-                    "出现非 `._meta` / `.lock` 的点文件（不计入清单要求）",
+                    "出现非 `.str.toml` / `.lock` 的点文件（不计入清单要求）",
                 );
                 continue;
             }
@@ -602,7 +616,7 @@ impl<'a> Checker<'a> {
 
         match e.role.as_str() {
             "link" => {
-                // 硬链接（`mode = "hard"`）有真实目录：必须是含 `._meta` 的分支目录。
+                // 硬链接（`mode = "hard"`）有真实目录：必须是含 `.str.toml` 的分支目录。
                 // 软连接是声明行、磁盘无目录，不会作为磁盘侧命中走到这里。
                 if !is_dir {
                     self.err(
@@ -613,7 +627,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 if !bundle.has_meta(&path) {
-                    self.err(code::META_MISSING, ep, "硬链接目录内缺少 `._meta`");
+                    self.err(code::META_MISSING, ep, "硬链接目录内缺少 `.str.toml`");
                 }
             }
             "node" | "branch" | "dir" => {
@@ -643,13 +657,13 @@ impl<'a> Checker<'a> {
                         self.err(
                             code::ENTRY_ROLE_DEPTH,
                             ep,
-                            "该子目录含 `._meta`（已是分支），却被登记为 `role = \"dir\"`",
+                            "该子目录含 `.str.toml`（已是分支），却被登记为 `role = \"dir\"`",
                         );
                     }
                     return;
                 }
                 if !child_has_meta {
-                    self.err(code::META_MISSING, ep, "登记为分支但目录内缺少 `._meta`");
+                    self.err(code::META_MISSING, ep, "登记为分支但目录内缺少 `.str.toml`");
                     return;
                 }
                 let want_node = e.role == "node";
@@ -808,8 +822,8 @@ impl<'a> Checker<'a> {
 
     /// `E_REVISION_STALE` 的**历史**判定：`updated_at` 变了但 `revision` 没有前进（规范 §6.1）。
     ///
-    /// 依据 `._cache/revisions.json`（由写入端登记，见 [`crate::baseline`]）。无基线时跳过 ——
-    /// 单份 `._meta` 不含历史，无从判定；`str sync` 会把基线刷到当前状态。
+    /// 依据 `.str.cache/revisions.json`（由写入端登记，见 [`crate::baseline`]）。无基线时跳过 ——
+    /// 单份 `.str.toml` 不含历史，无从判定；`str sync` 会把基线刷到当前状态。
     fn check_revision_history(&mut self) {
         let baseline = crate::baseline::load(self.bundle);
         if baseline.branches.is_empty() {
@@ -979,7 +993,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// 每个分支的 `._meta` 归一化后过 JSON Schema（规范 4.1 校验链路）。
+    /// 每个分支的 `.str.toml` 归一化后过 JSON Schema（规范 4.1 校验链路）。
     fn check_meta_schemas(&mut self) {
         let scan = self.scan;
         let bundle = self.bundle;
@@ -1047,7 +1061,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// 取某档位的 `._meta` Schema：优先 bundle 内 `._schema/`，否则用内嵌兜底。
+/// 取某档位的 `.str.toml` Schema：优先 bundle 内 `.str.schema/`，否则用内嵌兜底。
 fn load_meta_schema(bundle: &Bundle, name: &str) -> JValue {
     let local = bundle.root.join(SCHEMA_DIR).join(name);
     if local.is_file() {
@@ -1071,7 +1085,7 @@ pub fn count_dir_entries(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// 计算目录直接子项数（含点文件，排除 `._meta`）。
+/// 计算目录直接子项数（含点文件，排除 `.str.toml`）。
 pub fn dir_child_count(dir: &Path) -> Option<i64> {
     std::fs::read_dir(dir).ok().map(|rd| {
         rd.flatten()
@@ -1080,7 +1094,7 @@ pub fn dir_child_count(dir: &Path) -> Option<i64> {
     })
 }
 
-/// 收集目录内除了 `._meta`、OS 噪声与忽略名单命中之外的名字（`str sync` 用）。
+/// 收集目录内除了 `.str.toml`、OS 噪声与忽略名单命中之外的名字（`str sync` 用）。
 ///
 /// `rel` 为该目录的 bundle 相对路径（ROOT 为 `.`），用于忽略模式匹配。
 pub fn real_entries(dir: &Path, rel: &str, ignore: &crate::ignore::IgnoreSet) -> Vec<(String, bool)> {

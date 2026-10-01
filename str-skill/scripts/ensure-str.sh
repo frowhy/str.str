@@ -32,7 +32,7 @@
 #   - 已缓存的版本直接复用，不重复下载；
 #   - 除缓存目录与临时目录外不写入任何文件（第 6 步由 cargo 自行使用其 registry 缓存与
 #     临时构建目录，但**安装目标**仍指向缓存目录，不会污染 ~/.cargo/bin）；
-#   - 绝不「降级」为手工编辑 ._meta —— 找不到 CLI 就是失败。
+#   - 绝不「降级」为手工编辑 .str.toml —— 找不到 CLI 就是失败。
 #
 # ⚠ 维护须知（本文件含大量中文文本，踩过一次）：
 #   `$VAR` 后面若**紧跟非 ASCII 字符**（如「，」「（」「的」），部分 locale 下 bash 会把多字节
@@ -42,7 +42,7 @@
 set -eu
 
 RELEASE_REPO=${STR_RELEASE_REPO:-frowhy/str.str}
-DEFAULT_VERSION=v0.9.0
+DEFAULT_VERSION=v0.10.0
 STR_VERSION=${STR_VERSION:-latest}
 DOWNLOAD_BASE=${STR_DOWNLOAD_BASE:-https://github.com/$RELEASE_REPO/releases/download}
 CACHE_BASE=${STR_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/str-skill}
@@ -351,4 +351,4 @@ die "未找到 STR CLI，也无法自动获取。任选其一后重试：
   ④ 显式指定：export STR_BIN=<路径>/str  或  export STR_REPO=<源码仓库根>
   ⑤ 检查网络 / 代理；也可设 STR_VERSION=<tag>、STR_RELEASE_REPO=<owner/repo>
   ⑥ 离线环境：若已手动放好二进制，用 STR_BIN 指过去，或设 STR_NO_DOWNLOAD=1、STR_NO_CARGO_INSTALL=1 只走本地查找
-注意：严禁以手工编辑 ._meta 代替 CLI —— 那是格式违规，不是降级方案。"
+注意：严禁以手工编辑 .str.toml 代替 CLI —— 那是格式违规，不是降级方案。"

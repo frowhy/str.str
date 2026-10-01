@@ -4,11 +4,11 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 
 /// 元数据文件名。
-pub const META_FILE: &str = "._meta";
+pub const META_FILE: &str = ".str.toml";
 /// bundle 级 Schema 目录。
-pub const SCHEMA_DIR: &str = "._schema";
+pub const SCHEMA_DIR: &str = ".str.schema";
 /// 派生缓存目录（可删、建议 gitignore）。
-pub const CACHE_DIR: &str = "._cache";
+pub const CACHE_DIR: &str = ".str.cache";
 /// 短期写入锁文件名。
 pub const LOCK_FILE: &str = ".lock";
 
@@ -93,12 +93,12 @@ pub fn relative_depth(root: &Path, dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// 是否为格式保留名（以 `._` 开头）。
+/// 是否为格式保留名（以 `.str.` 前缀开头的保留命名空间）。
 pub fn is_reserved_name(name: &str) -> bool {
-    name.starts_with("._")
+    name.starts_with(".str.")
 }
 
-/// 是否为 `._meta`。
+/// 是否为 `.str.toml`。
 pub fn is_meta_file(name: &str) -> bool {
     name == META_FILE
 }
@@ -110,7 +110,8 @@ pub fn is_lock_file(name: &str) -> bool {
 
 /// 是否为操作系统 / 工具元数据：一律豁免，不参与校验（规范 3.4）。
 ///
-/// - `._*` 形式的**普通文件**是 macOS AppleDouble 伴生文件（`._meta` 本身不是噪声）；
+/// - `._*` 形式的普通文件 / 目录是 macOS AppleDouble 伴生文件（格式保留名自
+///   v1.17.0 起改用 `.str.` 前缀，与 AppleDouble 模式零冲突，`._*` 退化为纯噪声）；
 /// - `.git` / `.gitignore` / `.hg` / `.svn` 等是版本控制元数据 —— 真实项目必然存在；
 /// - `.github/` 是代码托管平台的元数据：GitHub Actions 的工作流**必须**位于
 ///   `.github/workflows/`（路径不可改名），同属「工具元数据」，故一并豁免。
@@ -130,7 +131,7 @@ pub fn is_os_noise(name: &str) -> bool {
             | ".hgignore"
             | ".svn"
             | ".jj"
-    ) || (name.starts_with("._") && name != META_FILE)
+    ) || name.starts_with("._")
 }
 
 /// 是否为**独立子 bundle**：目录名以 `.str` 结尾。
@@ -141,7 +142,7 @@ pub fn is_sub_bundle(name: &str) -> bool {
     name.ends_with(".str")
 }
 
-/// 是否为其它点文件（非 `._meta` / `.lock`）→ `W_DOTFILE`。
+/// 是否为其它点文件（非 `.str.toml` / `.lock`）→ `W_DOTFILE`。
 pub fn is_other_dotfile(name: &str) -> bool {
     name.starts_with('.') && !is_meta_file(name) && !is_lock_file(name)
 }

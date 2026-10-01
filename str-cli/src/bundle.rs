@@ -1,6 +1,6 @@
 //! bundle 遍历与索引。
 //!
-//! 「分支」的唯一判据是**该目录是否含 `._meta`**（规范 3.4 / 4.6）；
+//! 「分支」的唯一判据是**该目录是否含 `.str.toml`**（规范 3.4 / 4.6）；
 //! 层级关系由「目录结构 + 父级 `entries`」唯一决定（规范 5.1）。
 
 use std::collections::{HashMap, VecDeque};
@@ -22,11 +22,11 @@ pub struct Visit {
     pub rel: String,
     /// 深度（ROOT = 0）。
     pub depth: usize,
-    /// 解析结果；`None` 表示 `._meta` 解析失败。
+    /// 解析结果；`None` 表示 `.str.toml` 解析失败。
     pub meta: Option<Box<Meta>>,
     /// 父分支在 `visits` 中的下标。
     pub parent: Option<usize>,
-    /// 原始 `._meta` 文本是否读取成功。
+    /// 原始 `.str.toml` 文本是否读取成功。
     pub readable: bool,
     /// 硬链接分支（规范 §4.6.1 `mode = "hard"`）：内容来源目标分支的 id。
     /// 硬链接是有身份的真实分支（`path = id` = 自身目录），内容面板显示目标的
@@ -105,12 +105,12 @@ impl Bundle {
             .unwrap_or_else(|| self.root.display().to_string())
     }
 
-    /// 某目录下 `._meta` 的路径。
+    /// 某目录下 `.str.toml` 的路径。
     pub fn meta_path(&self, dir: &Path) -> PathBuf {
         dir.join(META_FILE)
     }
 
-    /// 某目录是否含 `._meta`（即是否为分支）。
+    /// 某目录是否含 `.str.toml`（即是否为分支）。
     pub fn has_meta(&self, dir: &Path) -> bool {
         self.meta_path(dir).is_file()
     }
@@ -120,7 +120,7 @@ impl Bundle {
         util::rel_display(&self.root, path)
     }
 
-    /// 读取并解析某目录的 `._meta`。
+    /// 读取并解析某目录的 `.str.toml`。
     pub fn read_meta(&self, dir: &Path) -> Result<MetaLoad> {
         let p = self.meta_path(dir);
         let rel = self.rel(&p);
@@ -154,7 +154,7 @@ impl Bundle {
             .collect())
     }
 
-    /// 在**非分支**目录中查找是否藏有 `._meta`（层级异常，规范 4.6）。
+    /// 在**非分支**目录中查找是否藏有 `.str.toml`（层级异常，规范 4.6）。
     ///
     /// `rel_prefix` 为该目录的 bundle 相对路径（ROOT 传 `""`）；`ignore` 非空时，
     /// 被忽略的子项同样剪枝（与分支遍历语义一致）。
@@ -237,7 +237,7 @@ impl Bundle {
                 set.push_layer("", &p.ignore.join("\n"));
             }
         }
-        // 系统级忽略层恒为最内层：`._meta` / `._schema/` / `._cache/` / `._` 保留
+        // 系统级忽略层恒为最内层：`.str.toml` / `.str.schema/` / `.str.cache/` / `.str.` 保留
         // 命名空间与 OS / VCS 元数据不受任何用户模式（含 `!` 取反）影响。
         set.push_system_layer();
         set
@@ -254,7 +254,7 @@ impl Bundle {
             issues.push(Issue::error(
                 code::META_MISSING,
                 ".",
-                "bundle 根目录缺少 `._meta`",
+                "bundle 根目录缺少 `.str.toml`",
             ));
             return Ok(Scan {
                 root: self.root.clone(),
@@ -326,7 +326,7 @@ impl Bundle {
                         issues.push(Issue::error(
                             code::META_MISSING,
                             rel,
-                            "父目录不是分支（缺少 `._meta`），其内出现 `._meta`，无法建立分支层级",
+                            "父目录不是分支（缺少 `.str.toml`），其内出现 `.str.toml`，无法建立分支层级",
                         ));
                     }
                     continue;

@@ -1,4 +1,4 @@
-//! `._meta` 的**保注释写回**与新建模板渲染。
+//! `.str.toml` 的**保注释写回**与新建模板渲染。
 //!
 //! 写回直接基于 `toml_edit::DocumentMut`，因此已有的 `#` 注释与键的书写顺序都会被保留
 //! （规范硬性约束 6、DoD 16）。
@@ -39,7 +39,7 @@ pub fn meta_from_text(text: &str) -> Result<Meta> {
     Ok(meta)
 }
 
-/// 渲染 root `._meta` 模板。
+/// 渲染 root `.str.toml` 模板。
 pub fn render_root_meta(
     name: &str,
     title: Option<&str>,
@@ -74,14 +74,14 @@ pub fn render_root_meta(
     s.push_str("sha256 = \"required\"\n");
     s.push_str("large_asset_bytes = 10485760\n");
     s.push_str("deep_tree_warn = 16\n");
-    // v1.12.0：不再登记 `._schema` —— 保留目录免登记（规范 §1.3 约束 5 / §4.8）。
-    // `._schema/` 目录本身仍由 init 创建并写入三份 Schema，只是不再出现在 `entries[]`。
+    // v1.12.0：不再登记 `.str.schema` —— 保留目录免登记（规范 §1.3 约束 5 / §4.8）。
+    // `.str.schema/` 目录本身仍由 init 创建并写入三份 Schema，只是不再出现在 `entries[]`。
     s.push('\n');
     s.push_str("[ext]\n");
     s
 }
 
-/// 渲染 node / branch `._meta` 模板。
+/// 渲染 node / branch `.str.toml` 模板。
 pub fn render_branch_meta(
     kind: Kind,
     id: &str,

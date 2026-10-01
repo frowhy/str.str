@@ -1,15 +1,15 @@
 //! Schema 副本守卫（drift gate）。
 //!
-//! `str-cli/schema/` 是仓库根 `._schema/`（唯一真源）的**派生副本** —— 存在的唯一
+//! `str-cli/schema/` 是仓库根 `.str.schema/`（唯一真源）的**派生副本** —— 存在的唯一
 //! 原因是 crates.io 只打包 crate 目录内的文件，而 `include_str!` 无法引用包外路径。
 //!
 //! 本测试在**仓库内**构建时校验二者逐字节一致；在**已发布的 crate** 中（无
-//! `._schema/` 可比对）自动跳过，因此不会误报。
+//! `.str.schema/` 可比对）自动跳过，因此不会误报。
 
 use std::path::Path;
 
-/// 真源目录相对 crate 根的位置（`<repo>/._schema`）。
-const SOURCE_OF_TRUTH: &str = "._schema";
+/// 真源目录相对 crate 根的位置（`<repo>/.str.schema`）。
+const SOURCE_OF_TRUTH: &str = ".str.schema";
 /// crate 内派生副本目录。
 const MIRROR: &str = "schema";
 

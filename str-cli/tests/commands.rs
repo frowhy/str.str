@@ -62,7 +62,7 @@ fn report(path: &Path) -> (usize, usize, Vec<String>) {
     )
 }
 
-/// `._meta` 中 `[[entries]]` 的 `path` 序列（即落盘条目顺序）。
+/// `.str.toml` 中 `[[entries]]` 的 `path` 序列（即落盘条目顺序）。
 fn entry_paths(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|l| l.strip_prefix("path = \""))
@@ -92,7 +92,7 @@ fn replace_line(text: &str, key: &str, value: &str) -> String {
 #[test]
 fn entries_are_sorted_by_order_then_path() {
     let (root, aaa, bbb) = two_nodes("order");
-    let meta = root.join("._meta");
+    let meta = root.join(".str.toml");
 
     cmd::fmt(&root, false, false).unwrap();
     // v1.12.0 起保留目录免登记：ROOT 的 entries 只有两条 node。
@@ -121,7 +121,7 @@ fn entries_are_sorted_by_order_then_path() {
 #[test]
 fn fmt_detects_and_fixes_out_of_order_entries() {
     let (root, aaa, bbb) = two_nodes("fixorder");
-    let meta = root.join("._meta");
+    let meta = root.join(".str.toml");
 
     // 手工把两条 node 的 order 互换（`order = 99` 只是中转，避免就地覆盖冲突）
     let swapped = read(&meta)
@@ -139,7 +139,7 @@ fn fmt_detects_and_fixes_out_of_order_entries() {
 #[test]
 fn fmt_keeps_key_order_comments_and_can_strip_them() {
     let (root, _, _) = two_nodes("comments");
-    let meta = root.join("._meta");
+    let meta = root.join(".str.toml");
 
     // 顶层裸键乱序 + 一条注释 → 规范化后键序归位、注释保留
     let scrambled = read(&meta)
@@ -200,7 +200,7 @@ fn validate_fix_manifest_actually_writes() {
 
     let code = cmd::validate(&root, true, false, true).unwrap();
     assert_eq!(code, 0, "`--fix-manifest` 必须真正写盘并让校验通过");
-    assert!(read(&root.join(&aaa).join("._meta")).contains("extra.json"));
+    assert!(read(&root.join(&aaa).join(".str.toml")).contains("extra.json"));
 }
 
 #[test]
@@ -242,7 +242,7 @@ fn meta_set_entry_set_and_author_round_trip() {
     assert!(codes.contains(&"W_NO_TYPE".to_string()));
     assert!(codes.contains(&"W_NO_SUMMARY".to_string()));
 
-    // 用 CLI 补齐（不再需要「手改 `._meta` 的唯一例外」）
+    // 用 CLI 补齐（不再需要「手改 `.str.toml` 的唯一例外」）
     cmd::meta_set(
         &root,
         Some(aaa.clone()),
@@ -276,9 +276,9 @@ fn meta_set_entry_set_and_author_round_trip() {
     )
     .unwrap();
 
-    let node_meta = read(&root.join(&aaa).join("._meta"));
+    let node_meta = read(&root.join(&aaa).join(".str.toml"));
     assert!(node_meta.contains("tags = [\"crm\", \"demo\"]"), "{node_meta}");
-    let root_meta = read(&root.join("._meta"));
+    let root_meta = read(&root.join(".str.toml"));
     assert!(root_meta.contains("note = \"别名\""), "{root_meta}");
     assert!(root_meta.contains("[[authors]]"), "{root_meta}");
     let (errors, warnings, _) = report(&root);
@@ -312,7 +312,7 @@ fn meta_set_entry_set_and_author_round_trip() {
     );
 
     cmd::author_rm(&root, None, "u:frowhy").unwrap();
-    assert!(!read(&root.join("._meta")).contains("[[authors]]"));
+    assert!(!read(&root.join(".str.toml")).contains("[[authors]]"));
 }
 
 #[test]
@@ -360,7 +360,7 @@ fn uuid_argument_defaults_to_root() {
 
     // `ref add` 缺省源分支 = ROOT → 关联线落在 ROOT 的 `refs[]`
     cmd::ref_add(&root, None, &aaa, "related".into(), None, None).unwrap();
-    let root_meta = read(&root.join("._meta"));
+    let root_meta = read(&root.join(".str.toml"));
     assert!(root_meta.contains("[[refs]]"), "{root_meta}");
     assert_eq!(report(&root).0, 0, "ROOT 持有 `refs` 必须合法：{root_meta}");
 
@@ -436,9 +436,9 @@ fn uuid_argument_defaults_to_current_branch() {
 #[test]
 fn spec_set_rewrites_whole_bundle_and_is_idempotent() {
     let (root, aaa, bbb) = two_nodes("specset");
-    let root_meta = root.join("._meta");
-    let a_meta = root.join(&aaa).join("._meta");
-    let b_meta = root.join(&bbb).join("._meta");
+    let root_meta = root.join(".str.toml");
+    let a_meta = root.join(&aaa).join(".str.toml");
+    let b_meta = root.join(&bbb).join(".str.toml");
 
     // 初始由 `str init` / `node add` 写出本实现的规范版本
     assert!(read(&root_meta).contains(&format!("spec = \"{SPEC}\"")));
@@ -457,9 +457,9 @@ fn spec_set_rewrites_whole_bundle_and_is_idempotent() {
     // 幂等：值相同则一个字节都不写（含 `revision` / `updated_at`）
     let frozen = read(&root_meta);
     cmd::spec_set(&root, "1.7.0", false).unwrap();
-    assert_eq!(read(&root_meta), frozen, "值未变则不得改写 `._meta`");
+    assert_eq!(read(&root_meta), frozen, "值未变则不得改写 `.str.toml`");
 
-    // 非法版本串：major 必须为 1 且必须是三段（与 `._schema` 的正则同源）
+    // 非法版本串：major 必须为 1 且必须是三段（与 `.str.schema` 的正则同源）
     for bad in ["2.0.0", "1.9", "1.9.0.1", "", "abc", "1.x.0"] {
         assert!(
             cmd::spec_set(&root, bad, false).is_err(),
@@ -493,7 +493,7 @@ fn metadata_stays_parsable_after_writes() {
     let bundle = Bundle::new(root.clone()).unwrap();
     match bundle.read_meta(&root).unwrap() {
         MetaLoad::Ok(_, issues) => assert!(issues.is_empty(), "{issues:?}"),
-        MetaLoad::Failed(i) => panic!("root `._meta` 解析失败：{i:?}"),
+        MetaLoad::Failed(i) => panic!("root `.str.toml` 解析失败：{i:?}"),
     }
     // 键序规范 + 可再次规范化（幂等）
     assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
@@ -508,7 +508,7 @@ fn revision_stale_uses_written_baseline() {
     assert_eq!(report(&root).0, 0);
 
     // 绕过 CLI 改 `updated_at` 而不推进 `revision`
-    let node_meta = root.join(&aaa).join("._meta");
+    let node_meta = root.join(&aaa).join(".str.toml");
     write(
         &node_meta,
         &replace_line(&read(&node_meta), "updated_at", "2030-01-01T00:00:00+00:00"),
@@ -552,11 +552,11 @@ fn revision_stale_uses_written_baseline() {
 
 #[test]
 fn revision_stale_is_skipped_without_baseline() {
-    // 从未被 CLI 写过的 bundle 没有基线：单份 `._meta` 不含历史，不得凭空报错
+    // 从未被 CLI 写过的 bundle 没有基线：单份 `.str.toml` 不含历史，不得凭空报错
     let (root, aaa, _) = two_nodes("revnobase");
-    let _ = std::fs::remove_dir_all(root.join("._cache"));
+    let _ = std::fs::remove_dir_all(root.join(".str.cache"));
 
-    let node_meta = root.join(&aaa).join("._meta");
+    let node_meta = root.join(&aaa).join(".str.toml");
     write(
         &node_meta,
         &replace_line(&read(&node_meta), "updated_at", "2030-01-01T00:00:00+00:00"),
@@ -584,7 +584,7 @@ fn entry_add_registers_with_inferred_metadata() {
         },
     )
     .unwrap();
-    let text = read(&node_dir.join("._meta"));
+    let text = read(&node_dir.join(".str.toml"));
     assert!(text.contains("sha256 = \""));
     assert!(text.contains("media_type = \"text/markdown\""));
     assert!(text.contains("title = \"说明\""));
@@ -624,7 +624,7 @@ fn entry_add_registers_with_inferred_metadata() {
         "移除登记后磁盘文件应报缺失：{codes:?}"
     );
 
-    // 写入的 `._meta` 仍是规范形式（canonicalize 生效）
+    // 写入的 `.str.toml` 仍是规范形式（canonicalize 生效）
     assert_eq!(cmd::fmt(&root, true, false).unwrap(), 0);
 }
 
@@ -656,7 +656,7 @@ fn ignore_commands_manage_root_policies() {
     // 幂等追加
     cmd::ignore_add(&root, "build/").unwrap();
     cmd::ignore_add(&root, "build/").unwrap();
-    let text = read(&root.join("._meta"));
+    let text = read(&root.join(".str.toml"));
     assert!(text.contains("ignore = [\"build/\"]"), "{text}");
 
     // 生效：未登记的 build/ 不再报缺失
@@ -680,7 +680,7 @@ fn policies_set_validates_values_and_persists() {
     let (root, _aaa, _bbb) = two_nodes("policies-set");
 
     cmd::policies_set(&root, "gitignore", "false").unwrap();
-    assert!(read(&root.join("._meta")).contains("gitignore = false"));
+    assert!(read(&root.join(".str.toml")).contains("gitignore = false"));
 
     // 非法值拒绝
     assert!(cmd::policies_set(&root, "gitignore", "yes").is_err());

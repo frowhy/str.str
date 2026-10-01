@@ -1,7 +1,7 @@
-//! `E_REVISION_STALE` 的**历史基线**（`._cache/revisions.json`）。
+//! `E_REVISION_STALE` 的**历史基线**（`.str.cache/revisions.json`）。
 //!
 //! 规范 §6.1 的 `E_REVISION_STALE` 是「`updated_at` 变化但 `revision` 未前进」——这是
-//! **历史相关**判定，单看一份 `._meta` 无从下手（`created_at` / `updated_at` / `revision`
+//! **历史相关**判定，单看一份 `.str.toml` 无从下手（`created_at` / `updated_at` / `revision`
 //! 都是自描述的，文件本身不携带「上一版」）。
 //!
 //! 因此由**写入端**在每次成功写盘后登记当前快照，校验端只读比对：
@@ -9,7 +9,7 @@
 //! - 写入端：`str` 的全部写命令（经 `cmd::save_meta`）与 `str sync`（经 [`record_scan`]）；
 //! - 校验端：[`crate::validate`] 读基线，`updated_at` 变了而 `revision` 未前进即报码。
 //!
-//! 基线文件是**派生数据**：位于 `._cache/`（格式保留名、不入 `entries` 清单、`.gitignore`
+//! 基线文件是**派生数据**：位于 `.str.cache/`（格式保留名、不入 `entries` 清单、`.gitignore`
 //! 已排除），删掉即关闭这项检查；`str sync` 会按当前扫描结果整份重建，因此不会积累陈旧条目。
 
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ use crate::bundle::{Bundle, Scan};
 use crate::meta::Meta;
 use crate::util::CACHE_DIR;
 
-/// 基线文件名（位于 `._cache/` 下）。
+/// 基线文件名（位于 `.str.cache/` 下）。
 const FILE: &str = "revisions.json";
 
 /// 一个分支的基线快照。
@@ -33,7 +33,7 @@ pub struct Snap {
     pub updated_at: String,
 }
 
-/// 全 bundle 的基线：`._meta` 所在目录的相对路径 → 快照。
+/// 全 bundle 的基线：`.str.toml` 所在目录的相对路径 → 快照。
 ///
 /// 键与 `Visit::rel` 一致：ROOT 为 `"."`，其余为 `"<uuid>/"` 形式。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ fn file_path(bundle: &Bundle) -> PathBuf {
     bundle.root.join(CACHE_DIR).join(FILE)
 }
 
-/// 从 `._meta` 取快照；`revision` / `updated_at` 缺任一者则视为不可登记。
+/// 从 `.str.toml` 取快照；`revision` / `updated_at` 缺任一者则视为不可登记。
 fn snap_of(meta: &Meta) -> Option<Snap> {
     Some(Snap {
         revision: meta.revision?,

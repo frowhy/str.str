@@ -56,9 +56,9 @@ assert_eq!(report.error_count(), 0);
 ## 三份内嵌 Schema 与仓库根真源的关系
 
 `src/lib.rs` 通过 `include_str!("../schema/…")` 内嵌三份档位 JSON Schema
-（`root` / `node` / `branch`），供 bundle 未自带 `._schema/` 时兜底。
+（`root` / `node` / `branch`），供 bundle 未自带 `.str.schema/` 时兜底。
 
-- **唯一真源**在仓库根 `._schema/`（属格式规范资产，与 `examples/` 同级）；
+- **唯一真源**在仓库根 `.str.schema/`（属格式规范资产，与 `examples/` 同级）；
 - crate 内 `schema/` 是它的**派生副本** —— 因为 crates.io 只打包 crate 目录内的文件，
   且 `include_str!` 无法引用包外路径（否则 `cargo package` 的验证构建必然失败）；
 - 副本由 `bash scripts/sync-schema.sh` 生成，并由 `tests/schema_sync.rs` 守卫二者

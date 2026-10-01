@@ -1,6 +1,6 @@
 # str-skill — 让 AI Agent 会用、且必须用 STR
 
-`str-skill` 是随 STR 格式一起开源的 **Agent 技能包**：它教会 AI Agent 如何读写 `.str` bundle、如何调用 `str` CLI，并**强制**所有对 `._meta` 的操作必须经过 `str` CLI，禁止手改 TOML。
+`str-skill` 是随 STR 格式一起开源的 **Agent 技能包**：它教会 AI Agent 如何读写 `.str` bundle、如何调用 `str` CLI，并**强制**所有对 `.str.toml` 的操作必须经过 `str` CLI，禁止手改 TOML。
 
 - 面向**任意**支持 Skill 的编码 Agent（CodeBuddy / Claude Code / Cursor 等），不绑定具体实现。
 - SKILL.md 用英文书写（便于分发），`references/` 用中文详注（与仓库规范正文一致）。
@@ -66,7 +66,7 @@ Agent 不必自己判断走哪条路。`scripts/ensure-str.sh` 依次尝试：`$
 - 版本沿用同一套解析（`STR_VERSION` → GitHub `latest` → 内置默认版本），因此编译安装与下载拿到的版本一致；该 tag 未发布到 crates.io 时会失败并继续走最后的失败分支。
 - 要求本机有 `cargo`（无则跳过）；`--locked` 使用 crate 内随包发布的 `Cargo.lock`，保证与仓库验证过的依赖组合一致。
 
-全部失败则打印安装指引并**非零退出**（绝不静默降级为手改 `._meta`）。
+全部失败则打印安装指引并**非零退出**（绝不静默降级为手改 `.str.toml`）。
 
 ### 2. 把 skill 装到你的 Agent
 
@@ -83,11 +83,11 @@ cp -R /path/to/str-skill .codebuddy/skills/str-skill
 
 ## 强制力从哪来
 
-`SKILL.md` 把「必须用 CLI、禁止手改 `._meta`」写成 **MUST / NEVER 级条款**，并把「写后必须 `str sync` + `str validate --strict` 且 0 error 才算完成」定为交付前提。这是跨 Agent 通用的最强约束：它约束的是 Agent 的行为契约，而不是某个客户端的能力。
+`SKILL.md` 把「必须用 CLI、禁止手改 `.str.toml`」写成 **MUST / NEVER 级条款**，并把「写后必须 `str sync` + `str validate --strict` 且 0 error 才算完成」定为交付前提。这是跨 Agent 通用的最强约束：它约束的是 Agent 的行为契约，而不是某个客户端的能力。
 
 **触发是默认开启（always-on）的**：`SKILL.md` frontmatter 的 `description` 声明"安装即默认加载、不等待用户点名 STR"，正文 `Default-on activation` 一节进一步要求 **Agent 创建或修改任何文件时默认走 STR**（存入 bundle，无则 `str init` 新建）。skill 的自动触发完全由 `description` 措辞驱动，写被动措辞（"whenever … is involved"）就会退化为「提到才触发」。
 
-**这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `._meta` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
+**这条规则现在没有例外**：`str meta set` / `str entry set` / `str author add|rm` 补齐了 `type` / `title` / `summary` / `note` / `order` / `tags` / `authors[]` 的写入能力，因此 `.str.toml` 的全部字段（结构与描述）都由 CLI 掌握，不存在「只能手改 TOML」的字段。
 
 需要更强（客户端级）约束时，可把 SKILL.md 的 Hard rules 复制进宿主的 always-apply 规则机制 —— 详见下一节。
 
@@ -114,7 +114,7 @@ alwaysApply: true
 每次会话开始时，先完整阅读技能文件 `.codebuddy/skills/str-skill/SKILL.md`
 （用户级安装则在 `~/.codebuddy/skills/str-skill/SKILL.md`），并在整个会话中遵循其约束：
 
-1. 任何 `._meta` 的读写必须通过 `str` CLI，禁止手写、sed/perl/jq 改 TOML；
+1. 任何 `.str.toml` 的读写必须通过 `str` CLI，禁止手写、sed/perl/jq 改 TOML；
    也不得以散落目录 / wiki / 数据库 / JSON 转储替代 STR bundle 存储结构化资源。
 2. 创建或修改任何文件时，默认将产物组织进 STR bundle；
    无合适 bundle 时用 `str init`（结构用 `str node add` / `str branch add`）新建，
@@ -161,7 +161,7 @@ sh <skill-dir>/scripts/bootstrap-rule.sh           # 写入 / 幂等升级规则
   全都不存在则新建 `AGENTS.md`（跨 Agent 记忆文件的事实标准）。
 - **幂等**：规则块由 `<!-- str-skill:begin v1 … -->` / `<!-- str-skill:end -->` 标记包裹，
   重跑整块替换（升级），不重复注入、不动块外内容。
-- **块内容**：调用时机（STR 默认存储、`._meta` 只经 CLI、`sync` → `validate --strict` →
+- **块内容**：调用时机（STR 默认存储、`.str.toml` 只经 CLI、`sync` → `validate --strict` →
   `fmt --check` 交付门禁、str-gui 引导）、调用方式（`ensure-str.sh` 解析）、参数格式
   （`[dir]`/`[uuid]` 缺省约定、`spec set <VERSION>` 参数序、`--target`/`--force` 必填、
   禁止发明字段）。
@@ -184,14 +184,14 @@ sh <skill-dir>/scripts/bootstrap-rule.sh           # 写入 / 幂等升级规则
 v1.8.0 的实现对齐已消解此前的落差：§4.9 排序不生效、`--fix-manifest` 不写盘、`E_REVISION_STALE` 判不动、描述性字段只能手改，并把规范自身的不一致（`policies.unknown_entry`、§9「写前校验」措辞）一并收口；v1.9.0 又把 §9 最后一处参数漂移关掉 —— 凡 `[uuid]` 位置参数**省略即 ROOT**（含 `show` / `context` / `norm` / `ref add` / `branch add` / `branch rm`）。**当前残留只剩「限制」而非「不一致」**，逐条列在 `references/cli-reference.md` §5：
 
 - **`str validate` 不检查书写顺序**：规范把顺序门禁交给 `str fmt --check`（返回 0），写命令落盘的字节本身已规范。
-- **`E_REVISION_STALE` 依赖基线**：历史判定靠 `._cache/revisions.json`（派生数据，由写命令与 `str sync` 维护）；删掉该目录即关闭这项历史检查。
+- **`E_REVISION_STALE` 依赖基线**：历史判定靠 `.str.cache/revisions.json`（派生数据，由写命令与 `str sync` 维护）；删掉该目录即关闭这项历史检查。
 - **平台相关**：`str reveal` 依赖 macOS `SetFile`（缺失只提示，不改退出码）；`str export --format toml` 是简易序列化，不是 §4.9 规范形式。
 
 ## 版本
 
-- 技能包版本：**0.6.0**
-- 适配规范：**v1.14.0**（`SPEC.md`）
-- 依赖 CLI：**>= 0.3.0**（`str spec set` 与 `[uuid]` 位置参数缺省 ROOT 自 0.3.0 起提供）
+- 技能包版本：**0.7.0**
+- 适配规范：**v1.17.0**（`SPEC.md`）
+- 依赖 CLI：**>= 0.8.0**（`str spec set` 与 `[uuid]` 位置参数缺省 ROOT 自 0.3.0 起提供）
 - 发布身份：slug **`str-skill`** · 展示名 **`STR 资源树`**（SkillHub）
 
 技能包版本、CLI 版本与发行 tag 是**三条独立演进的轴**，不要求相等；对应关系登记在仓库根

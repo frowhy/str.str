@@ -7,7 +7,7 @@
 > 完整变更摘要，§13「版本演进策略」定义哪类改动升哪一位。本文件**不复制**那些细节，只维护
 > **兼容矩阵**与**迁移动作**。两份文档冲突时，以 `SPEC.md` 为准。
 
-- 当前版本：**1.16.0**（`str` 主版本 = `1`）
+- 当前版本：**1.17.0**（`str` 主版本 = `1`）
 - 版本号真源：[`VERSIONS.toml`](VERSIONS.toml)
 - 版本位规则（规范 §13）：新增可选字段 / 新增 `role`、`rel` 枚举值 → **minor**；
   收紧校验、语义变更 → **major**（须提供 `str migrate --to N`）；修正措辞、补示例 → **patch**
@@ -17,6 +17,7 @@
 
 | spec | 变更类型 | 已有实现需要做什么 |
 | --- | --- | --- |
+| **1.17.0** | **破坏性（保留名迁移）** | 格式保留名 `._meta` / `._schema` / `._cache` → **`.str.toml` / `.str.schema` / `.str.cache`**（未来扩展一律 `.str.*`；动机：`._<名>` 与 macOS AppleDouble 伴生文件同名冲突 —— Finder 枚举层硬过滤该形态文件、部分 WebDAV 端将其丢弃，ADR-5 重写）。`E_RESERVED_NAME` 改判：业务条目不得占用 `.str.` 命名空间；未登记的 `._*` 普通文件退化为纯噪声豁免（已登记 / 目录形态仍报）。**迁移**：手工改名三个保留名（内容不变）→ 删除 `._cache/` → 用 ≥ v0.10.0 工具 `str spec set 1.17.0` → `str sync` → `str validate --strict`（参考实现已提供 `scripts/migrate-reserved-names.sh` 一键完成）。旧版工具无法读取新 bundle |
 | **1.16.0** | 工具行为收紧 + 新 flag | `str sync` MUST 保留软连接（`role = "link"` 且非 `hard`）条目 —— 不得因磁盘无对应目录而移除（§4.6.1 规则 1 的豁免延伸到对账）；删除类变更必须醒目：移除条目数 > 0 时 MUST 输出 `WARN:` 汇总，移除条目数 ≥ 10 且未带 `--yes` 时 MUST 拒绝执行、一字不写。`sync` 新增 `--yes` flag。**bundle 数据契约零变更**，既有 bundle 无需迁移；不实现门禁的旧工具有**静默批量删除**风险（现场事故：一次 sync 静默清除 86 条 GUI 建立的软链接） |
 | **1.15.0** | 纯新增（命令面）+ 放宽（链接） | 新增 5 个**只读**查询命令：`str find`（元数据检索，关键词 / `type` / 标签过滤）、`str grep`（payload 正文全文检索，字面子串、跳过二进制与非 UTF-8）、`str tags`（标签词表 + 计数）、`str where`（ROOT → 目标面包屑）、`str get`（输出单个已登记条目正文 / `--info` 元信息）。另**撤回**硬链接「不得挂载自己的后代」限制（1.14.0 引入，未发行即修订）：硬链接不渲染目标结构、内容只读，目标位于挂载点子树内不产生自嵌套 —— 原规则使挂载点为 ROOT 时一切目标皆被禁。磁盘数据契约**零变更**：既有实现可忽略这些命令继续工作，**无需迁移**；要补齐的只是命令面与该校验的放宽（详见 §9「查询命令的约定」） |
 | **1.14.0** | 纯新增（可选能力） | `entries[].role` 新增可选值 **`link`** 与字段 `entries[].target` / `entries[].mode`（`"soft"` 缺省 ｜ `"hard"`）：**链接子分支**。软连接 = 目标完整视图（声明式，磁盘不新建目录、`path` = `target`、不参与清单比对，DAG 合法）；硬链接 = **内容引用 + 自有结构**（有身份的真实分支：必写 `id` 且 `path = id` = 自身目录，参与清单比对，自有 entries 只允许子分支 ⇒ `E_LINK_OWN_CONTENT`；内容面板显示目标内容条目、只读，目标的分支结构不跟过来），且不得挂载自己的后代。目标必须是 `node` / `branch` 且不得是 ROOT；新增 `E_LINK_NO_TARGET` / `E_LINK_TARGET_INVALID` / `E_LINK_HAS_PAYLOAD` / `E_LINK_CYCLE` / `E_LINK_DUP` / `E_LINK_OWN_CONTENT` 六个错误码与 `str link add\|rm` 两个命令。旧实现若尚未支持：读到软连接行时**不得**因磁盘无对应目录报 `E_MANIFEST_GHOST`（它不参与清单比对，§4.6.1 规则 1）；不支持挂载的工具可把它当普通未知条目忽略渲染。**无需迁移**，既有 bundle 不含 `link` |
@@ -28,7 +29,7 @@
 | 1.8.0 | 收紧 + 澄清 | 去掉对 `policies.unknown_entry` 的读取；按 §4.9 排序细则实现（`order` 缺省视为最大）—— 首次规范化会有**一次性条目重排**，属预期 |
 | 1.7.0 | 收紧 | 补 `.str` 子 bundle 硬边界与 `role = "bundle"`；元数据豁免扩展至 VCS（`.git/`、`.gitignore` 等）；`size` / `sha256` 的强制改由 `policies.sha256` 判定（Schema 不再无条件 `required`） |
 | 1.6.0 | 放宽 | 允许 `entries` / `refs` 整表省略（归一化补 `[]`）；`E_RESERVED_NAME` 判定精确化 |
-| 1.5.0 | 收紧 | 删除 `._audit/` 与 `journal` role；深度分界固定为 2，删除 `policies.branch_min_depth` |
+| 1.5.0 | 收紧 | 删除 `.str.audit/` 与 `journal` role；深度分界固定为 2，删除 `policies.branch_min_depth` |
 | **1.4.0** | 破坏（载体变更） | `._meta` 由 JSON 改为 **TOML**；UUID v7 固定；`sha256` 改强制 —— **需要迁移**，见下节 |
 | **1.3.0** | 破坏（命名空间变更） | 保留名统一为 `._` 前缀（`.meta` → `._meta`；`_schema` → `._schema`）；新增操作系统噪声豁免 |
 | 1.2.0 | 放宽 | 取消「素材目录」概念，子目录一律 `role: dir`；删除 `E_STRAY_META` |
@@ -44,7 +45,7 @@
 1. 按 §6.1「已删除错误码」清单移除对应校验；
 2. 保留名统一为 `._` 前缀，并补操作系统噪声豁免（`._*`、`.DS_Store` 一律忽略）；
 3. `._meta` 从 JSON 改写为 TOML，补齐「TOML → 规范 JSON 归一化 → Schema 校验」链路与**保注释写回**；
-4. 按 `SPEC.md` 头部《修订记录》逐版补齐：移除 `._audit/`、深度分界固定为 2、`.str` 子 bundle 硬边界、
+4. 按 `SPEC.md` 头部《修订记录》逐版补齐：移除 `.str.audit/`、深度分界固定为 2、`.str` 子 bundle 硬边界、
    排序细则（§4.9）、字段写入命令（`meta set` / `entry set` / `author` / `spec set`）。
 
 有了 CLI 之后，`spec` 声明本身不必手改：

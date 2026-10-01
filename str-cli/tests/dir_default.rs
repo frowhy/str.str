@@ -40,8 +40,8 @@ fn dir_argument_defaults_to_current_directory() {
     let (code, out) = run(&cwd, &["init"]);
     assert_eq!(code, 0, "{out}");
     let bundle = base.join("proj.str");
-    assert!(bundle.join("._meta").exists(), "{out}");
-    assert!(bundle.join("._schema").exists(), "{out}");
+    assert!(bundle.join(".str.toml").exists(), "{out}");
+    assert!(bundle.join(".str.schema").exists(), "{out}");
 
     // 在 bundle 内省略 `<dir>`：目标即当前目录（读类 + 写类 + 门禁各验一例）
     let (code, out) = run(
@@ -93,7 +93,7 @@ fn uuid_argument_defaults_to_current_branch_in_branch_directory() {
     );
     assert_eq!(code, 0, "{out}");
     let node = {
-        let text = std::fs::read_to_string(bundle.join("._meta")).unwrap();
+        let text = std::fs::read_to_string(bundle.join(".str.toml")).unwrap();
         text.lines()
             .find_map(|l| l.strip_prefix("path = \"").map(|s| s.trim_end_matches('"').to_string()))
             .filter(|p| p.starts_with("019") || p.len() == 36)
@@ -110,7 +110,7 @@ fn uuid_argument_defaults_to_current_branch_in_branch_directory() {
 
     // 子分支目录内 `branch rm`（省略 uuid）→ 删除当前分支本身
     let sub = {
-        let text = std::fs::read_to_string(node_dir.join("._meta")).unwrap();
+        let text = std::fs::read_to_string(node_dir.join(".str.toml")).unwrap();
         text.lines()
             .find_map(|l| l.strip_prefix("path = \"").map(|s| s.trim_end_matches('"').to_string()))
             .filter(|p| p != &node)

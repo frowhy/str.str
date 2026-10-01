@@ -4,7 +4,7 @@
 | --- | --- |
 | 格式名称 | STR（Structured Tree Resource，结构化树资源） |
 | 扩展名 | `.str`（目录 bundle，形态对标 macOS `.app`） |
-| 规范版本 | **v1.16.0**（`str` 主版本号 = `1`） |
+| 规范版本 | **v1.17.0**（`str` 主版本号 = `1`） |
 | 文档状态 | `DRAFT → 待评审`（评审通过后转 `APPROVED`，实现完成转 `IMPLEMENTED`） |
 | 文档日期 | 2026-10-01 |
 | 文档定位 | **本文件即规范（唯一真源）**：第 1 章为可直接投喂 AI 开发代理的主提示词（指令主体），第 2~13 章为规范性附录；其中第 3~9 章为格式的 SSOT，实现代码不得偏离，如需偏离必须先修订本文件 |
@@ -15,9 +15,9 @@
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
 | v1.0.0 | 2026-09-14 | 初版 |
-| **v1.1.0** | 2026-09-14 | **撤回「深度 ≥2 禁止承载 payload」**：任意分支（任意层级）均可存放任意文件与文件夹，只要在 `._meta.entries[]` 中登记。层级差异仅体现在**分支身份**上（`node` 独立节点 / `branch` 关联分支），不再限制数据存放位置。相应地：`kind` 枚举改为 `root｜node｜branch`；原「link 目录 = 纯引用」机制改为可选的 **`refs[]` 跨枝关联声明**；删除 `E_DEPTH_OWNED`、`E_LINK_*` 等 5 个错误码，新增 `E_KIND_DEPTH`、`E_REF_*` 等。 |
-| **v1.2.0** | 2026-09-14 | **取消「素材目录」概念**：**每个节点/分支目录本身就是素材目录**，图片、PDF、附件等直接放在分支目录内即可。子目录一律降级为**纯内容容器**（`role: dir`），不再有任何特殊语义；删除 `E_STRAY_META`，「子目录内含 `._meta`」一律按「该目录是关联分支」处理（role 未同步则报 `E_ENTRY_ROLE_DEPTH`）。 |
-| **v1.3.0** | 2026-09-14 | **统一 `._` 保留前缀**：`.meta` → **`._meta`**；`_schema` / `_audit` / `_cache` → **`._schema` / `._audit` / `._cache`**。格式保留名一律以 `._` 开头，业务条目不得以 `._` 开头。连带：新增**操作系统噪声豁免**（`._*` 形式的 AppleDouble 伴生文件与 `.DS_Store` 一律忽略，不报 `E_RESERVED_NAME`、不参与清单比对）；`.gitignore` 模板补 `**/._*`。 |
+| **v1.1.0** | 2026-09-14 | **撤回「深度 ≥2 禁止承载 payload」**：任意分支（任意层级）均可存放任意文件与文件夹，只要在 `.str.toml.entries[]` 中登记。层级差异仅体现在**分支身份**上（`node` 独立节点 / `branch` 关联分支），不再限制数据存放位置。相应地：`kind` 枚举改为 `root｜node｜branch`；原「link 目录 = 纯引用」机制改为可选的 **`refs[]` 跨枝关联声明**；删除 `E_DEPTH_OWNED`、`E_LINK_*` 等 5 个错误码，新增 `E_KIND_DEPTH`、`E_REF_*` 等。 |
+| **v1.2.0** | 2026-09-14 | **取消「素材目录」概念**：**每个节点/分支目录本身就是素材目录**，图片、PDF、附件等直接放在分支目录内即可。子目录一律降级为**纯内容容器**（`role: dir`），不再有任何特殊语义；删除 `E_STRAY_META`，「子目录内含 `.str.toml`」一律按「该目录是关联分支」处理（role 未同步则报 `E_ENTRY_ROLE_DEPTH`）。 |
+| **v1.3.0** | 2026-09-14 | **统一 `._` 保留前缀**：`.meta` → **`._meta`**；`_schema` / `_audit` / `_cache` → **`._schema` / `._audit` / `._cache`**（v1.17.0 起整体迁移为 `.str.` 前缀，见 v1.17.0 行）。格式保留名一律以 `._` 开头，业务条目不得以 `._` 开头。连带：新增**操作系统噪声豁免**（`._*` 形式的 AppleDouble 伴生文件与 `.DS_Store` 一律忽略，不报 `E_RESERVED_NAME`、不参与清单比对）；`.gitignore` 模板补 `**/._*`。 |
 | **v1.4.0** | 2026-09-14 | **载体由 JSON 改为 TOML v1.0.0**（`._meta` 现为 TOML；允许 `#` 注释且工具必须保注释；时间改用 TOML 原生 offset date-time；清单改为数组表 `[[entries]]` / `[[refs]]` / `[[authors]]`，`[policies]` / `[ext]` 为表；新增「TOML → 规范 JSON 归一化 → JSON Schema 校验」链路，ADR-1 重写）。**决策收敛**：UUID v7 固定（`id_version = 7`）、保留 `refs` 跨枝关联、`sha256` 改为**强制**（`policies.sha256 = "required"`，新增 `E_MANIFEST_DIGEST_MISSING`）。顺带清理：`[[entries]]` 不再重复声明 `kind`（与 `role` 冗余），由 `role` 唯一表达；CLI 新增 `str fmt` / `str norm`，`str export` 支持 `--format json\|toml`。 |
 | **v1.5.0** | 2026-09-14 | **移除 `._audit/` 与 `journal` role**：审计能力交由 Git / 协作平台提供，格式内不设审计目录（删除 7.3 节、7.1 表相关行、`role: journal`、示例与 .gitignore 相关项）。**固定深度分界**：深度 1 = `node`、深度 ≥2 = `branch` 为硬规则，删除 `policies.branch_min_depth` 字段（2 是唯一自洽值，暴露可配置开关只会误导）。附录 A 全部决策关闭，转为决策索引。 |
 | **v1.6.0** | 2026-09-14 | **补齐实现期发现的三处澄清**（格式语义无变化）：① **`entries` 与 `refs` 同因 TOML 无法表达空数组表而允许整表省略**（归一化补 `[]`），schema 中不再必填；② `E_RESERVED_NAME` 判定精确化 —— 业务**目录**以 `._` 开头必报、**已登记**的 `._*` 条目必报、未登记的 `._*` **普通文件**豁免；③ `str sync` 去掉 `--recursive`（始终递归）。另补充**参考实现（Rust）与仓库结构**、错误码覆盖率验收项，示例 §10 全部替换为**真实 `size`/`sha256`**（由 `scripts/build-example.sh` 生成并逐字对齐）。 |
@@ -31,6 +31,7 @@
 | **v1.14.0** | 2026-09-28 | **新增「软连接子分支」`role = "link"`（恢复 v1.1.0 撤回的「引用」能力，但改为**声明式**）**：父分支的 `entries[]` 可登记一行 `role = "link"` + `target = <目标分支 id>`，把**任意 `node` / `branch`**（ROOT 除外）挂载为本分支的子分支，**磁盘上不新建任何目录或文件** —— 数据始终只在目标分支内存在，不复制、不移动。与 v1.0 的「link 目录」差别在于载体：v1.0 是真实目录（因而有 `E_LINK_HAS_PAYLOAD` 等「这个目录里不许放东西」的约束），v1.14.0 是**纯声明**（没有目录 ⇒ 天然不可能承载数据，也就不必再为它豁免清单比对）。语义定案：`link` 是**只读视图**（所有权唯一在目标分支，链接下不得新建子分支或放数据）；目标必须是 `node` / `branch` 且不得是 ROOT；**禁止成环**（含自我挂载）；**删除链接只摘引用**、**删除目标分支时工具 MUST 一并摘除指向它的全部 `link`**（不留悬空）。新增 `E_LINK_NO_TARGET` / `E_LINK_TARGET_INVALID` / `E_LINK_HAS_PAYLOAD` / `E_LINK_CYCLE` / `E_LINK_DUP` 五个错误码与 `str link add\|rm` 两个命令（§9），`entries[].target` 字段、`role` 枚举新增值、三份 Schema 同步，DoD 增补第 31 项。规则是**新增可选能力**，既有 bundle 无需迁移。 |
 | **v1.15.0** | 2026-09-28 | **新增查询命令面（AI 渐进式读取闭环）**：§8 的「按内容定位」此前没有命令支撑 —— AI 只能 `str export` 全树（撑爆上下文）或绕过 CLI 裸 grep（违反 CLI-only 约束）。新增 5 个**只读**查询命令（§9）：`str find`（元数据检索：关键词 / `type` / 标签过滤，命中给出相对路径 + id + 命中字段）、`str grep`（正文全文检索：缺省覆盖磁盘上的未登记内容文件夹子项与散落文件，命中行附所属分支上下文与 `registered` 标注）、`str tags`（标签词表 + 计数）、`str where`（ROOT → 目标面包屑）、`str get`（读取单个**已登记**条目的正文；多段路径可直读已登记内容目录内的未登记子项 / `--info` 元信息）。约定：检索均为**不区分大小写的字面子串**（非正则）；`find` / `grep` / `tags` 支持 `--json`；`find` 的条目字段检索跳过结构类条目（子分支自身会被单独访问，避免重复命中）；`get` 对子分支 / 链接 / 内容目录条目以 `BadArg` 拒绝并指路。全部不推进 `revision`、不写 `._meta`。规则是**纯新增**，DoD 增补第 32 项。同批修订（1.15.0 未发行，原地生效）：撤回硬链接「不得挂载自己的后代」限制（§4.6.1 / `E_LINK_TARGET_INVALID`）—— 硬链接不渲染目标结构、内容只读，目标位于挂载点子树内不产生自嵌套；原规则使挂载点为 ROOT 时一切目标皆被禁（ROOT 从此无法挂硬链接），与需求相悖。`E_LINK_TARGET_INVALID` 保留「目标为 ROOT / 缺 `id` / `path ≠ id`」三类判定，DoD 31② 由六类改五类。 |
 | **v1.16.0** | 2026-10-01 | **`sync` 不得移除软连接 + 删除类变更门禁**。现场事故（一次 `str sync` 静默清除 86 条 GUI 建立的跨分支软链接，`validate` 前后均 0 errors 0 warnings）暴露两处工具缺口：① §4.6.1 规则 1 的「不参与清单比对」此前只约束**校验器**，对账工具（`str sync`）在实现里仍按「磁盘无 `path` 对应目录」把软连接行当作已消失条目移除 —— 本版把该豁免**明文延伸到对账**：工具 MUST 保留软连接行，不得移除（§4.6.1 规则 1、§9）；② 删除类变更**必须醒目**（§9）：`sync` 移除条目数 > 0 时 MUST 输出 `WARN` 汇总；移除条目数 ≥ 10 且未显式确认（`--yes`）时 MUST 拒绝执行、一字不写，要求先 `--dry-run` 预览 —— 杜绝「0 errors 0 warnings 但批量删除条目」的静默破坏。`sync` 新增 `--yes` flag（§9）。规则是**对工具行为的收紧 + 新 flag**，bundle 数据格式无任何变化，既有 bundle 无需迁移；DoD 增补第 33 项。|
+| **v1.17.0** | 2026-10-01 | **保留名整体迁移：`._` 前缀 → `.str.` 前缀**（第二次破坏性变更，ADR-5 重写）：`.str.toml`（原 `._meta`）、`.str.schema`（原 `._schema`）、`.str.cache`（原 `._cache`），未来扩展一律 `.str.*`。**动机**：`._<名>` 正是 macOS AppleDouble 伴生文件命名模式 —— Finder 在枚举层硬过滤该形态的文件（⌘⇧. 显示隐藏文件也无效，实测确认），部分 WebDAV 服务端 / 客户端将其当作 AppleDouble 元数据丢弃；`.str.` 前缀零冲突，元数据文件可见、可同步，v1.3.0 的同名风险就此根治。**连带判定变更**：`E_RESERVED_NAME` 改为「业务条目不得占用 `.str.` 命名空间（目录 / 文件、登记与否均报）」；`._*` 退化为纯噪声豁免（未登记普通文件放行；已登记条目或人为创建的 `._` 目录仍报，防滥用）；系统级忽略层（§4.7）忽略 `._*` 与 `.str.*`；`.gitignore` 模板更新。**迁移**：既有 bundle 手工改名三个保留名（`._meta` → `.str.toml` 等，格式内容不变），删除派生缓存 `._cache/`，再用 ≥ v0.10.0 工具执行 `str spec set 1.17.0` → `str sync` → `str validate --strict`；旧版工具无法读取新 bundle（找不到 `._meta` 即全量报 `E_MANIFEST_MISSING`）。DoD 增补第 34 项。|
 
 ---
 
@@ -40,7 +41,7 @@
 - [1. 主提示词（可直接投喂 AI）](#1-主提示词可直接投喂-ai)
 - [2. 设计目标与非目标](#2-设计目标与非目标)
 - [3. 目录结构规范](#3-目录结构规范)
-- [4. `._meta` 数据规范](#4-meta-数据规范)
+- [4. `.str.toml` 数据规范](#4-meta-数据规范)
 - [5. 分支语义：思维导图模型](#5-分支语义思维导图模型)
 - [6. 校验规则与错误码](#6-校验规则与错误码)
 - [7. 多人协作协议](#7-多人协作协议)
@@ -76,7 +77,7 @@
 | 编号 | 交付物 | 说明 |
 | --- | --- | --- |
 | D1 | 规范文档 | 本文件即规范，实现过程中若发现规范缺陷，**先改文档再改代码** |
-| D2 | 校验 Schema ×3 | `root-meta.schema.json` / `node-meta.schema.json` / `branch-meta.schema.json`（**JSON Schema 2020-12**，置于 `._schema/` 下）；用于校验**归一化后的 JSON**（校验链路见 4.1），**不**直接校验 TOML 原文 |
+| D2 | 校验 Schema ×3 | `root-meta.schema.json` / `node-meta.schema.json` / `branch-meta.schema.json`（**JSON Schema 2020-12**，置于 `.str.schema/` 下）；用于校验**归一化后的 JSON**（校验链路见 4.1），**不**直接校验 TOML 原文 |
 | D3 | 示例 bundle | 至少 1 个可直接用校验器跑通的 `.str` 目录（含独立节点、多层关联分支、跨枝关联声明、强制 `sha256`） |
 | D4 | 校验器 `str validate` | 覆盖第 6 章全部错误码，输出人类可读 + `--json` 两种格式 |
 | D5 | 读写库 | TOML 解析与**保注释写回**、**TOML → 规范 JSON 归一化**、遍历、增删任意层级分支、内容清单同步（`sync`） |
@@ -86,7 +87,7 @@
 
 **参考实现（本仓库，已完成）**：Rust 2024；依赖 `toml_edit`（保注释写回）、`jsonschema`（2020-12）、`clap`、`sha2`、`uuid`（v7）、`time`、`walkdir`。
 
-**仓库分层原则**：**格式规范资产放仓库根**（Schema / 示例 / 生成脚本，可被任何实现复用）；**`str-cli/` 只放 CLI 实现**（一个可 `cargo` 构建的最小 crate）。此外，**仓库自身即一个 `.str` bundle（自举 / dogfooding）**：根目录名为 `str.str`，其 `._meta` 记录本仓库的分支与内容，可直接用 `str validate .` 自检 —— 这也是格式在**真实项目**上的第一个用例。
+**仓库分层原则**：**格式规范资产放仓库根**（Schema / 示例 / 生成脚本，可被任何实现复用）；**`str-cli/` 只放 CLI 实现**（一个可 `cargo` 构建的最小 crate）。此外，**仓库自身即一个 `.str` bundle（自举 / dogfooding）**：根目录名为 `str.str`，其 `.str.toml` 记录本仓库的分支与内容，可直接用 `str validate .` 自检 —— 这也是格式在**真实项目**上的第一个用例。
 
 | 位置 | 说明 |
 | --- | --- |
@@ -95,22 +96,22 @@
 | `examples/客户运营.str/` | 与 §10 逐字一致的示例 bundle（真实 `sha256`） |
 | `scripts/build-example.sh` | 幂等重建示例 bundle |
 | `str-cli/Cargo.toml` / `str-cli/Cargo.lock` | Rust 工程（`cargo` 在 `str-cli/` 下执行） |
-| `str-cli/src/{meta,meta_edit}.rs` | `._meta` 模型、提取、归一化、保注释写回、模板渲染 |
+| `str-cli/src/{meta,meta_edit}.rs` | `.str.toml` 模型、提取、归一化、保注释写回、模板渲染 |
 | `str-cli/src/bundle.rs` | 分支树遍历、`id` 索引、懒加载 |
 | `str-cli/src/validate.rs` | 规范第 6 章全部错误码 |
 | `str-cli/src/cmd.rs` / `str-cli/src/main.rs` | CLI 子命令 / clap 定义与退出码 |
 | `str-cli/tests/validate_codes.rs` | 错误码测试矩阵（每个 `E_*` / `W_*` ≥1 例） |
 | `str-cli/target/` | 构建产物（不入库） |
 
-> ⚠ **分层代价**：Schema 属规范资产（只有一份，不复制进实现），因此 `str-cli/src/lib.rs` 以 `include_str!("../../._schema/…")` 引用它 —— **`str-cli/` 不能脱离仓库根单独构建**。`str init` 会把这三份 Schema 复制进新建 bundle 的 `._schema/`。
+> ⚠ **分层代价**：Schema 属规范资产（只有一份，不复制进实现），因此 `str-cli/src/lib.rs` 以 `include_str!("../../.str.schema/…")` 引用它 —— **`str-cli/` 不能脱离仓库根单独构建**。`str init` 会把这三份 Schema 复制进新建 bundle 的 `.str.schema/`。
 
 ### 1.3 硬性约束（违反即失败）
 
-1. **分支可无限嵌套，且任意层级都能存数据**：任何带 `._meta` 的分支目录（深度 1 的独立节点、深度 ≥2 的关联分支）**均可存放任意文件与文件夹**，唯一义务是把它们登记进 `._meta.entries[]`。**不得**以「层级过深」为由拒绝承载数据。
+1. **分支可无限嵌套，且任意层级都能存数据**：任何带 `.str.toml` 的分支目录（深度 1 的独立节点、深度 ≥2 的关联分支）**均可存放任意文件与文件夹**，唯一义务是把它们登记进 `.str.toml.entries[]`。**不得**以「层级过深」为由拒绝承载数据。
 2. **层级差异只体现在身份上**：深度 1 = `node`（独立节点，登记在 ROOT 的 `entries[]`，全局唯一可寻址）；深度 ≥2 = `branch`（关联分支，只登记在其父分支的 `entries[]`）。深度 ≥2 的分支**不得**被登记为 `node`。
 3. **UUID 命名不可变**：分支目录名一旦生成，任何工具都不得重命名。
-4. **派生数据不落盘**：不允许生成持久化索引文件（如 `._index.toml`）。可重建的缓存只能放 `._cache/` 且必须可安全删除。
-5. **元数据必须登记内容**：分支目录内的**业务条目**都必须在 `._meta.entries[]` 中登记；**格式保留目录**（`._meta`、`._schema/`、`._cache/` 及未来新增的 `._*` 保留名）**免登记**、不参与清单比对（`manifest` 策略见 4.8）。
+4. **派生数据不落盘**：不允许生成持久化索引文件（如 `._index.toml`）。可重建的缓存只能放 `.str.cache/` 且必须可安全删除。
+5. **元数据必须登记内容**：分支目录内的**业务条目**都必须在 `.str.toml.entries[]` 中登记；**格式保留目录**（`.str.toml`、`.str.schema/`、`.str.cache/` 及未来新增的 `.str.*` 保留名）**免登记**、不参与清单比对（`manifest` 策略见 4.8）。
 6. **序列化确定性**：TOML v1.0.0、UTF-8 无 BOM、LF 换行、键序/表序固定（4.9）、数组表按 `order` 稳定排序、文件末尾保留单个换行、时间使用原生 offset date-time —— 目的是让 Git diff 只反映真实变更；工具写回时**必须保留注释**（comment-preserving）。
 7. **不得静默容错**：结构损坏必须报错并给出可定位路径，不允许「猜测后继续」。
 8. **跨平台**：不得依赖符号链接、扩展属性、文件系统大小写特性才能正确工作。
@@ -134,10 +135,10 @@
 
 | 目标 | 落地手段 |
 | --- | --- |
-| 结构化存储数据与实体 | 每个分支目录 = 一个节点，自带 `._meta`（元信息 + 内容清单），可在任意层级承载任意文件 |
+| 结构化存储数据与实体 | 每个分支目录 = 一个节点，自带 `.str.toml`（元信息 + 内容清单），可在任意层级承载任意文件 |
 | 思维导图式分支 | ROOT 记录一级「独立节点」；独立节点下可无限嵌套「关联分支」，形成任意深度的分支树 |
-| 天然适配 AI 读取 | 每层 `._meta` 自带 `type/title/summary/tags`；分层可下钻，无需全量加载；提供 `str context` 上下文裁剪 |
-| 支持多人协作编辑 | 一分支一目录一 `._meta`（最小冲突域）；确定性序列化 + 保注释写回；`revision` 单调递增；可选 `.lock` 短锁 |
+| 天然适配 AI 读取 | 每层 `.str.toml` 自带 `type/title/summary/tags`；分层可下钻，无需全量加载；提供 `str context` 上下文裁剪 |
+| 支持多人协作编辑 | 一分支一目录一 `.str.toml`（最小冲突域）；确定性序列化 + 保注释写回；`revision` 单调递增；可选 `.lock` 短锁 |
 | 可 diff / 可 merge | TOML（行导向）+ 固定键序/表序 + 稳定排序 + 保留注释 |
 | 跨枝关联不复制数据 | 可选的 `refs[]` 声明式关联（画导图连线），数据始终只在原分支内存在 |
 | 跨平台可移植 | 纯目录 + 纯文本，零平台特性依赖 |
@@ -162,23 +163,23 @@
 
 ```
 <名称>.str/
-├── ._meta                                  # ① ROOT 元数据：分支结构主干
-├── ._schema/                               # 保留名：本 bundle 的 JSON Schema
-├── ._cache/                                # 保留名：可选派生缓存（可删，建议 gitignore）
+├── .str.toml                                  # ① ROOT 元数据：分支结构主干
+├── .str.schema/                               # 保留名：本 bundle 的 JSON Schema
+├── .str.cache/                                # 保留名：可选派生缓存（可删，建议 gitignore）
 ├── <UUID-v7>/                             # ② 独立节点（深度 1，kind = node）
-│   ├── ._meta
-│   ├── <任意 payload 文件 / 目录>          #    由 ._meta.entries[] 完整登记
-│   ├── <任意子目录>/                        #    role = dir，纯内容容器；内含 ._meta 即成关联分支
+│   ├── .str.toml
+│   ├── <任意 payload 文件 / 目录>          #    由 .str.toml.entries[] 完整登记
+│   ├── <任意子目录>/                        #    role = dir，纯内容容器；内含 .str.toml 即成关联分支
 │   └── <UUID-v7>/                         # ③ 关联分支（深度 2，kind = branch）
-│       ├── ._meta
+│       ├── .str.toml
 │       ├── <任意文件 / 目录>                #    同样完全合法，同样须登记
 │       └── <UUID-v7>/                     # ④ 更深关联分支（深度 3+，仍为 branch）
-│           ├── ._meta
+│           ├── .str.toml
 │           └── <任意文件 / 目录>
 └── <UUID-v7>/                             # 更多独立节点
 ```
 
-> **核心规则**：**目录层级只决定「身份」，不决定「能否存数据」**。任何带 `._meta` 的分支目录都是完整的数据节点，可以存放任意内容并继续向下嵌套。
+> **核心规则**：**目录层级只决定「身份」，不决定「能否存数据」**。任何带 `.str.toml` 的分支目录都是完整的数据节点，可以存放任意内容并继续向下嵌套。
 
 ### 3.3 深度语义表
 
@@ -188,7 +189,7 @@
 | 1 | 独立节点（子分支） | `node` | **允许** | ROOT 的 `entries[]` | 一等实体；全局唯一可寻址；可被任意分支通过 `refs[]` 关联 |
 | ≥2 | 关联分支（孙分支及更深） | `branch` | **允许** | 其**父分支**的 `entries[]` | 依附父分支存在；可无限嵌套形成思维导图；不得升级为一等实体 |
 
-> 「关联分支」的「关联」有两层含义：① **纵向**——它与其父分支构成父子关联（依附关系）；② **横向**——它可通过 `._meta.refs[]` 与其他分支建立跨枝关联线。
+> 「关联分支」的「关联」有两层含义：① **纵向**——它与其父分支构成父子关联（依附关系）；② **横向**——它可通过 `.str.toml.refs[]` 与其他分支建立跨枝关联线。
 
 ### 3.4 命名规则
 
@@ -196,27 +197,27 @@
 | --- | --- | --- |
 | bundle 根目录 | `<名称>.str`（扩展名小写） | `W_BUNDLE_SUFFIX` |
 | 分支目录（`node` / `branch`） | **UUID v7** 的规范小写连字符格式：`xxxxxxxx-xxxx-7xxx-[89ab]xxx-xxxxxxxxxxxx` | `E_ID_NOT_UUID` / `E_ID_VERSION` |
-| 元数据文件 | 固定名 **`._meta`**，目录内唯一，必须是普通文件 | `E_META_MISSING` |
-| 保留名 | 以 **`._`** 开头（`._meta` / `._schema` / `._cache` / 未来扩展）；业务条目**不得**以 `._` 开头 | `E_RESERVED_NAME` |
+| 元数据文件 | 固定名 **`.str.toml`**，目录内唯一，必须是普通文件 | `E_META_MISSING` |
+| 保留名 | 格式保留名以 **`.str.`** 开头（`.str.toml` / `.str.schema` / `.str.cache` / 未来扩展）；业务条目**不得**占用 `.str.` 命名空间，亦不得以 `._` 开头（macOS AppleDouble 伴生文件保留模式，v1.17.0） | `E_RESERVED_NAME` |
 | 锁文件 | `.lock`（可选，短生命周期，不得提交） | — |
-| 其它点文件 | 仅 `._meta` / `.lock` 合法，其余告警 | `W_DOTFILE` |
+| 其它点文件 | 仅 `.str.toml` / `.lock` 合法，其余告警 | `W_DOTFILE` |
 | 操作系统 / 工具元数据 | `._*` 形式的**普通文件**（macOS AppleDouble 伴生文件）、`.DS_Store`、`Thumbs.db`、`desktop.ini`，以及**版本控制 / 托管平台元数据**（`.git/`、`.gitignore`、`.gitattributes`、`.gitmodules`、`.hg/`、`.hgignore`、`.svn/`、`.github/`）**一律忽略**：不视为保留名、不参与清单比对、不报任何错 | —（豁免） |
 
-> 本表的豁免与 `._meta` / `._schema/` / `._cache/` / `.lock` 的免登记，统一实现为忽略机制的**系统级忽略层**（§4.7）：恒为最内层、常开、不可被用户忽略模式取反恢复。
+> 本表的豁免与 `.str.toml` / `.str.schema/` / `.str.cache/` / `.lock` 的免登记，统一实现为忽略机制的**系统级忽略层**（§4.7）：恒为最内层、常开、不可被用户忽略模式取反恢复。
 
 ### 3.5 `.str` 目录是 bundle 硬边界
 
 **以 `.str` 结尾的目录一律视为独立的子 bundle**（语义同 `.app` 嵌套）：
 
-- 父 bundle 的扫描 / 校验 **不进入** 其内部：既不把它当作分支（即使其中含 `._meta`），也不检查其内部清单；
-- 它是**完整的 bundle 边界** —— 内部自成一个 `kind = root` 的 `._meta` 体系，`id` 与目录名无关；
+- 父 bundle 的扫描 / 校验 **不进入** 其内部：既不把它当作分支（即使其中含 `.str.toml`），也不检查其内部清单；
+- 它是**完整的 bundle 边界** —— 内部自成一个 `kind = root` 的 `.str.toml` 体系，`id` 与目录名无关；
 - 父级 `entries` 中应表达为 **`role = "bundle"`**（要求目录名以 `.str` 结尾）；登记为 `role = "dir"` 会报 `E_ENTRY_ROLE_DEPTH`。
 
-设计动机：真实项目（尤其是格式自身的仓库）必然需要在内部存放**示例 bundle / 测试夹具 bundle**；若不设边界，父 bundle 会把子 bundle 的 `._meta` 误判为「非分支目录内出现元数据」而报错。
+设计动机：真实项目（尤其是格式自身的仓库）必然需要在内部存放**示例 bundle / 测试夹具 bundle**；若不设边界，父 bundle 会把子 bundle 的 `.str.toml` 误判为「非分支目录内出现元数据」而报错。
 
 ---
 
-## 4. `._meta` 数据规范
+## 4. `.str.toml` 数据规范
 
 ### 4.1 载体与编码
 
@@ -227,7 +228,7 @@
 | 换行 | `LF`（`\n`） |
 | 缩进 | 顶层裸键不缩进；表/数组表内的键值对缩进 2 空格；跨行数组每项缩进 2 空格 |
 | 末尾 | 保留 1 个换行 |
-| 文件名 | `._meta`（无扩展名） |
+| 文件名 | `.str.toml`（无扩展名） |
 | 注释 | **允许** `#` 注释；注释**不得承载语义**（一切语义必须落在字段里）；工具写回时**必须保留注释**（comment-preserving） |
 | 时间 | 一律使用 TOML **原生 offset date-time**（必须带时区偏移，如 `2026-09-14T10:03:11+08:00`），**不得**写成字符串 |
 | 空数组表 | TOML 无法表达空的 `[[x]]`；`refs` / `entries` 为空时**整表省略**，归一化时补为 `[]`（故二者在 schema 中不是必填表） |
@@ -235,15 +236,15 @@
 
 > JSON 与 YAML 均已评估并否决，理由见 11 章 **ADR-1**。
 >
-> **校验链路**：`._meta`（TOML）→ 解析 → **归一化为规范 JSON**（键序/表序固定，见 4.9）→ JSON Schema 校验。归一化器属 D5 读写库的一部分，也是 `str export` 的基础。
+> **校验链路**：`.str.toml`（TOML）→ 解析 → **归一化为规范 JSON**（键序/表序固定，见 4.9）→ JSON Schema 校验。归一化器属 D5 读写库的一部分，也是 `str export` 的基础。
 
 ### 4.2 统一信封（三种 `kind` 共用同一 Schema 家族）
 
-`._meta` 只有一个顶层结构，通过 `kind` 区分三种**档位（profile）**：
+`.str.toml` 只有一个顶层结构，通过 `kind` 区分三种**档位（profile）**：
 
 | `kind` | 出现位置 | 作用 |
 | --- | --- | --- |
-| `root` | bundle 根 `._meta` | 记录一级分支结构（`entries[role=node]`）+ ROOT 级其它内容 + 策略 |
+| `root` | bundle 根 `.str.toml` | 记录一级分支结构（`entries[role=node]`）+ ROOT 级其它内容 + 策略 |
 | `node` | 深度 1 目录 | 独立节点：实体元信息 + 内容清单 + 可选跨枝关联 |
 | `branch` | 深度 ≥2 目录 | 关联分支：本层元信息 + 内容清单 + 可选跨枝关联 |
 
@@ -266,7 +267,7 @@
 | `created_at` | offset date-time | ✅ | 创建时间，必须带时区偏移（TOML 原生类型） |
 | `updated_at` | offset date-time | ✅ | 最后更新时间；变化必须伴随 `revision` 前进 |
 | `authors` | array of tables `[[authors]]` | 建议 | 贡献者与角色，见 4.4 |
-| `schema` | string | 否 | 该分支 payload 的 JSON Schema 引用（bundle 内相对路径，如 `._schema/customer.schema.json`） |
+| `schema` | string | 否 | 该分支 payload 的 JSON Schema 引用（bundle 内相对路径，如 `.str.schema/customer.schema.json`） |
 | `policies` | table `[policies]` | 仅 root | 校验策略，见 4.7 |
 | `refs` | array of tables `[[refs]]` | 否 | **跨枝关联声明**（思维导图的「关联线」），见 4.5；不复制数据、不改变目录结构 |
 | `entries` | array of tables `[[entries]]` | ✅（空时可整表省略） | **本目录内容清单（唯一真源）**，见 4.6；为空时省略，归一化补 `[]` |
@@ -303,7 +304,7 @@
 
 ### 4.6 `entries[]`：内容清单（核心）
 
-**语义**：`entries[]` 是本目录内除 `._meta` 之外**所有条目**的完整清单，是本目录内容的**唯一权威描述**；文件系统是**存在性权威**。二者由校验器双向比对。
+**语义**：`entries[]` 是本目录内除 `.str.toml` 之外**所有条目**的完整清单，是本目录内容的**唯一权威描述**；文件系统是**存在性权威**。二者由校验器双向比对。
 
 Entry 字段表：
 
@@ -313,7 +314,7 @@ Entry 字段表：
 | `role` | enum | ✅ | 全部 | 见下方 role 表 |
 | `id` | uuid | ✅ | `node`/`branch` | 子分支自身标识，必须与 `path` 一致（`link` **不得**写 `id`，见 §4.6.1） |
 | `target` | uuid | ✅ | `link` | 软连接指向的目标分支 `id`（见 §4.6.1） |
-| `type` | string | 否 | `node`/`branch` | 子分支类型（便于只读父级 `._meta` 就完成路由） |
+| `type` | string | 否 | `node`/`branch` | 子分支类型（便于只读父级 `.str.toml` 就完成路由） |
 | `title` | string | 否 | `node`/`branch`/`link` | 展示名（`link` 上写作**挂载点别名**，覆盖目标标题） |
 | `summary` | string | 否 | `node`/`branch`/`link` | 子分支摘要，便于免递归检索 |
 | `order` | integer ≥ 0 | 建议 | `node`/`branch`/`link` | 同层排序键；缺省按 `path` 字典序 |
@@ -336,12 +337,12 @@ Entry 字段表：
 | `link` | **软连接子分支**：声明式挂载的目标分支（磁盘上无对应目录），见 §4.6.1 | ✅ 是（以「挂载进来的子分支」身份出现在分支结构中） |
 | `payload` | 承载结构化数据的文件（由本分支「拥有」） | ❌ |
 | `asset` | 附属素材文件（图片/PDF/音视频等） | ❌ |
-| `dir` | 普通子目录（纯内容容器，不含 `._meta`，因而不是分支） | ❌ |
-| `schema` | `._schema/` 目录（bundle 级 Schema 存放处）；**保留目录免登记**，显式登记为可选项（内部文件不逐个登记） | ❌ |
-| `cache` | 派生缓存 / 构建产物（可删）；**保留目录免登记**（`._cache/` 及其内部一律不参与清单比对） | ❌ |
+| `dir` | 普通子目录（纯内容容器，不含 `.str.toml`，因而不是分支） | ❌ |
+| `schema` | `.str.schema/` 目录（bundle 级 Schema 存放处）；**保留目录免登记**，显式登记为可选项（内部文件不逐个登记） | ❌ |
+| `cache` | 派生缓存 / 构建产物（可删）；**保留目录免登记**（`.str.cache/` 及其内部一律不参与清单比对） | ❌ |
 | `other` | 其它未分类条目（需 `note` 说明） | ❌ |
 
-> **只有带 `._meta` 的子目录才是分支**（`role` = `node`/`branch`）；其余子目录一律是普通内容容器（`role` = `dir`）。这是「分支」与「目录」的唯一判据。
+> **只有带 `.str.toml` 的子目录才是分支**（`role` = `node`/`branch`）；其余子目录一律是普通内容容器（`role` = `dir`）。这是「分支」与「目录」的唯一判据。
 >
 > **不存在「素材目录」这一独立概念**：节点/分支目录**本身就是素材目录** —— 图片、PDF、附件等直接放在分支目录内即可，**无需**为存放素材而额外建目录。子目录只是纯内容容器，不承担任何特殊语义（不因「装素材」而获得角色）。
 >
@@ -349,7 +350,7 @@ Entry 字段表：
 
 ### 4.6.1 `role = "link"`：软连接子分支（可选）
 
-**语义**：把另一个分支**挂载**为本分支的子分支（类比文件系统 symlink）：在结构树 / 导图里它就是一个子分支，可展开、可下钻、可看内容；但**数据始终只存在于目标分支内** —— 不复制、不移动、不产生第二份 `._meta`。
+**语义**：把另一个分支**挂载**为本分支的子分支（类比文件系统 symlink）：在结构树 / 导图里它就是一个子分支，可展开、可下钻、可看内容；但**数据始终只存在于目标分支内** —— 不复制、不移动、不产生第二份 `.str.toml`。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -364,7 +365,7 @@ Entry 字段表：
 **两种形态**：
 
 - **软连接（`mode = "soft"`，缺省）**：目标的**完整视图** —— 结构树 / 导图渲染目标的整棵子树（分支 + 内容），身份 = 目标分支（点挂载行 = 选中真身，展开态与真身共享）。同一目标可被多处挂载 ⇒ DAG；允许挂载自己的后代（子树多处可见，渲染按目标身份记账并去重）。
-- **硬链接（`mode = "hard"`）**：**内容引用 + 自有结构** —— 是一条**有身份的真实分支**：必写 `id` 且 `path = id`（自身目录名，目录真实存在于挂载父分支目录下、含自有 `._meta`，**参与清单比对**）；`target` 指向内容来源分支，内容面板显示**目标分支的内容条目**（payload / asset / dir，文件仍在目标分支目录里，只有一份）且**只读**（增删 / 登记 / 粘贴必须到目标分支操作）；**目标的分支结构不跟过来**（树 / 导图不渲染目标的子分支），自身 `entries[]` 只允许登记**子分支**（`branch` / `node`）—— 登记内容条目即 `E_LINK_OWN_CONTENT`。目标可为 bundle 内任意 `node` / `branch`（**含挂载点子树内的分支**：硬链接不渲染目标结构、内容只读，不存在自嵌套）。链接行**不出现在内容条目列表里**（它是结构声明，已在结构树 / 导图呈现：软连接「⤷」、硬链接「→」）。
+- **硬链接（`mode = "hard"`）**：**内容引用 + 自有结构** —— 是一条**有身份的真实分支**：必写 `id` 且 `path = id`（自身目录名，目录真实存在于挂载父分支目录下、含自有 `.str.toml`，**参与清单比对**）；`target` 指向内容来源分支，内容面板显示**目标分支的内容条目**（payload / asset / dir，文件仍在目标分支目录里，只有一份）且**只读**（增删 / 登记 / 粘贴必须到目标分支操作）；**目标的分支结构不跟过来**（树 / 导图不渲染目标的子分支），自身 `entries[]` 只允许登记**子分支**（`branch` / `node`）—— 登记内容条目即 `E_LINK_OWN_CONTENT`。目标可为 bundle 内任意 `node` / `branch`（**含挂载点子树内的分支**：硬链接不渲染目标结构、内容只读，不存在自嵌套）。链接行**不出现在内容条目列表里**（它是结构声明，已在结构树 / 导图呈现：软连接「⤷」、硬链接「→」）。
 
 规则：
 
@@ -391,11 +392,11 @@ Entry 字段表：
 | `ignore` | string[] | `[]` | **忽略名单**（v1.13.0）：gitignore 语义模式（`*` / `**` / `!` 取反 / 尾随 `/` 仅目录 / 含 `/` 锚定），匹配 **bundle 内相对路径**。命中的磁盘条目不参与清单比对、`str sync` 不补登、分支遍历不进入；**已显式登记的条目不受影响**（登记仍强制、指纹仍校验） |
 | `gitignore` | boolean | `true` | 是否自动检测并应用 `.gitignore`（v1.13.0）。检测范围：外层 git 仓库（至 worktree 根）→ bundle 根 → 分支目录内；叠加顺序由外向内，内层命中覆盖外层 |
 
-> **系统级忽略层（v1.13.0）**：`._meta`、`._schema/`、`._cache/` 与整个 `._` 保留命名空间、`.lock`、以及操作系统 / VCS 元数据（§3.4 豁免清单）作为**系统级忽略层**并入本机制，**恒为最内层**：不受 `policies.gitignore` 开关影响，用户 `.gitignore` / `policies.ignore` 的 `!` 取反**不能**恢复这些条目（§3.4 的「豁免」由本层统一实现）。
+> **系统级忽略层（v1.13.0）**：`.str.toml`、`.str.schema/`、`.str.cache/` 与整个 `.str.` 保留命名空间、AppleDouble `._*` 噪声、`.lock`、以及操作系统 / VCS 元数据（§3.4 豁免清单）作为**系统级忽略层**并入本机制，**恒为最内层**：不受 `policies.gitignore` 开关影响，用户 `.gitignore` / `policies.ignore` 的 `!` 取反**不能**恢复这些条目（§3.4 的「豁免」由本层统一实现）。
 | `large_asset_bytes` | integer | `10485760` | 超过则告警 `W_LARGE_ASSET` |
 | `deep_tree_warn` | integer | `16` | 超过则告警 `W_DEEP_TREE`（提示考虑拆分） |
 
-> **v1.8.0 已删除**：`policies.unknown_entry` —— 它与 4.8 的 `manifest` 语义重叠，且从未被实现与 Schema 采纳（三份 `._meta` Schema 均为 `additionalProperties: false`），写入即被拒。**未登记条目的处理一律由 `manifest` 表达**（`strict` = error / `advisory` = warning）；若将来需要更强的「拒绝写入」约束，应设计为与 `manifest` 正交的**新**策略字段，而不是复用此名。同类先例：v1.5.0 以 minor 删除同样「不可用」的 `policies.branch_min_depth`。
+> **v1.8.0 已删除**：`policies.unknown_entry` —— 它与 4.8 的 `manifest` 语义重叠，且从未被实现与 Schema 采纳（三份 `.str.toml` Schema 均为 `additionalProperties: false`），写入即被拒。**未登记条目的处理一律由 `manifest` 表达**（`strict` = error / `advisory` = warning）；若将来需要更强的「拒绝写入」约束，应设计为与 `manifest` 正交的**新**策略字段，而不是复用此名。同类先例：v1.5.0 以 minor 删除同样「不可用」的 `policies.branch_min_depth`。
 
 ### 4.8 清单一致性策略
 
@@ -407,7 +408,7 @@ Entry 字段表：
 
 协作建议：**CI/提交前用 `strict`，编辑器保存中用 `advisory`**；`str sync` 负责自动补登。
 
-> **保留目录豁免（§1.3 约束 5）**：`._meta` / `._schema/` / `._cache/` 以及操作系统 / 工具元数据（§3.4）**不参与清单比对** —— 磁盘有而 `entries` 无**不算** `E_MANIFEST_MISSING`，显式登记为合法但**可选的**声明。
+> **保留目录豁免（§1.3 约束 5）**：`.str.toml` / `.str.schema/` / `.str.cache/` 以及操作系统 / 工具元数据（§3.4）**不参与清单比对** —— 磁盘有而 `entries` 无**不算** `E_MANIFEST_MISSING`，显式登记为合法但**可选的**声明。
 >
 > **忽略名单豁免（v1.13.0，§4.7）**：`policies.ignore` 与 `.gitignore`（`policies.gitignore = true` 时自动检测）命中的磁盘条目同样**不参与清单比对** —— 不报 `E_MANIFEST_MISSING`、不告警；`str sync` 不补登、不因其消失而移除登记（已登记条目仍按缺失/指纹正常校验，**忽略名单不是删除开关**）。
 
@@ -424,7 +425,7 @@ TOML 规定**裸键必须写在任何表头之前**，因此本格式的书写�
 >
 > 规范化只调整**书写顺序**，不改动任何字段值，注释随其所属键/表一同移动而**不被丢弃**。
 >
-> **迁移提示（v1.8.0）**：此前 `entries` / `refs` 的书写顺序从未被强制，因此**混用了「有 `order`」与「无 `order`」**条目的既有 `._meta`，在首次 `str fmt` 或任一写命令落盘时会发生**一次性重排**（无 `order` 的条目归到末尾），diff 属预期；之后顺序稳定，`str fmt --check` 恒返回 0。
+> **迁移提示（v1.8.0）**：此前 `entries` / `refs` 的书写顺序从未被强制，因此**混用了「有 `order`」与「无 `order`」**条目的既有 `.str.toml`，在首次 `str fmt` 或任一写命令落盘时会发生**一次性重排**（无 `order` 的条目归到末尾），diff 属预期；之后顺序稳定，`str fmt --check` 恒返回 0。
 
 各表内的键序：
 
@@ -451,26 +452,26 @@ TOML 规定**裸键必须写在任何表头之前**，因此本格式的书写�
   - 父子关系**唯一**由「目录结构 + 父级 `entries[]`」决定。
   - 每一层都是完整的数据节点，都可以存放任意文件与文件夹。
   - 深度 ≥2 的分支身份固定为 `branch`（关联分支），不得升级为 `node`。
-- **关联线（可选）**：任意深度分支的 `._meta.refs[]` 可指向另一分支，用于表达跨枝关系。关联线**不复制数据**，因此同一份内容永远只有一处真源。
+- **关联线（可选）**：任意深度分支的 `.str.toml.refs[]` 可指向另一分支，用于表达跨枝关系。关联线**不复制数据**，因此同一份内容永远只有一处真源。
 
 ### 5.2 语义示例
 
 ```
 A.str/
-├── ._meta                            entries: [A1(node), A2(node), A3(node)]
+├── .str.toml                            entries: [A1(node), A2(node), A3(node)]
 ├── A1/      （独立节点：客户档案）
-│   ├── ._meta                        entries: [profile.json, L1(branch), refs→A2]
+│   ├── .str.toml                        entries: [profile.json, L1(branch), refs→A2]
 │   ├── profile.json
 │   └── L1/  （关联分支：跟进记录）
-│       ├── ._meta                    entries: [followups.json, L2(branch)]
+│       ├── .str.toml                    entries: [followups.json, L2(branch)]
 │       ├── followups.json
 │       └── L2/  （关联分支：2026-09 会议纪要）
-│           ├── ._meta                entries: [2026-09-10.md]
+│           ├── .str.toml                entries: [2026-09-10.md]
 │           └── 2026-09-10.md
 ├── A2/      （独立节点：订单数据集）
-│   └── ._meta                        entries: [orders.csv]
+│   └── .str.toml                        entries: [orders.csv]
 └── A3/      （独立节点：标签体系）
-    └── ._meta                        entries: [tags.json]
+    └── .str.toml                        entries: [tags.json]
 ```
 
 解读：
@@ -487,13 +488,13 @@ A.str/
 | `instance_of` | 实例化 | 源分支是目标的实例（目标多为模板/类型分支） |
 | `derived_from` | 派生自 | 由目标计算/转换而来 |
 | `ref` | 纯引用/别名 | 仅用于在导图上「再出现一次」 |
-| `x-<自定义>` | 扩展 | 厂商自定义语义，须在 `._schema/` 或本文档登记 |
+| `x-<自定义>` | 扩展 | 厂商自定义语义，须在 `.str.schema/` 或本文档登记 |
 
 ### 5.4 传统「关联分支」与「跨枝关联」的区别
 
 | 维度 | 分支树中的关联分支（`kind = branch`） | 关联线（`refs[]`） |
 | --- | --- | --- |
-| 载体 | **真实目录 + `._meta`** | 父分支 `._meta` 中的一个数组项 |
+| 载体 | **真实目录 + `.str.toml`** | 父分支 `.str.toml` 中的一个数组项 |
 | 能否承载数据 | ✅ 能（且必须登记） | ❌ 不能（纯声明） |
 | 参与分支结构 | ✅ 是（父级 `entries[role=branch]`） | ❌ 否 |
 | 唯一性 | 目录名全局唯一 UUID | 同一目标可被多处关联 |
@@ -501,9 +502,9 @@ A.str/
 
 ### 5.5 遍历规则
 
-1. 解析入口固定为 `ROOT/._meta`。
-2. 展开一级：读取每个 `entries[role=node].path` 目录下的 `._meta`（**懒加载**，可按需）。
-3. 递归展开下级：读取 `entries[role=branch].path` 的 `._meta`，直至 `max_depth`。
+1. 解析入口固定为 `ROOT/.str.toml`。
+2. 展开一级：读取每个 `entries[role=node].path` 目录下的 `.str.toml`（**懒加载**，可按需）。
+3. 递归展开下级：读取 `entries[role=branch].path` 的 `.str.toml`，直至 `max_depth`。
 4. **深度限制**：分支树深度超过 `max_depth` 即 `E_DEPTH_EXCEEDED`（超过 `deep_tree_warn` 仅告警）。
 5. **关联线解析**：读取 `refs[].target`，在已建立的索引中定位目标分支；未命中即 `E_REF_NO_TARGET`。
 6. **关联环检测**：沿 `refs` 图做 DFS，若回到访问栈中的分支即 `E_REF_CYCLE`（分支树本身是树，天然无环）。
@@ -517,8 +518,8 @@ A.str/
 
 | 码 | 级别 | 触发条件 |
 | --- | --- | --- |
-| `E_PARSE` | error | `._meta` 非法 TOML（重复键、裸键出现在表头之后、非法转义等）/ 编码非 UTF-8 / 含 BOM / 时间未带时区偏移 |
-| `E_META_MISSING` | error | 分支目录（`node`/`branch`）缺失 `._meta` |
+| `E_PARSE` | error | `.str.toml` 非法 TOML（重复键、裸键出现在表头之后、非法转义等）/ 编码非 UTF-8 / 含 BOM / 时间未带时区偏移 |
+| `E_META_MISSING` | error | 分支目录（`node`/`branch`）缺失 `.str.toml` |
 | `E_SPEC_UNSUPPORTED` | error | `str` 主版本不受支持 |
 | `E_KIND_INVALID` | error | `kind` 非法 |
 | `E_KIND_DEPTH` | error | `kind` 与所在深度不符（深度 0 必须 `root`；深度 1 必须 `node`；深度 ≥2 必须 `branch`） |
@@ -527,7 +528,7 @@ A.str/
 | `E_ID_NOT_UUID` | error | 目录名为 UUID 命名但格式非法 |
 | `E_ID_VERSION` | error | UUID 版本 ≠ `policies.id_version` |
 | `E_ID_DUP` | error | 同一 bundle 内出现重复分支 `id` |
-| `E_ENTRY_ROLE_DEPTH` | error | 父级 `entries[].role` 与子目录实际内容或深度不符（含：子目录内含 `._meta` 已成分支，却仍被登记为 `dir`） |
+| `E_ENTRY_ROLE_DEPTH` | error | 父级 `entries[].role` 与子目录实际内容或深度不符（含：子目录内含 `.str.toml` 已成分支，却仍被登记为 `dir`） |
 | `E_ENTRY_ID_MISMATCH` | error | `entries[].id` 与子目录名不一致 |
 | `E_REF_NO_TARGET` | error | `refs[].target` 无法在本 bundle 内解析 |
 | `E_REF_SELF` | error | `refs[].target` 等于自身 `id` |
@@ -548,7 +549,7 @@ A.str/
 | `E_REVISION_STALE` | error | `updated_at` 变化但 `revision` 未前进，或 `revision` 非递增整数 |
 | `E_SCHEMA_FAIL` | error | payload 不满足其声明的 JSON Schema |
 | `W_BUNDLE_SUFFIX` | warn | 根目录名未以 `.str` 结尾 |
-| `W_DOTFILE` | warn | 出现非 `._meta` / `.lock` 的点文件（`._*` **普通文件**、`.DS_Store` 与**版本控制 / 托管平台元数据** `.git/` `.gitignore` `.github/` 等属操作系统/工具元数据，必须豁免） |
+| `W_DOTFILE` | warn | 出现非 `.str.toml` / `.lock` 的点文件（`._*` **普通文件**、`.DS_Store` 与**版本控制 / 托管平台元数据** `.git/` `.gitignore` `.github/` 等属操作系统/工具元数据，必须豁免） |
 | `W_ROOT_STRAY` | warn | ROOT 下出现**既非 UUID 命名的分支目录、又未登记进 `entries`** 的散落条目（已登记的 ROOT 内容属合法，见 3.3） |
 | `W_NO_SUMMARY` | warn | `node`/`branch` 缺 `summary`（削弱 AI 检索能力） |
 | `W_NO_TYPE` | warn | `node`/`branch` 缺 `type` |
@@ -559,16 +560,16 @@ A.str/
 
 > **v1.1.0 已删除**：`E_DEPTH_OWNED`、`E_LINK_HAS_PAYLOAD`、`E_LINK_NO_TARGET`、`E_LINK_TARGET_NOT_NODE`、`E_LINK_CYCLE` —— 因「深度 ≥2 只能承载引用、不能承载数据」的错误假设已被撤回。
 >
-> **v1.2.0 已删除**：`E_STRAY_META` —— 因「素材目录」概念被取消（节点目录本身就是素材目录）。子目录内含 `._meta` 一律按「该目录是关联分支」处理，父级 `role` 未同步则报 `E_ENTRY_ROLE_DEPTH`，无需单独的「点文件位置」错误码。
+> **v1.2.0 已删除**：`E_STRAY_META` —— 因「素材目录」概念被取消（节点目录本身就是素材目录）。子目录内含 `.str.toml` 一律按「该目录是关联分支」处理，父级 `role` 未同步则报 `E_ENTRY_ROLE_DEPTH`，无需单独的「点文件位置」错误码。
 
 #### 6.1.1 `E_REVISION_STALE` 的可判定性
 
-`E_REVISION_STALE` 的第二个条件（「`updated_at` 变化但 `revision` 未前进」）是**历史相关**判定：单份 `._meta` 只含当前状态，不含「上一版」，因此**无法**仅凭文件本身判定。参考实现的做法（规范只要求「能判定」，不限定实现手段）：
+`E_REVISION_STALE` 的第二个条件（「`updated_at` 变化但 `revision` 未前进」）是**历史相关**判定：单份 `.str.toml` 只含当前状态，不含「上一版」，因此**无法**仅凭文件本身判定。参考实现的做法（规范只要求「能判定」，不限定实现手段）：
 
-1. **写入端登记基线**：`str` 的每个写操作在成功落盘后，把该分支的 `(revision, updated_at)` 快照写入 `._cache/revisions.json`（bundle 根目录下，属 `role = cache` 的派生数据：不入 `entries` 清单、`.gitignore` 已排除、可随时删除）；
+1. **写入端登记基线**：`str` 的每个写操作在成功落盘后，把该分支的 `(revision, updated_at)` 快照写入 `.str.cache/revisions.json`（bundle 根目录下，属 `role = cache` 的派生数据：不入 `entries` 清单、`.gitignore` 已排除、可随时删除）；
 2. **校验端比对**：`str validate` 读该基线，若某分支的 `updated_at` 与基线不同而 `revision` 未前进，报 `E_REVISION_STALE`；
 3. **基线推进规则**：`str sync` 只在 `revision` **确实前进**时推进基线，因此违规会**跨 sync 持续可见**，直到有人真正修正 `revision`；
-4. **无基线则跳过**：从未被工具写过的 bundle 没有基线，此时该条件跳过（不误报）。删除 `._cache/` 即关闭此项历史检查。
+4. **无基线则跳过**：从未被工具写过的 bundle 没有基线，此时该条件跳过（不误报）。删除 `.str.cache/` 即关闭此项历史检查。
 
 > 另两个条件（`revision` 必须是 ≥ 1 的整数、`updated_at` 不得早于 `created_at`）是**自描述**的，任何实现都必须直接判定。
 
@@ -578,8 +579,8 @@ A.str/
 
 ```
 客户运营.str  3 nodes / 2 branches / 7 entries  depth=3
-  ✗ E_MANIFEST_MISSING  01928f3a-…-0001/._meta  entries 未登记「notes.md」
-  ✗ E_KIND_DEPTH        01928f3a-…-0001/._meta  depth=1 的 kind 必须为 node，实为 branch
+  ✗ E_MANIFEST_MISSING  01928f3a-…-0001/.str.toml  entries 未登记「notes.md」
+  ✗ E_KIND_DEPTH        01928f3a-…-0001/.str.toml  depth=1 的 kind 必须为 node，实为 branch
   ⚠ W_NO_SUMMARY        01928f3a-…-0002  建议补充 summary
 2 errors, 1 warning   exit=1
 ```
@@ -603,14 +604,14 @@ A.str/
 
 | 设计 | 效果 |
 | --- | --- |
-| 一分支 = 一目录 = 一 `._meta` | 两人编辑不同分支 → 零冲突 |
-| 关联线写在使用方 `._meta.refs[]` | 新增关联不影响被关联方文件 |
+| 一分支 = 一目录 = 一 `.str.toml` | 两人编辑不同分支 → 零冲突 |
+| 关联线写在使用方 `.str.toml.refs[]` | 新增关联不影响被关联方文件 |
 | 禁止持久化索引 | 索引类文件是天然的合并冲突热点 |
 
 ### 7.2 修订与合并
 
 - 每次写入：`revision + 1`，`updated_at` 更新，`authors[]` 追加/更新当前协作者。
-- Git 合并 `._meta` 冲突时：工具执行**三向合并**，字段级冲突策略为「取 `updated_at` 较新者」，但必须**同时保留双方 `authors[]` 并集**；合并后 `revision = max(revision_a, revision_b) + 1`。
+- Git 合并 `.str.toml` 冲突时：工具执行**三向合并**，字段级冲突策略为「取 `updated_at` 较新者」，但必须**同时保留双方 `authors[]` 并集**；合并后 `revision = max(revision_a, revision_b) + 1`。
 - 同层 `entries[]` 冲突：按 `path` 做集合合并；同 `path` 双方都有时以 `updated_at` 较新者为准，并在 `note` 写入 `conflict: true`。
 - 二进制 payload 冲突：不做自动合并，标记 `CONFLICT` 交由人工，并在 `entries[].note` 写入 `conflict: true` 与冲突来源 revision。
 
@@ -622,7 +623,7 @@ A.str/
 ### 7.4 `.gitignore` 建议
 
 ```gitignore
-._cache/
+.str.cache/
 **/.lock
 **/.DS_Store
 **/._*          # macOS AppleDouble 伴生文件（exFAT/SMB/压缩包解压产物）
@@ -636,9 +637,9 @@ A.str/
 
 | 步骤 | 动作 | 上下文成本 |
 | --- | --- | --- |
-| 1 | 读 `ROOT/._meta` 的 `name/title/summary` + `entries[role=node]` | 极小 |
+| 1 | 读 `ROOT/.str.toml` 的 `name/title/summary` + `entries[role=node]` | 极小 |
 | 2 | 按 `type/tags/title/summary` 选出目标分支 | —— |
-| 3 | 读目标分支 `._meta`（元信息 + 清单 + 下级分支摘要） | 小 |
+| 3 | 读目标分支 `.str.toml`（元信息 + 清单 + 下级分支摘要） | 小 |
 | 4 | 仅在需要时下钻 `entries[role=branch]` 或读 `entries[role=payload]` 的具体文件 | 按需 |
 | 5 | 需要横向关系时读 `refs[]`，定位到目标分支后回到步骤 3 | 按需 |
 
@@ -653,7 +654,7 @@ A.str/
 ### 8.3 AI 写入约束
 
 1. **不得**修改或新建 UUID 目录名。
-2. 在已有子目录内创建 `._meta` 会使其成为**关联分支**；此时必须同步把父级 `entries[]` 中该项的 `role` 由 `dir` 改为 `branch`，并补 `id`/`kind`，否则 `E_ENTRY_ROLE_DEPTH`。
+2. 在已有子目录内创建 `.str.toml` 会使其成为**关联分支**；此时必须同步把父级 `entries[]` 中该项的 `role` 由 `dir` 改为 `branch`，并补 `id`/`kind`，否则 `E_ENTRY_ROLE_DEPTH`。
 3. **可以**在任意深度的分支目录中新增文件/文件夹，但**必须**同步登记进 `entries[]`（或随后执行 `str sync`）。
 4. 修改后**必须**：`revision + 1`、更新 `updated_at`、按 4.9 键序重排。
 5. 不得把深度 ≥2 的分支「提升」为独立节点（需新建深度 1 节点并迁移）。
@@ -672,12 +673,12 @@ A.str/
 
 | 命令 | 作用 | 关键参数 |
 | --- | --- | --- |
-| `str init [dir]` | 创建 bundle（生成 ROOT `._meta` 与保留目录） | `--name` `--title` `--id-version` |
+| `str init [dir]` | 创建 bundle（生成 ROOT `.str.toml` 与保留目录） | `--name` `--title` `--id-version` |
 | `str validate [dir]` | 全量校验 | `--strict` `--json` `--fix-manifest` |
 | `str tree [dir]` | 渲染导图（分支树 + 关联线标注） | `--depth n` `--show-refs` `--ascii` |
-| `str ls [dir] [uuid]` | 列出当前分支条目（读 `._meta.entries`） | `--raw`（改为直接读磁盘） |
-| `str show [dir] [uuid]` | 打印某分支 `._meta` 与内容摘要 | `--full` |
-| `str node add [dir]` | 新增**独立节点**（深度 1，生成目录 + `._meta` + 登记到 ROOT） | `--type` `--title` `--summary` |
+| `str ls [dir] [uuid]` | 列出当前分支条目（读 `.str.toml.entries`） | `--raw`（改为直接读磁盘） |
+| `str show [dir] [uuid]` | 打印某分支 `.str.toml` 与内容摘要 | `--full` |
+| `str node add [dir]` | 新增**独立节点**（深度 1，生成目录 + `.str.toml` + 登记到 ROOT） | `--type` `--title` `--summary` |
 | `str branch add [dir] [anchor-uuid]` | 在指定分支下新增**关联分支**（任意深度） | `--type` `--title` `--summary` `--order` |
 | `str branch rm [dir] [uuid]` | 删除关联分支（含其全部下级） | `--force` `--recursive` |
 | `str ref add [dir] [uuid] --target <uuid>` | 新增跨枝关联线 | `--rel` `--title` `--note` |
@@ -691,7 +692,7 @@ A.str/
 | `str author add [dir] [uuid]` | 新增 / 覆盖一条 `[[authors]]`（按 `id` 去重） | `--id` `--name` `--role` `--at` |
 | `str author rm [dir] [uuid]` | 按 `id` 删除一条 `[[authors]]` | `--id` |
 | `str sync [dir]` | 用磁盘实际状态修正 `entries`（补登/移除/`size`/`sha256` 更新）；**始终递归**全部分支。**软连接行豁免**（v1.16.0，§4.6.1 规则 1）：`role = "link"` 且非 `mode = "hard"` 的条目 MUST 原样保留，不得因磁盘无对应目录而移除。**删除类变更必须醒目**：移除条目数 > 0 时 MUST 输出 `WARN:` 汇总行（`--dry-run` 亦然）；移除条目数 ≥ 10 且未带 `--yes` 时 MUST 拒绝执行、一字不写，并指路 `--dry-run` / `--yes` | `--dry-run` `--yes` |
-| `str fmt [dir]` | 按 4.9 键序/表序重写 `._meta`（**保注释**） | `--check` `--strip-comments` |
+| `str fmt [dir]` | 按 4.9 键序/表序重写 `.str.toml`（**保注释**） | `--check` `--strip-comments` |
 | `str spec set <VERSION> [dir]` | 把整份 bundle 的 `spec`（规范版本声明）统一改写为 `<VERSION>`；只改有差异的分支，**幂等** | `--dry-run` |
 | `str ignore add <PATTERN> [dir]` | 向 ROOT `policies.ignore` 追加一条模式（幂等） | — |
 | `str ignore rm <PATTERN> [dir]` | 移除一条模式 | — |
@@ -705,7 +706,7 @@ A.str/
 | `str tags [dir]` | **标签词表**：汇总全 bundle 的分支级标签与使用计数（次数降序，再按名升序），供检索前了解导航维度（只读） | `--json` |
 | `str where [dir] [uuid]` | **面包屑定位**：打印从 ROOT 到目标分支的完整链条（相对路径 + id + 标题 + `type`，目标行标注）（只读） | `--json` |
 | `str get [dir] [uuid] --path <P>` | **精读单个条目**：输出一个**已登记**实体条目的正文（字节直出 stdout）；`--path` 亦接受**多段路径**直读已登记内容目录（`role = "dir"`）内的未登记子项（`--info` 以 `registered: false` 标注、指纹按磁盘实算）；子分支 / 链接条目与其余未登记路径以 `BadArg` 拒绝并指路（只读） | `--path` `--info` |
-| `str reveal [dir]` | 平台适配：macOS 设置 Bundle 位 / 取消 `._meta` 隐藏 | — |
+| `str reveal [dir]` | 平台适配：macOS 设置 Bundle 位 / 取消 `.str.toml` 隐藏 | — |
 
 **`[uuid]` 的缺省规则（规范条文）**：
 
@@ -722,10 +723,10 @@ A.str/
 
 **查询命令（`find` / `grep` / `tags` / `where` / `get`）的约定**（§8 渐进式读取的命令面，v1.15.0）：
 
-- 五者全部**只读**：MUST NOT 推进 `revision`、MUST NOT 写任何 `._meta`、不参与 `._cache` 基线；
+- 五者全部**只读**：MUST NOT 推进 `revision`、MUST NOT 写任何 `.str.toml`、不参与 `.str.cache` 基线；
 - 语义上构成「**定位 → 精读**」链路：`tags`（导航维度）→ `find` / `grep`（按元数据 / 正文定位）→ `where`（确认位置）→ `get` / `show`（精读），AI 按需取用即可获得所需结构化数据，**不再需要**全树导出或绕过 CLI 扫目录；
 - `find` 与 `grep` 的检索词都是**不区分大小写的字面子串**（`grep` 大小写敏感为缺省、`--ignore-case` 放宽），MUST NOT 引入正则语义；`grep` MUST 跳过二进制（含 NUL 字节）与非 UTF-8 文件，命中行 MUST 截断（防止单行超长撑爆消费方预算）；
-- `grep` 缺省遍历各分支目录**磁盘上**的全部文本文件：覆盖已登记条目、内容文件夹（`role = "dir"`）的**未登记子项**与未登记散落文件（内容文件夹的子项本就不参与清单比对，§4.8），并以 `registered` 标注来源；`--manifest-only` 退回「仅清单登记条目」口径。遍历 MUST：不进入其它分支目录（含 `._meta` 的目录，各自作为独立 visit）、不进入子 bundle（§3.5）、跳过保留名 / 系统噪声 / `.lock`、应用忽略名单（§4.7，`Scan.ignore` 同源）；
+- `grep` 缺省遍历各分支目录**磁盘上**的全部文本文件：覆盖已登记条目、内容文件夹（`role = "dir"`）的**未登记子项**与未登记散落文件（内容文件夹的子项本就不参与清单比对，§4.8），并以 `registered` 标注来源；`--manifest-only` 退回「仅清单登记条目」口径。遍历 MUST：不进入其它分支目录（含 `.str.toml` 的目录，各自作为独立 visit）、不进入子 bundle（§3.5）、跳过保留名 / 系统噪声 / `.lock`、应用忽略名单（§4.7，`Scan.ignore` 同源）；
 - `find` 的条目字段检索 MUST 跳过结构类条目行（`role` 为 `node` / `branch` / `link`）：子分支自身会被单独访问，父级行字段再命中只会产生重复；
 - **检索范围**：`find` / `grep` 的缺省范围是**当前节点子树**（沿用 `[uuid]` 缺省规则 —— `[dir]` 为 bundle 根即 ROOT = 全 bundle，指向分支目录即该分支及其全部后代）；`--scope <uuid|rel>` 可从任意位置显式指定范围（接受分支 id 或 bundle 相对路径，MUST NOT 静默回退为全 bundle）——据此可在指定节点 / 指定路径内查找，而不必复制或移动数据；
 - `find` / `grep` / `tags` / `where` MUST 支持 `--json`（机器可读输出，`find` / `grep` 另须支持 `--limit` 预算控制）；`find` / `grep` 的 JSON MUST 携带**绝对路径**字段（`path_abs` / `file`），文本输出经 `--real-path` 切换为绝对路径 —— 供管道与外部命令直接消费；
@@ -737,24 +738,24 @@ A.str/
 - 字符串字段传**空串表示移除**该字段（用于清掉 `type` / `title` / `summary` / `note` / `tags` 项）；
 - 每次写入同样遵守 7.2：`revision + 1` 并刷新 `updated_at`；
 - `entry set` 的 `[uuid]` 指的是**条目所在的分支**（缺省为 ROOT），`--path` 是该分支 `entries[]` 里的单段名；
-- `entry add` **只能登记，不创造结构**：登记含 `._meta` 的目录为分支条目时仅「收编」既有目录（新建分支结构仍归 `node add` / `branch add`），磁盘对象不存在时必须 `--optional`；`entry rm` 只移除登记、**不得删除磁盘文件**；
+- `entry add` **只能登记，不创造结构**：登记含 `.str.toml` 的目录为分支条目时仅「收编」既有目录（新建分支结构仍归 `node add` / `branch add`），磁盘对象不存在时必须 `--optional`；`entry rm` 只移除登记、**不得删除磁盘文件**；
 - `ignore add|rm|list` 与 `policies set` 写入 ROOT 的 `[policies]`（bundle 级，仅 root 合法）；
-- `spec set` 是**唯一 bundle 级**的字段写入命令：`spec` 在三种档位里都是必填字段（4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致，故它 MUST 递归改写全部 `._meta`（子 bundle 除外，见 3.5），且**只改写与目标值不同的分支** —— 因此幂等（第二次输出「已更新 0 份」）；任一份 `._meta` 解析失败时 MUST 整体拒绝执行，不得写出一半；
-- `spec set` 的目标版本 MUST 形如 `1.<minor>.<patch>`（与 `._schema` 的正则同源）；`spec` 只供**人类追溯**，工具只强校验 `str` 主版本（见 13 章），因此写入比本实现更新的版本（前向声明）或更旧的版本（降级声明）都被允许。
+- `spec set` 是**唯一 bundle 级**的字段写入命令：`spec` 在三种档位里都是必填字段（4.3），只改 ROOT 会让其余分支的声明与 ROOT 不一致，故它 MUST 递归改写全部 `.str.toml`（子 bundle 除外，见 3.5），且**只改写与目标值不同的分支** —— 因此幂等（第二次输出「已更新 0 份」）；任一份 `.str.toml` 解析失败时 MUST 整体拒绝执行，不得写出一半；
+- `spec set` 的目标版本 MUST 形如 `1.<minor>.<patch>`（与 `.str.schema` 的正则同源）；`spec` 只供**人类追溯**，工具只强校验 `str` 主版本（见 13 章），因此写入比本实现更新的版本（前向声明）或更旧的版本（降级声明）都被允许。
 
 实现要求：
 
-- 写操作**产出的 `._meta` 必须自身合法**：类型正确、字段封闭、`revision` / 时间语义成立，且是 4.9 规范形式。工具不得写出「需要事后手改」的文件；`str validate`（错误码门禁）与 `str fmt --check`（顺序门禁）分别守住这两面。
+- 写操作**产出的 `.str.toml` 必须自身合法**：类型正确、字段封闭、`revision` / 时间语义成立，且是 4.9 规范形式。工具不得写出「需要事后手改」的文件；`str validate`（错误码门禁）与 `str fmt --check`（顺序门禁）分别守住这两面。
   （本项**不**要求「写入前整个 bundle 零 error」——那会让「新增文件 → `str sync`」这一正常流程自锁，因为新增文件本身就是清单不一致。）
 - `str branch add` 必须支持在任意深度操作；**不得**对深度做「只允许两层」之类的限制。
-- `._meta` 的写回**必须保注释**；`str fmt --strip-comments` 是唯一允许丢弃注释的入口。
+- `.str.toml` 的写回**必须保注释**；`str fmt --strip-comments` 是唯一允许丢弃注释的入口。
 - 对内/对外一律以**归一化 JSON**（4.9）作为统一操作视图；它必须能从 TOML 无损重建，**不得**成为第二份真源。
 - `str export` 的产物是派生数据，**不得**写回 bundle 内部（`--out` 指向 bundle 内部属用法错误）。
 - 所有命令须支持显式路径参数，且 `[dir]` 缺省为当前工作目录（见本节 `[dir]` 规范条文）；`str tree` 输出必须同时表达分支树与 `refs` 关联线。
-- **写出的 `._meta` 一律是 4.9 规范形式**：任一写命令（含 `sync` / `node add` / `meta set` …）落盘的字节都已按键序 / 表序 / 集合排序规范化，因此「改完再 `fmt`」应当无事可做 —— `str fmt --check` 返回 0 可作为 CI 门禁。
+- **写出的 `.str.toml` 一律是 4.9 规范形式**：任一写命令（含 `sync` / `node add` / `meta set` …）落盘的字节都已按键序 / 表序 / 集合排序规范化，因此「改完再 `fmt`」应当无事可做 —— `str fmt --check` 返回 0 可作为 CI 门禁。
 - **`str tree` 的呈现顺序与落盘顺序同源**：子分支按父级 `entries[]` 的 `(order, path)` 排列，`entries` 中没有登记的子目录附加在末尾。
 - `E_REVISION_STALE` 的历史判定手段见 6.1.1；写入端有义务登记基线，否则该错误码退化为「只能判定自描述部分」。
-- **任何字段都必须有 CLI 写入路径**：不得存在「只能手改 `._meta`」的字段。`spec` 曾是该缺口的残留，自 v1.9.0 起由 `str spec set` 承担；`[policies]` 标量键自 v1.13.0 起由 `str policies set` 承担、`ignore` 数组由 `str ignore add|rm` 承担（`str` 主版本固定为 `1`，不提供写入命令）。
+- **任何字段都必须有 CLI 写入路径**：不得存在「只能手改 `.str.toml`」的字段。`spec` 曾是该缺口的残留，自 v1.9.0 起由 `str spec set` 承担；`[policies]` 标量键自 v1.13.0 起由 `str policies set` 承担、`ignore` 数组由 `str ignore add|rm` 承担（`str` 主版本固定为 `1`，不提供写入命令）。
 
 ---
 
@@ -764,40 +765,40 @@ A.str/
 
 ```
 客户运营.str/
-├── ._meta
-├── ._schema/
+├── .str.toml
+├── .str.schema/
 │   ├── root-meta.schema.json
 │   ├── node-meta.schema.json
 │   ├── branch-meta.schema.json
 │   └── customer.schema.json
 ├── 01928f3a-7c4b-7001-8a01-000000000001/          # 独立节点：客户档案
-│   ├── ._meta
+│   ├── .str.toml
 │   ├── profile.json
 │   ├── avatar.png
 │   ├── attachments/
 │   │   └── 合同-2024Q1.pdf
 │   └── 01928f3a-7c4b-7101-8b01-000000000101/      # 关联分支：跟进记录
-│       ├── ._meta
+│       ├── .str.toml
 │       ├── followups.json
 │       └── 01928f3a-7c4b-7102-8b02-000000000102/  # 关联分支：2026-09 会议纪要
-│           ├── ._meta
+│           ├── .str.toml
 │           └── 2026-09-10.md
 ├── 01928f3a-7c4b-7002-8a02-000000000002/          # 独立节点：订单数据集
-│   ├── ._meta
+│   ├── .str.toml
 │   └── orders.csv
 └── 01928f3a-7c4b-7003-8a03-000000000003/          # 独立节点：标签体系
-    ├── ._meta
+    ├── .str.toml
     └── tags.json
 ```
 
 > 注意：深度 2 的「跟进记录」与深度 3 的「2026-09 会议纪要」**都在承载真实数据**，这正是 v1.1.0 明确允许的形态。
 
-> **本节的 6 份 `._meta` 与 `examples/客户运营.str/` 逐字一致**（`size` / `sha256` 为真实计算值，
+> **本节的 6 份 `.str.toml` 与 `examples/客户运营.str/` 逐字一致**（`size` / `sha256` 为真实计算值，
 > 非占位符），可用 `scripts/build-example.sh` 重新生成，并用
 > `str validate examples/客户运营.str --strict` 验证。
 
 
-### 10.2 `客户运营.str/._meta`
+### 10.2 `客户运营.str/.str.toml`
 
 ```toml
 # ── STR bundle 根元数据 ──────────────────────────────────────────
@@ -864,7 +865,7 @@ order = 3
 [ext]
 ```
 
-### 10.3 `01928f3a-7c4b-7001-8a01-000000000001/._meta`（客户档案 · 独立节点）
+### 10.3 `01928f3a-7c4b-7001-8a01-000000000001/.str.toml`（客户档案 · 独立节点）
 
 ```toml
 str = 1
@@ -878,7 +879,7 @@ tags = ["华东区", "vip"]
 revision = 8
 created_at = 2026-09-01T09:20:00+08:00
 updated_at = 2026-09-14T10:03:11+08:00
-schema = "._schema/customer.schema.json"
+schema = ".str.schema/customer.schema.json"
 
 [[refs]]
 id = "01928f3a-7c4b-7201-8d01-000000000201"
@@ -894,7 +895,7 @@ role = "payload"
 media_type = "application/json"
 size = 87
 sha256 = "852fa7846c3b3a70e053cf1b00ad8503a5f04b804cc4d1259404585260b8037f"
-schema = "._schema/customer.schema.json"
+schema = ".str.schema/customer.schema.json"
 
 [[entries]]
 path = "avatar.png"
@@ -921,7 +922,7 @@ order = 1
 [ext]
 ```
 
-### 10.4 `01928f3a-7c4b-7101-8b01-000000000101/._meta`（跟进记录 · 关联分支，深度 2）
+### 10.4 `01928f3a-7c4b-7101-8b01-000000000101/.str.toml`（跟进记录 · 关联分支，深度 2）
 
 ```toml
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
@@ -956,7 +957,7 @@ order = 1
 [ext]
 ```
 
-### 10.5 `01928f3a-7c4b-7102-8b02-000000000102/._meta`（2026-09 会议纪要 · 关联分支，深度 3）
+### 10.5 `01928f3a-7c4b-7102-8b02-000000000102/.str.toml`（2026-09 会议纪要 · 关联分支，深度 3）
 
 ```toml
 str = 1
@@ -981,7 +982,7 @@ sha256 = "162af15f76d0493282a4a5e666928f6de6a36662faa44a860288766be298e9a0"
 [ext]
 ```
 
-### 10.6 `01928f3a-7c4b-7002-8a02-000000000002/._meta`（订单数据集 · 独立节点）
+### 10.6 `01928f3a-7c4b-7002-8a02-000000000002/.str.toml`（订单数据集 · 独立节点）
 
 ```toml
 str = 1
@@ -1006,7 +1007,7 @@ sha256 = "1dd4893612cb1710550acb0624982a21e5ec5267d1dd05431e9aa20d02c16ef7"
 [ext]
 ```
 
-### 10.7 `01928f3a-7c4b-7003-8a03-000000000003/._meta`（标签体系 · 独立节点）
+### 10.7 `01928f3a-7c4b-7003-8a03-000000000003/.str.toml`（标签体系 · 独立节点）
 
 ```toml
 str = 1
@@ -1049,7 +1050,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 ## 11. 设计决策记录（ADR）
 
-### ADR-1：`._meta` 使用 TOML（否决 JSON 与 YAML）
+### ADR-1：`.str.toml` 使用 TOML（否决 JSON 与 YAML）
 
 | 维度 | **TOML（采纳）** | JSON（否决） | YAML（否决） |
 | --- | --- | --- | --- |
@@ -1064,7 +1065,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 结论：**TOML 在「人写、机器读、Git 合并」三者间取得最优平衡** —— 既有 YAML 的可读性与注释，又无其隐式类型陷阱，同时天然行导向、diff 干净。
 
-代价与对策：TOML 没有官方 Schema 规范，因此本格式采用 **`._meta`（TOML）→ 归一化 JSON → JSON Schema 2020-12 校验**的链路（Cargo 生态的通行做法）。归一化规则固定（4.9），保证外部工具与 AI 获得确定视图。
+代价与对策：TOML 没有官方 Schema 规范，因此本格式采用 **`.str.toml`（TOML）→ 归一化 JSON → JSON Schema 2020-12 校验**的链路（Cargo 生态的通行做法）。归一化规则固定（4.9），保证外部工具与 AI 获得确定视图。
 
 ### ADR-2：分支目录命名 = 自身 UUID（v7）
 
@@ -1083,43 +1084,39 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 连带影响：原「link 目录 = 纯引用」机制被**可选的 `refs[]` 声明式关联**取代 —— 关联线不再需要真实目录，因而也不会与「分支目录可存数据」冲突。
 
-### ADR-4：清单一律记入 `._meta.entries[]`，不另设独立结构视图
+### ADR-4：清单一律记入 `.str.toml.entries[]`，不另设独立结构视图
 
 避免同一目录出现两份结构描述（如 `entries` 与 `links`/`children`）造成漂移；「下级分支视图」「关联视图」均由 `entries[role=branch]`、`refs[]` 在读取时**派生**，不得持久化。
 
-### ADR-5：格式内部条目统一采用 `._` 保留前缀
+### ADR-5：格式保留名采用 `.str.` 前缀（v1.17.0 自 `._` 前缀整体迁移）
 
 | 维度 | 说明 |
 | --- | --- |
-| 规则 | 格式保留名一律以 `._` 开头：**文件** `._meta`（元数据）；**目录** `._schema` / `._cache`（未来扩展同此）。业务条目**不得**以 `._` 开头。 |
-| 动机 | ① 单一、可枚举的保留命名空间，「格式内部 vs 业务内容」一眼可辨；② 与 `.lock`、业务自建点文件天然区分；③ 对标 macOS bundle 内部文件（`Contents/`）的心智模型 |
-| 代价 | ① 多平台默认隐藏点文件，人工浏览需显式开启；② **`._*` 与 macOS AppleDouble 伴生文件同名模式冲突**（见下方风险） |
-| 缓解 | ① `str reveal` 可将 `._meta` 等标记为可见（macOS：`chflags nohidden`）；② **操作系统噪声豁免**：校验器必须把 `._*` 形式的**普通文件**（AppleDouble 伴生文件）与 `.DS_Store` 视为噪声 —— 既不报 `E_RESERVED_NAME`，也不参与 `E_MANIFEST_*` 比对；③ `.gitignore` 必须排除 `**/._*` 与 `**/.DS_Store` |
-| 备选 | 无点前缀的 `_meta` / `_schema`（对用户完全可见，但与 `._` 命名空间不一致）；若评审倾向可见性，可在 v1.0 发布前整体切换（仅需改 3.4 / 4.1 节与示例） |
+| 规则 | 格式保留名一律以 `.str.` 开头：**文件** `.str.toml`（元数据）；**目录** `.str.schema` / `.str.cache`（未来扩展同此）。业务条目**不得**占用 `.str.` 命名空间；`._` 前缀整体让位给 macOS AppleDouble 伴生文件（`._*` 一律视为噪声豁免）。 |
+| 动机 | ① 单一、可枚举的保留命名空间，「格式内部 vs 业务内容」一眼可辨；② 与 `.lock`、业务自建点文件天然区分；③ 对标 macOS bundle 内部文件（`Contents/`）的心智模型；④ **（v1.17.0 决定性动机）根治与 AppleDouble 的同名冲突**：`._<名>` 正是 macOS AppleDouble 伴生文件的命名模式，Finder 在枚举层硬过滤该形态的**文件**（连「显示隐藏文件」⌘⇧. 都无效），部分 WebDAV 服务端 / 客户端还会将其当作元数据丢弃 —— 元数据文件在最常用的桌面平台上不可见、跨卷同步易丢失。`.str.` 前缀与该机制零冲突，点文件在终端与「显示隐藏文件」下均可见、可同步。 |
+| 代价 | ① 点文件在多平台默认隐藏，人工浏览需显式开启（终端与 `ls -la` 不受影响）；② 既有 bundle 必须改名三个保留名才能被新工具读取（本规范唯一需要文件改名的迁移，见修订记录 v1.17.0 行）；③ `.str.` 前缀略长于 `._` |
+| 缓解 | ① `str reveal` 可为 `.str` 目录设置 macOS bundle 位并取消显式 hidden 标记；② **操作系统噪声豁免**：校验器把 `._*`（AppleDouble 伴生文件，v1.17.0 起含目录形态的人为滥用判定）与 `.DS_Store` 视为噪声 —— 未登记的 `._*` 普通文件既不报 `E_RESERVED_NAME`，也不参与 `E_MANIFEST_*` 比对；③ `.gitignore` 必须排除 `**/._*`（纯噪声）与 `**/.DS_Store` |
+| 备选 | 无点前缀的 `_meta` / `_schema`（对用户完全可见，但丢失「格式内部」的直观边界，且与业务文件混在一起）；`.str.meta` / `.str.cache` 等无类型后缀的形态（`.toml` 后缀可让编辑器 / 工具链直接识别 TOML 语法，胜过无名后缀） |
 
-> **风险与对策（`._` 前缀的特殊性）**：macOS 在 exFAT、SMB、NFS 卷及 zip/tar 归档中会为**每个普通文件**生成名为 `._<原文件名>` 的 AppleDouble 伴生文件。由于本规范采用 `._` 作为保留前缀：
->
-> - **目录**不受影响 —— AppleDouble 只为文件生成，故 `._schema/` `._cache/` 这些**目录**不会与伴生文件冲突。
-> - **普通文件**会受影响 —— 业务文件 `orders.csv` 在跨文件系统拷贝后会多出 `._orders.csv`。因此 **`._*` 形式的普通文件必须被豁免**（视为噪声），否则会误报 `E_RESERVED_NAME` 与 `E_MANIFEST_MISSING`。
-> - `._meta` 自身若被拷贝到 exFAT，其伴生文件为 `._._meta`，同样属于噪声，按同一规则豁免。
+> **历史风险（已由 v1.17.0 根治）**：v1.3.0~v1.16.0 采用 `._` 保留前缀，与 macOS AppleDouble 伴生文件（`._<原文件名>`，在 exFAT、SMB、NFS 卷及 zip/tar 归档中为每个普通文件生成）同名冲突 —— 元数据文件 `._meta` 会被 Finder 过滤、被部分同步工具丢弃。v1.17.0 起保留名改为 `.str.` 前缀，`._*` 与格式名零冲突，退化为纯噪声豁免；业务文件 `orders.csv` 跨文件系统拷贝产生的 `._orders.csv` 照旧豁免（不报 `E_RESERVED_NAME` 与 `E_MANIFEST_MISSING`）。
 
 ### ADR-6：禁止持久化索引文件
 
-索引是天然的合并冲突热点，且与文件系统存在双写漂移风险。性能需求由 `._cache/`（可删、建议 gitignore）+ 读取时惰性构建满足。
+索引是天然的合并冲突热点，且与文件系统存在双写漂移风险。性能需求由 `.str.cache/`（可删、建议 gitignore）+ 读取时惰性构建满足。
 
 ### ADR-7：跨枝关联用 `refs[]` 而非「引用目录」
 
 | 方案 | 结论 |
 | --- | --- |
-| A. 建一个只含 `._meta` 的引用目录指向目标 | ❌ 否决：与「分支目录可承载数据」冲突（同一目录既像分支又像指针，语义含混）；且为纯声明关系创建真实目录会污染分支树 |
-| B. 在使用方 `._meta.refs[]` 中声明（**采纳**） | ✅ 零文件系统副作用、可带 `rel`/`title`/`note`、可多处关联、易 diff |
+| A. 建一个只含 `.str.toml` 的引用目录指向目标 | ❌ 否决：与「分支目录可承载数据」冲突（同一目录既像分支又像指针，语义含混）；且为纯声明关系创建真实目录会污染分支树 |
+| B. 在使用方 `.str.toml.refs[]` 中声明（**采纳**） | ✅ 零文件系统副作用、可带 `rel`/`title`/`note`、可多处关联、易 diff |
 
 ### ADR-8：**取消「素材目录」概念**（节点目录本身就是素材目录）
 
 | 方案 | 结论 |
 | --- | --- |
-| A. 为素材单独定义一种目录类型（`asset_dir`），并规定其不得含 `._meta` | ❌ **否决**：**每个节点/分支目录本身就是素材目录** —— 素材直接放在分支目录内即可，无需额外概念；且「不能含 `._meta`」的规定给普通目录强加了格式约束，一旦有人在其中放入 `._meta` 就会产生「既非分支又非素材目录」的第三态，语义反而更乱 |
-| B. **不设「素材目录」概念（采纳）** | ✅ 子目录统一降级为**纯内容容器**（`role: dir`，无任何特殊语义、无任何格式约束）；「是否分支」的唯一判据仍是**该目录是否含 `._meta`**。子目录内含 `._meta` → 它就是关联分支，父级 `role` 必须同步为 `branch`（否则 `E_ENTRY_ROLE_DEPTH`） |
+| A. 为素材单独定义一种目录类型（`asset_dir`），并规定其不得含 `.str.toml` | ❌ **否决**：**每个节点/分支目录本身就是素材目录** —— 素材直接放在分支目录内即可，无需额外概念；且「不能含 `.str.toml`」的规定给普通目录强加了格式约束，一旦有人在其中放入 `.str.toml` 就会产生「既非分支又非素材目录」的第三态，语义反而更乱 |
+| B. **不设「素材目录」概念（采纳）** | ✅ 子目录统一降级为**纯内容容器**（`role: dir`，无任何特殊语义、无任何格式约束）；「是否分支」的唯一判据仍是**该目录是否含 `.str.toml`**。子目录内含 `.str.toml` → 它就是关联分支，父级 `role` 必须同步为 `branch`（否则 `E_ENTRY_ROLE_DEPTH`） |
 
 连带影响：删除错误码 `E_STRAY_META`（v1.2.0）；`count` 字段的适用 `role` 由 `asset_dir` 改为 `dir`。
 
@@ -1138,13 +1135,13 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 7 | 关联线完整性 | 构造 `E_REF_NO_TARGET` / `E_REF_SELF` / `E_REF_CYCLE` 三例均可精确报出 |
 | 8 | 深度上限 | 构造超过 `max_depth` 的分支链 → `E_DEPTH_EXCEEDED` |
 | 9 | 清单双向一致 | 手动增/删文件后 `validate` 能精确定位 |
-| 10 | 子目录升级为分支需同步 role | 在已登记为 `dir` 的 `attachments/` 内放 `._meta` → `E_ENTRY_ROLE_DEPTH`；补全 `role: branch` + `id`/`kind` 后通过 |
+| 10 | 子目录升级为分支需同步 role | 在已登记为 `dir` 的 `attachments/` 内放 `.str.toml` → `E_ENTRY_ROLE_DEPTH`；补全 `role: branch` + `id`/`kind` 后通过 |
 | 11 | 跨平台 | macOS / Linux / Windows 三端 `validate` 结果一致（无平台特性依赖） |
 | 12 | AI 可用性 | `str context --budget 8k` 输出可直接拼入模型上下文，且不含 payload 正文 |
 | 13 | 文档一致 | 本文件各章节与实现行为逐条比对无差异 |
-| 14 | 操作系统噪声豁免 | 在 bundle 内放置 `._orders.csv`、`._._meta`、`.DS_Store` → 校验**通过**且不计入 `entries` 统计；业务文件以 `._` 开头 → `E_RESERVED_NAME` |
-| 15 | TOML 校验链 | `._meta` → 归一化 JSON → JSON Schema 校验全链路通过；归一化后的键序/表序与 4.9 完全一致；`refs` / `entries` 缺省时补 `[]` |
-| 16 | 注释保真 | 在 `._meta` 里加 `#` 注释 → 经 `str sync`/`str fmt` 写回后注释仍在；`str fmt --strip-comments` 时才可丢弃 |
+| 14 | 操作系统噪声豁免 | 在 bundle 内放置 `._orders.csv`、`._.str.toml`、`.DS_Store` → 校验**通过**且不计入 `entries` 统计；业务文件以 `._` 开头或占用 `.str.` 命名空间（如 `.str.foo`）→ `E_RESERVED_NAME` |
+| 15 | TOML 校验链 | `.str.toml` → 归一化 JSON → JSON Schema 校验全链路通过；归一化后的键序/表序与 4.9 完全一致；`refs` / `entries` 缺省时补 `[]` |
+| 16 | 注释保真 | 在 `.str.toml` 里加 `#` 注释 → 经 `str sync`/`str fmt` 写回后注释仍在；`str fmt --strip-comments` 时才可丢弃 |
 | 17 | 强制指纹 | 删除任 `payload`/`asset` 条目的 `sha256` 或 `size` → `E_MANIFEST_DIGEST_MISSING` |
 | 18 | 错误码覆盖率 | `str-cli/tests/validate_codes.rs` 中 6.1 的**全部 35 个错误码**各有 ≥1 个故意破坏用例，且断言精确到码 |
 | 19 | 幂等 | `str sync` 连续执行两次，第二次输出「已更新 0 份」且无文件差异；`str fmt --check` 返回 0 |
@@ -1153,15 +1150,16 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 | 22 | 排序确定性 | 同一组 `entries` 无论物理书写顺序如何，`str fmt` 后字节一致；`str fmt --check` 幂等返回 0 |
 | 23 | 修订历史可判定 | 绕过 CLI 只改 `updated_at` 不推进 `revision` → `str validate` 报 `E_REVISION_STALE`，且该结论跨 `str sync` 持续可见，直到 `revision` 真正前进 |
 | 24 | **`[uuid]` 缺省当前节点** | `[dir]` 为 bundle 根时，`str show` / `str context` / `str norm` / `str ref add` / `str branch add` / `str branch rm` 省略 `<UUID>` 目标为 ROOT；`branch add` / `branch rm` 在真 ROOT 上以 `BadArg` 拒绝**并给出原因**（不得退化为「参数缺失」） |
-| 25 | **`spec` 可经 CLI 写入** | `str spec set <VERSION> [dir]` 改写整份 bundle 的 `spec`（子 bundle 除外）且**幂等**（第二次输出「已更新 0 份」）；写后 `str validate --strict` → 0 errors；非法版本串（`2.0.0` / `1.9` / 空串）→ `BadArg`；任一份 `._meta` 解析失败则**整体拒绝**、不写出部分结果 |
+| 25 | **`spec` 可经 CLI 写入** | `str spec set <VERSION> [dir]` 改写整份 bundle 的 `spec`（子 bundle 除外）且**幂等**（第二次输出「已更新 0 份」）；写后 `str validate --strict` → 0 errors；非法版本串（`2.0.0` / `1.9` / 空串）→ `BadArg`；任一份 `.str.toml` 解析失败则**整体拒绝**、不写出部分结果 |
 | 26 | **`[dir]` 缺省当前目录** | 在 bundle 内省略 `<dir>` 执行 `str tree` / `str show` / `str validate` / `str sync` / `str fmt --check` / `str spec set <VERSION>` 等全部命令 → 与显式 `.` 等价；`init` 缺省在当前路径旁创建 `<目录名>.str`；显式给出路径的旧调用不受影响 |
 | 27 | **`[uuid]` 缺省跟随 `[dir]`** | `[dir]` 指向分支目录时：`str show [dir]` 打印该分支；`str branch add [分支目录]` 把新分支挂到该分支下；`str branch rm [分支目录] --force` 删除该分支本身且父级 `entries[]` 被同步修复（写后 `str validate --strict` → 0 errors）；`str node add [分支目录]` → `BadArg` 指引改用 `branch add`；`.str` 硬边界不被向上穿越（子 bundle 内解析止于子 bundle 根） |
-| 28 | **保留目录免登记** | bundle 根含 `._schema/` / `._cache/` 而 `entries[]` 未登记 → `str validate --strict` **0 errors 0 warnings**；显式登记为 `role` = `schema` / `cache` 亦不报错（可选声明）；`str init` 与 §10 示例产物**不含** `._schema` 条目 |
-| 29 | **忽略名单** | bundle 根 `.gitignore` 含 `build/` 且磁盘存在未登记的 `build/` → `str validate --strict` **0 errors 0 warnings**；`policies.ignore = ["dist"]` 同样豁免；`!` 取反可恢复登记要求；`policies.gitignore = false` 关闭自动检测；已登记条目被删除 → 仍报 `E_MANIFEST_GHOST`（忽略名单不是删除开关）；`._meta` / `._schema/` / `._cache/` 等系统条目**不可**被 `!` 取反恢复（系统级忽略层） |
+| 28 | **保留目录免登记** | bundle 根含 `.str.schema/` / `.str.cache/` 而 `entries[]` 未登记 → `str validate --strict` **0 errors 0 warnings**；显式登记为 `role` = `schema` / `cache` 亦不报错（可选声明）；`str init` 与 §10 示例产物**不含** `.str.schema` 条目 |
+| 29 | **忽略名单** | bundle 根 `.gitignore` 含 `build/` 且磁盘存在未登记的 `build/` → `str validate --strict` **0 errors 0 warnings**；`policies.ignore = ["dist"]` 同样豁免；`!` 取反可恢复登记要求；`policies.gitignore = false` 关闭自动检测；已登记条目被删除 → 仍报 `E_MANIFEST_GHOST`（忽略名单不是删除开关）；`.str.toml` / `.str.schema/` / `.str.cache/` 等系统条目**不可**被 `!` 取反恢复（系统级忽略层） |
 | 30 | **实体与策略写入闭环** | `str entry add` 登记磁盘文件后 `str validate --strict` 0 errors，且 `size`/`sha256` 自动补齐；`entry rm` 只移除登记、磁盘文件保留；`str ignore add` 幂等、写后 `str fmt --check` 返回 0；`str policies set gitignore false` 落盘并生效；非法值（`manifest=bogus` / `gitignore=yes` / `id_version=5`）→ `BadArg` |
-| 31 | **链接完整性（软 / 硬）** | ① `str link add` 挂载 `node` / `branch` 后：父分支多出一条 `role = "link"`，**磁盘不新增目录**，`str validate --strict` 0 errors，目标分支内容可经挂载点读到；② 五类破坏各报对应码且断言精确到码 —— 目标 id 不存在（`E_LINK_NO_TARGET`）、目标为 ROOT（`E_LINK_TARGET_INVALID`）、`link` 行写了 `size`（`E_LINK_HAS_PAYLOAD`）、互相挂载成环与自我挂载（`E_LINK_CYCLE`）、同父重复挂载（`E_LINK_DUP`）；③ 删除语义：`str link rm` 对软连接只摘引用（目标与数据仍在），对硬链接连自身目录一并删除（目标与数据不动）；删除目标分支后全 bundle 内指向它的 `link` 被一并摘除，`str validate --strict` 仍 0 errors（无悬空）；④ `mode` 缺省 `"soft"`，显式 `"hard"` / `"soft"` 合法、其它值 `E_SCHEMA_FIELD`，非 `link` 行写 `mode` 报 `E_SCHEMA_FIELD`；⑤ 硬链接自有结构：`str link add --mode hard` 创建自身目录与 `._meta`（`path` = `id`），其下可正常 `branch add` / 挂载；硬链接分支登记内容条目 → `E_LINK_OWN_CONTENT`，缺 `id` → `E_LINK_TARGET_INVALID`，内容面板读到目标内容且目标数据不变 |
-| 32 | **查询命令闭环（只读）** | ① `str find <关键词>` 命中含该词的分支与条目行字段，输出相对路径 + id + 标题 + 命中字段，大小写不敏感；`--type` / `--tag`（交集）过滤正确，`--field` 限定后其它字段不再命中，`--limit` / `--depth` 生效，`--json` 可解析且含 `matched` 数组与 `path_abs` 绝对路径；**检索范围 = 当前节点子树**：`[dir]` 指向分支目录时只搜该子树，`--scope <uuid\|rel>` 显式指定（含 uuid 与相对路径两种形态；无法解析 → `BadArg`）；② `str grep <子串>` 命中正文行并给出 `行号 + 文本 + registered` 标注，按分支分组输出，scope 语义与 `find` 一致；**内容文件夹未登记子项与散落文件缺省参与检索**（`registered: false`，JSON 含 `file` 绝对路径），`--manifest-only` 退回仅清单口径；忽略名单剪中的路径不参与；其它分支目录不被重复遍历；`--ignore-case` 放宽大小写、`--glob` 限定路径、`--limit` 触发「提前停止」标注；含 NUL 的二进制文件不参与检索；③ `str tags` 输出全部分支级标签与计数（次数降序）；④ `str where <uuid>` 输出 ROOT → 目标的面包屑（每级含相对路径 + id + 标题，目标行标注）；⑤ `str get --path <P>` 直出已登记条目正文（字节一致）、`--info` 输出含 `sha256` 的元信息；**多段路径可直读已登记内容目录内的未登记子项**（`registered: false`、指纹按磁盘实算）；未登记散落文件 / 首段非 `dir` / 目录本身 / 子分支条目均 `BadArg` 且不落盘；⑥ 五个命令执行前后整份 bundle 的全部 `._meta` 字节不变（`revision` / `updated_at` 不动） |
+| 31 | **链接完整性（软 / 硬）** | ① `str link add` 挂载 `node` / `branch` 后：父分支多出一条 `role = "link"`，**磁盘不新增目录**，`str validate --strict` 0 errors，目标分支内容可经挂载点读到；② 五类破坏各报对应码且断言精确到码 —— 目标 id 不存在（`E_LINK_NO_TARGET`）、目标为 ROOT（`E_LINK_TARGET_INVALID`）、`link` 行写了 `size`（`E_LINK_HAS_PAYLOAD`）、互相挂载成环与自我挂载（`E_LINK_CYCLE`）、同父重复挂载（`E_LINK_DUP`）；③ 删除语义：`str link rm` 对软连接只摘引用（目标与数据仍在），对硬链接连自身目录一并删除（目标与数据不动）；删除目标分支后全 bundle 内指向它的 `link` 被一并摘除，`str validate --strict` 仍 0 errors（无悬空）；④ `mode` 缺省 `"soft"`，显式 `"hard"` / `"soft"` 合法、其它值 `E_SCHEMA_FIELD`，非 `link` 行写 `mode` 报 `E_SCHEMA_FIELD`；⑤ 硬链接自有结构：`str link add --mode hard` 创建自身目录与 `.str.toml`（`path` = `id`），其下可正常 `branch add` / 挂载；硬链接分支登记内容条目 → `E_LINK_OWN_CONTENT`，缺 `id` → `E_LINK_TARGET_INVALID`，内容面板读到目标内容且目标数据不变 |
+| 32 | **查询命令闭环（只读）** | ① `str find <关键词>` 命中含该词的分支与条目行字段，输出相对路径 + id + 标题 + 命中字段，大小写不敏感；`--type` / `--tag`（交集）过滤正确，`--field` 限定后其它字段不再命中，`--limit` / `--depth` 生效，`--json` 可解析且含 `matched` 数组与 `path_abs` 绝对路径；**检索范围 = 当前节点子树**：`[dir]` 指向分支目录时只搜该子树，`--scope <uuid\|rel>` 显式指定（含 uuid 与相对路径两种形态；无法解析 → `BadArg`）；② `str grep <子串>` 命中正文行并给出 `行号 + 文本 + registered` 标注，按分支分组输出，scope 语义与 `find` 一致；**内容文件夹未登记子项与散落文件缺省参与检索**（`registered: false`，JSON 含 `file` 绝对路径），`--manifest-only` 退回仅清单口径；忽略名单剪中的路径不参与；其它分支目录不被重复遍历；`--ignore-case` 放宽大小写、`--glob` 限定路径、`--limit` 触发「提前停止」标注；含 NUL 的二进制文件不参与检索；③ `str tags` 输出全部分支级标签与计数（次数降序）；④ `str where <uuid>` 输出 ROOT → 目标的面包屑（每级含相对路径 + id + 标题，目标行标注）；⑤ `str get --path <P>` 直出已登记条目正文（字节一致）、`--info` 输出含 `sha256` 的元信息；**多段路径可直读已登记内容目录内的未登记子项**（`registered: false`、指纹按磁盘实算）；未登记散落文件 / 首段非 `dir` / 目录本身 / 子分支条目均 `BadArg` 且不落盘；⑥ 五个命令执行前后整份 bundle 的全部 `.str.toml` 字节不变（`revision` / `updated_at` 不动） |
 | 33 | **sync 软连接豁免 + 删除门禁（v1.16.0）** | ① 含 `role = "link"`（软连接）条目的 bundle 经 `str sync` 后该行**原样保留**、无需变更的分支 `._meta` 字节不变（幂等：再跑一次零变更）；② 磁盘删除 ≥ 10 个已登记文件后 `str sync`（未带 `--yes`）→ 拒绝执行、**一字不写**、输出指路 `--dry-run` / `--yes`；带 `--yes` 后放行且校验干净；③ 移除条目数 > 0 时输出 `WARN:` 汇总；普通 path 条目的补登 / 移除 / 指纹更新行为不变 |
+| 34 | **保留名 `.str.` 前缀迁移（v1.17.0）** | ① 新建 bundle 的元数据文件为 `.str.toml`、Schema 目录为 `.str.schema/`、缓存目录为 `.str.cache/`，无 `._meta` / `._schema` / `._cache` 残留；② bundle 内放置 `.str.foo`（文件或目录、登记与否）→ `E_RESERVED_NAME`；③ 放置未登记的 `._orders.csv` / `._.str.toml` 普通文件 → 噪声豁免、校验通过；放置 `._foo` 目录或登记 `._x` 条目 → `E_RESERVED_NAME`；④ 系统级忽略层覆盖 `._*` 与 `.str.*`：用户 `.gitignore` / `policies.ignore` 的 `!` 取反不能恢复；⑤ `str grep` / `str export` 等全量扫描不再把旧 `._meta` 当元数据（旧文件视为未登记散落文件，由迁移流程负责改名） |
 
 ---
 
@@ -1177,7 +1175,7 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 1. **只有 `str` 主版本号**需要工具显式支持；`spec` 用于人类追溯。
 2. 一切厂商/实验性扩展必须放 `ext`（键名 `vendor.feature`），不得占用顶层字段。
-3. 修订史与迁移动作：完整变更摘要见头部《修订记录》，发行 / 兼容视角（哪类变更、已有实现要做什么）见 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。要点归纳 —— **唯一一次破坏性变更是 v1.4.0（`._meta` 载体 JSON → TOML）**；v1.1.0 / v1.2.0 属语义放宽 / 收敛（撤回深度限制、取消「素材目录」概念），v1.3.0 属命名空间变更（保留前缀统一为 `._`），v1.5.0 及之后均为放宽、澄清或工具面补齐（`[uuid]` / `[dir]` 缺省规则、字段与策略的 CLI 写入路径、保留目录免登记、忽略名单），旧实现与旧数据无需迁移。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现，按 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md) 的「迁移指引」逐条补齐。
+3. 修订史与迁移动作：完整变更摘要见头部《修订记录》，发行 / 兼容视角（哪类变更、已有实现要做什么）见 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)。要点归纳 —— **破坏性变更有两次：v1.4.0（`.str.toml` 载体 JSON → TOML）与 v1.17.0（保留名 `._meta` / `._schema` / `._cache` → `.str.toml` / `.str.schema` / `.str.cache`，需文件改名后用 ≥ v0.10.0 工具重新对账）**；v1.1.0 / v1.2.0 属语义放宽 / 收敛（撤回深度限制、取消「素材目录」概念），v1.3.0 属命名空间变更（保留前缀统一为 `._`，v1.17.0 迁移为 `.str.`），v1.5.0 及其余版本均为放宽、澄清或工具面补齐（`[uuid]` / `[dir]` 缺省规则、字段与策略的 CLI 写入路径、保留目录免登记、忽略名单、查询命令面、sync 门禁），除 v1.17.0 外旧实现与旧数据无需迁移。由于 v1.0.0 从未发布，无需迁移工具；若已有基于早期草案的实现，按 [`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md) 的「迁移指引」逐条补齐。
 
 ---
 
@@ -1187,12 +1185,12 @@ sha256 = "050b4e5bf2eaf595e0904397d45c5e6bb637d4bb4f250c047a384915a997b0fe"
 
 | # | 决策点 | 结论 | 备选 |
 | --- | --- | --- | --- |
-| ~~A1~~ | ~~元数据文件名~~ | ✅ **已定：`._meta`；格式保留名统一为 `._` 前缀（现为 `._schema` / `._cache`）**（v1.3.0，v1.5.0 移除 `._audit`） | — |
-| ~~A2~~ | ~~`._meta` 载体格式~~ | ✅ **已定：TOML v1.0.0**（JSON 与 YAML 均否决，见 ADR-1）（v1.4.0） | — |
+| ~~A1~~ | ~~元数据文件名~~ | ✅ **已定：`._meta`；格式保留名统一为 `._` 前缀（现为 `._schema` / `._cache`）**（v1.3.0，v1.5.0 移除 `._audit`）→ **v1.17.0 重开并改判：保留名整体迁移为 `.str.` 前缀**（`.str.toml` / `.str.schema` / `.str.cache`），见 ADR-5 | — |
+| ~~A2~~ | ~~`.str.toml` 载体格式~~ | ✅ **已定：TOML v1.0.0**（JSON 与 YAML 均否决，见 ADR-1）（v1.4.0） | — |
 | ~~A3~~ | ~~UUID 版本~~ | ✅ **已定：UUID v7**（时间有序，利于排序与新分支定位）（v1.4.0） | — |
 | ~~A4~~ | ~~分支身份切换深度~~ | ✅ **已定：固定为 2 且不可配置**（深度 1 = 独立节点，≥2 = 关联分支；2 是唯一自洽值，理由见 3.3）。原 `policies.branch_min_depth` 字段**已删除**，避免暴露一个不允许改动的开关（v1.5.0） | — |
 | ~~A5~~ | ~~深度 ≥2 是否绝对禁止 payload~~ | ✅ **已定：允许，任意层级均可承载任意文件/文件夹**（v1.1.0） | — |
 | ~~A6~~ | ~~素材目录是否算分支~~ | ✅ **已定：不存在「素材目录」概念——节点/分支目录本身就是素材目录；子目录一律为纯内容容器（`role: dir`）**（v1.2.0） | — |
 | ~~A7~~ | ~~`refs[]` 跨枝关联是否保留~~ | ✅ **已定：保留**（可选数组表 `[[refs]]`，声明式关联线，不复制数据）（v1.4.0） | — |
-| ~~A8~~ | ~~是否需要 `._audit/` 审计日志~~ | ✅ **已定：不需要** —— 审计能力交由 Git / 协作平台提供，格式内不设 `._audit/`、不设 `journal` role（v1.5.0） | — |
+| ~~A8~~ | ~~是否需要 `._audit/` 审计日志~~ | ✅ **已定：不需要** —— 审计能力交由 Git / 协作平台提供，格式内不设 `._audit/`（v1.17.0 起前缀规范名为 `.str.audit`，如未来重引入）、不设 `journal` role（v1.5.0） | — |
 | ~~A9~~ | ~~`sha256` 是否强制~~ | ✅ **已定：强制**（`policies.sha256 = "required"`，仅约束 `payload`/`asset` 文件类条目）（v1.4.0） | — |

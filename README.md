@@ -9,7 +9,7 @@
 在同一份资产上安全地读写、协作与版本控制。
 
 - 格式：`.str` 目录 bundle（形态对标 macOS `.app`）—— 纯目录 + 纯文本，零平台依赖
-- 规范版本：v1.16.0（`str` 主版本号 = `1`）
+- 规范版本：v1.17.0（`str` 主版本号 = `1`）
 - 参考实现：Rust CLI（`str-cli/`），20+ 子命令，35 个校验错误码
 - 状态：`DRAFT → 待评审`
 
@@ -65,13 +65,13 @@ STR 的野心是做**所有这些领域的同一层底座**：
 
 ```
 项目.str/
-├── ._meta                        # ROOT：bundle 元信息 + 一级分支结构
-├── ._schema/                     # 保留目录：JSON Schema
+├── .str.toml                        # ROOT：bundle 元信息 + 一级分支结构
+├── .str.schema/                     # 保留目录：JSON Schema
 ├── <UUID-v7>/                    # 独立节点（深度 1）—— 一等实体
-│   ├── ._meta                    # 元信息 + 内容清单 + 跨枝关联
+│   ├── .str.toml                    # 元信息 + 内容清单 + 跨枝关联
 │   ├── <任意文件>                 # payload / asset，登记进 entries[]
 │   └── <UUID-v7>/                # 关联分支（深度 ≥2）—— 思维导图生长
-│       ├── ._meta
+│       ├── .str.toml
 │       └── <任意深度继续嵌套>
 └── <UUID-v7>/                    # 更多独立节点
 ```
@@ -79,14 +79,14 @@ STR 的野心是做**所有这些领域的同一层底座**：
 三条核心规则：
 
 1. **目录树即思维导图**：深度 1 = 独立节点（`node`），深度 ≥2 = 关联分支（`branch`），任意层级都能存任意文件；
-2. **`._meta` 是每层的大脑**：`type / title / summary / tags` 供 AI 路由检索，`entries[]` 是内容清单唯一真源，`refs[]` 声明跨枝关联线（不复制数据）；
-3. **文件系统 = 存在性权威，`._meta` = 语义权威**：校验器双向比对，改错立刻报错并给出可定位路径。
+2. **`.str.toml` 是每层的大脑**：`type / title / summary / tags` 供 AI 路由检索，`entries[]` 是内容清单唯一真源，`refs[]` 声明跨枝关联线（不复制数据）；
+3. **文件系统 = 存在性权威，`.str.toml` = 语义权威**：校验器双向比对，改错立刻报错并给出可定位路径。
 
 ## 核心功能一览
 
 - **结构即导图**：`str tree` 文本树与 GUI 思维导图同源呈现，深度 1 独立节点 + 任意深度关联分支；
 - **渐进式披露**：`str context --budget` 裁剪出可直接拼接进模型上下文的片段，token 成本可控；
-- **强校验**：35 个错误码双向比对文件系统与 `._meta`，改错立刻报错并给出可定位路径；
+- **强校验**：35 个错误码双向比对文件系统与 `.str.toml`，改错立刻报错并给出可定位路径；
 - **Git 友好**：确定性序列化（固定键序）+ 幂等 `sync`，diff 永远只反映真实变更；
 - **人机双入口**：Agent 走 `str` CLI，人类用 str-gui 桌面编辑器，同一份磁盘真相；
 - **跨 Agent 技能包**：str-skill 把用法固化成 MUST / NEVER 行为契约，一次安装处处生效。
@@ -95,13 +95,13 @@ STR 的野心是做**所有这些领域的同一层底座**：
 
 ## 为 AI 而生：渐进式披露协议
 
-AI 读取 bundle 不需要全量加载——每一层 `._meta` 自带摘要，按需下钻：
+AI 读取 bundle 不需要全量加载——每一层 `.str.toml` 自带摘要，按需下钻：
 
 | 步骤 | 动作 | 上下文成本 |
 | --- | --- | --- |
-| 1 | 读 ROOT `._meta` 的一级分支摘要 | 极小 |
+| 1 | 读 ROOT `.str.toml` 的一级分支摘要 | 极小 |
 | 2 | 按 `type/tags/title/summary` 锁定目标分支 | — |
-| 3 | 读目标分支 `._meta`（元信息 + 下级摘要） | 小 |
+| 3 | 读目标分支 `.str.toml`（元信息 + 下级摘要） | 小 |
 | 4 | 需要时才读具体 payload | 按需 |
 
 配套命令与技能：
@@ -111,7 +111,7 @@ str context 项目.str [uuid] --depth 2 --budget 8k   # 裁剪出可直接拼接
 ```
 
 - [`str-skill/`](str-skill/) — 通用 Agent 技能包（CodeBuddy / Claude Code / Cursor 等），
-  强制所有 `._meta` 写操作经 `str` CLI 完成，写后必须 `sync` + `validate --strict` 零错误才算交付；
+  强制所有 `.str.toml` 写操作经 `str` CLI 完成，写后必须 `sync` + `validate --strict` 零错误才算交付；
   并内置 str-gui 协作引导：Agent 侧永远走 CLI，何时建议人类转向桌面编辑器有明确判据；
 - `str norm` / `str export` — 输出归一化 JSON，供任何语言的外部工具消费。
 
@@ -119,7 +119,7 @@ str context 项目.str [uuid] --depth 2 --budget 8k   # 裁剪出可直接拼接
 
 ## 全场景适配：`type` 点分命名空间
 
-`._meta.type` 采用点分命名空间（业务类型零注册成本，`x-` 前缀支持厂商扩展），
+`.str.toml.type` 采用点分命名空间（业务类型零注册成本，`x-` 前缀支持厂商扩展），
 同一个格式在不同 AI 领域只需约定不同的 type 词汇表：
 
 | 领域 | 典型 type | 分支树长什么样 |
@@ -160,10 +160,10 @@ str validate .
 ```
 
 > **`[uuid]` 缺省 ROOT**：凡以单个分支为目标的命令，其 `<UUID>` 位置参数都可省略，缺省目标为 **ROOT** ——
-> 例如 `str show 我的项目.str` 打印 ROOT 的 `._meta`、`str context 我的项目.str` 从 ROOT 起裁剪上下文。
+> 例如 `str show 我的项目.str` 打印 ROOT 的 `.str.toml`、`str context 我的项目.str` 从 ROOT 起裁剪上下文。
 > 只有 `str ref add --target` 必填；`branch add` / `branch rm` 在 ROOT 上无意义，会以带原因的 `BadArg`（exit 2）拒绝。
 
-关键设计：`str sync` 幂等（第二次零 diff）、`._meta` 写回保注释、
+关键设计：`str sync` 幂等（第二次零 diff）、`.str.toml` 写回保注释、
 序列化确定性（固定键序/表序/排序）—— Git diff 永远只反映真实变更。
 
 ---
@@ -216,7 +216,7 @@ GitHub Releases 下载（SHA-256 强制校验）→ crates.io 编译：
 
 ```sh
 STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
-"$STR" --version                    # 期望：str 0.9.0
+"$STR" --version                    # 期望：str 0.10.0
 ```
 
 高频命令分三组：
@@ -251,8 +251,8 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 新文件没有登记进 `entries[]`。跑 `str sync <dir>` 把磁盘状态登记后再校验。
 
 **报 `E_REVISION_STALE`？**
-有人绕过 CLI 手改了 `._meta`（动了 `updated_at` 但没推进 `revision`）。用 CLI 重写相关
-字段即可，`._cache` 基线不会被骗过。
+有人绕过 CLI 手改了 `.str.toml`（动了 `updated_at` 但没推进 `revision`）。用 CLI 重写相关
+字段即可，`.str.cache` 基线不会被骗过。
 
 **报 `W_BUNDLE_SUFFIX`？**
 目录是合法 bundle 但名字不以 `.str` 结尾，仅命名约定告警，说明后可保留。
@@ -261,7 +261,7 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 宿主可能按语义检索加载。两级兜底：配置 always-apply 规则（见「配置」一节），
 或等技能首次激活时自举 `AGENTS.md` 规则块。
 
-**为什么禁止手改 `._meta`？**
+**为什么禁止手改 `.str.toml`？**
 键序、`revision`、`updated_at`、摘要与指纹都是格式契约的一部分；所有字段都有 CLI
 写入路径（`str meta set` / `str entry set` / `str author add`…），手改必然产生漂移。
 
@@ -277,7 +277,7 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 ## 设计原则
 
 1. **SSOT**：`entries[]` 是内容清单唯一真源；本仓库规范文档是格式的唯一真源；
-2. **禁止持久化索引**：可重建缓存只进 `._cache/`（可删、gitignore）；
+2. **禁止持久化索引**：可重建缓存只进 `.str.cache/`（可删、gitignore）；
 3. **不得静默容错**：结构损坏必须报错码 + 可定位路径；
 4. **跨平台**：不依赖符号链接 / 扩展属性 / 文件系统大小写；
 5. **OS 噪声豁免**：`._*` AppleDouble、`.DS_Store`、`.git/` 等一律忽略不误报；
@@ -293,11 +293,11 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 
 | 位置 | 说明 |
 | --- | --- |
-| `SPEC.md` | 格式规范（唯一真源，v1.16.0） |
+| `SPEC.md` | 格式规范（唯一真源，v1.17.0） |
 | `VERSIONS.toml` | **版本唯一真源**：规范 / CLI / 技能包 / 界面四条轴 + 发行 tag 锚 |
 | `CHANGELOG.md` | 仓库与发行的变更日志（每个 tag 冻结的「规范 · CLI · skill · gui」四元组） |
 | `SPEC-CHANGELOG.md` | 格式规范的变更日志（发行 / 兼容视角；细则真源仍是正文《修订记录》） |
-| `._schema/*.json` | 三档 JSON Schema（2020-12），格式规范性产物（Schema 的唯一真源） |
+| `.str.schema/*.json` | 三档 JSON Schema（2020-12），格式规范性产物（Schema 的唯一真源） |
 | `examples/客户运营.str/` | 官方示例 bundle（`str validate --strict` 零错误） |
 | `scripts/*.sh` | `build-example.sh` 幂等重建示例 bundle；`sync-schema.sh` 同步 Schema 派生副本；`check-versions.sh` 版本一致性门禁；（另有 `str-gui/scripts/` 下的 vendor 脚本，见 `str-gui/` 一行） |
 | `str-cli/` | Rust 参考实现（`str` 二进制；crates.io 包名 `str-format`） |
@@ -318,14 +318,14 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
 
 | 轴 | 当前 | 定义什么契约 | 怎么升 |
 | --- | --- | --- | --- |
-| 规范 `spec` | `1.16.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
-| 实现 `cli` | `0.9.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
-| 技能包 `skill` | `0.6.0` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
-| 界面 `gui` | `0.6.0` | 图形界面契约（crate `str-gui`） | 修复 / 文案 → patch；新功能 / 新视图 → minor；交互或写入行为不兼容 → major |
-| **发行 tag** | `v0.9.0` | 把上面四者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
+| 规范 `spec` | `1.17.0` | 磁盘上的数据契约 | 措辞 / 示例 → patch；新增可选字段或枚举值 → minor；收紧校验或语义变更 → major（须配套 `str migrate`，且 `str` 主版本 +1） |
+| 实现 `cli` | `0.10.0` | 代码 / 命令契约（crate `str-format`） | 修复 → patch；新命令 / 新 flag → minor；命令面不兼容 → major（含「支持新的 spec major」） |
+| 技能包 `skill` | `0.7.0` | Agent 行为契约（MUST / NEVER） | 文案 / 示例 → patch；新增 references 或流程 → minor；Hard rules 变更 → major |
+| 界面 `gui` | `0.7.0` | 图形界面契约（crate `str-gui`） | 修复 / 文案 → patch；新功能 / 新视图 → minor；交互或写入行为不兼容 → major |
+| **发行 tag** | `v0.10.0` | 把上面四者的某个组合**冻结命名** | **= `v` + cli 版本**（锚定规则） |
 
 - **唯一需要工具显式支持的只有 `str` 主版本号**（当前 `1`）；`spec` 供人类追溯 —— 见规范 §13。
-- **门禁**：`bash scripts/check-versions.sh` 逐点比对「真源 ↔ 各声明点」（正文头部、`._meta`、
+- **门禁**：`bash scripts/check-versions.sh` 逐点比对「真源 ↔ 各声明点」（正文头部、`.str.toml`、
   Rust 常量、Schema description、示例生成脚本、README、技能包 frontmatter 与发布身份、`ensure-str.sh`、
   workflow 默认 tag），CI 在三个发布工作流中强制执行；tag 推送时还会校验
   「推送的 tag = 真源声明的 tag」，杜绝「tag 打了、真源没改」。
@@ -336,7 +336,7 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
   [`str-skill/README.md`](str-skill/README.md) 的「发布到 SkillHub」）。
 - **逐版变更**：[`CHANGELOG.md`](CHANGELOG.md)（仓库 / 发行）、[`SPEC-CHANGELOG.md`](SPEC-CHANGELOG.md)
   （规范）、[`str-cli/CHANGELOG.md`](str-cli/CHANGELOG.md)、[`str-skill/CHANGELOG.md`](str-skill/CHANGELOG.md)。
-- 别把 `._meta` 的 `revision`（bundle 内的内容修订计数，与 git 无关）当成发布版本。
+- 别把 `.str.toml` 的 `revision`（bundle 内的内容修订计数，与 git 无关）当成发布版本。
 
 ---
 
@@ -362,7 +362,7 @@ STR="$(sh <skill-dir>/scripts/ensure-str.sh)" || exit 1
   `spec` / `cli` / `skill` / `gui` / `release`）；
 - **提交前自检**：`str validate . --strict` 与 `str fmt . --check` 必须双零
   （本仓库自身即一个 bundle，格式在自己的仓库上先行验证）；
-- **不发明字段**：`._meta` 键集封闭，语义不明先开 issue 讨论，扩展只走 `[ext]` 且
+- **不发明字段**：`.str.toml` 键集封闭，语义不明先开 issue 讨论，扩展只走 `[ext]` 且
   须 `vendor.*` 命名空间。
 
 ---

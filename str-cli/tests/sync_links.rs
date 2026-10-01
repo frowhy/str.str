@@ -37,7 +37,7 @@ fn w(root: &Path, rel: &str, body: &str) {
     std::fs::write(p, body).unwrap();
 }
 
-/// `._meta` 骨架（裸键在前，表在后 —— TOML 要求）。
+/// `.str.toml` 骨架（裸键在前，表在后 —— TOML 要求）。
 fn meta_text(kind: &str, id: &str, extra_bare: &str, tables: &str) -> String {
     format!(
         "str = 1\nspec = \"1.5.0\"\nkind = \"{kind}\"\nid = \"{id}\"\nname = \"T\"\nrevision = 1\ncreated_at = 2026-09-01T09:00:00+08:00\nupdated_at = 2026-09-01T09:00:00+08:00\n{extra_bare}\n{tables}\n"
@@ -67,7 +67,7 @@ fn baseline(name: &str) -> PathBuf {
     let body = "{\"a\":1}\n";
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -80,7 +80,7 @@ fn baseline(name: &str) -> PathBuf {
     );
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &meta_text(
             "node",
             A,
@@ -96,11 +96,11 @@ fn baseline(name: &str) -> PathBuf {
 fn two_nodes(name: &str) -> PathBuf {
     let root = baseline(name);
     let body = "{\"b\":2}\n";
-    let root_meta = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let root_meta = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     let node_b = node_entry(B, "type = \"crm.tag\"\nsummary = \"s\"");
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &root_meta.replace(
             &node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""),
             &format!(
@@ -111,7 +111,7 @@ fn two_nodes(name: &str) -> PathBuf {
     );
     w(
         &root,
-        &format!("{B}/._meta"),
+        &format!("{B}/.str.toml"),
         &meta_text(
             "node",
             B,
@@ -124,7 +124,7 @@ fn two_nodes(name: &str) -> PathBuf {
 }
 
 fn append_entries(root: &Path, branch: &str, extra: &str) {
-    let p = root.join(branch).join("._meta");
+    let p = root.join(branch).join(".str.toml");
     let text = std::fs::read_to_string(&p).unwrap();
     std::fs::write(&p, format!("{text}{extra}\n")).unwrap();
 }
@@ -147,7 +147,7 @@ fn sync_keeps_soft_link_entries() {
     append_entries(&root, A, &link_entry(B));
     assert_eq!(error_count(&root), 0);
 
-    let meta = root.join(A).join("._meta");
+    let meta = root.join(A).join(".str.toml");
     let before = read(&meta);
 
     str_format::cmd::sync(&root, false, true).unwrap();
@@ -156,7 +156,7 @@ fn sync_keeps_soft_link_entries() {
     assert!(after.contains(&format!("role = \"link\"")), "{after}");
     assert!(after.contains(&format!("path = \"{B}\"")), "{after}");
     // A 分支无需任何变更 → 不得写盘（`revision` / 字节均不变）
-    assert_eq!(before, after, "软连接豁免后 A 的 `._meta` 不应有任何变更");
+    assert_eq!(before, after, "软连接豁免后 A 的 `.str.toml` 不应有任何变更");
 
     // 幂等：再次 sync 依旧零变更
     str_format::cmd::sync(&root, false, true).unwrap();
@@ -178,7 +178,7 @@ fn sync_still_reconciles_regular_paths() {
 
     str_format::cmd::sync(&root, false, true).unwrap();
 
-    let meta = read(&root.join(A).join("._meta"));
+    let meta = read(&root.join(A).join(".str.toml"));
     assert!(meta.contains("extra.json"), "未登记文件必须被补登：{meta}");
     assert!(
         !meta.contains("path = \"data.json\""),
@@ -198,7 +198,7 @@ fn sync_gate_refuses_mass_removal_without_yes() {
     }
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -209,7 +209,7 @@ fn sync_gate_refuses_mass_removal_without_yes() {
             ),
         ),
     );
-    w(&root, &format!("{A}/._meta"), &meta_text("node", A, "type = \"x\"\nsummary = \"s\"", &a_tables));
+    w(&root, &format!("{A}/.str.toml"), &meta_text("node", A, "type = \"x\"\nsummary = \"s\"", &a_tables));
     for (i, b) in bodies.iter().enumerate() {
         w(&root, &format!("{A}/f{i}.json"), b);
     }
@@ -219,7 +219,7 @@ fn sync_gate_refuses_mass_removal_without_yes() {
     for i in 0..10 {
         std::fs::remove_file(root.join(A).join(format!("f{i}.json"))).unwrap();
     }
-    let meta_path = root.join(A).join("._meta");
+    let meta_path = root.join(A).join(".str.toml");
     let before = read(&meta_path);
     let err = str_format::cmd::sync(&root, false, false)
         .unwrap_err()

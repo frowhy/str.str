@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 同步 Schema 派生副本：仓库根 ._schema/（唯一真源）→ str-cli/schema/（crate 内副本）。
+# 同步 Schema 派生副本：仓库根 .str.schema/（唯一真源）→ str-cli/schema/（crate 内副本）。
 #
 # 为什么需要副本：crates.io 只打包 crate 目录（str-cli/）内的文件，而 Schema 属
 # **格式规范资产**，必须留在仓库根（与 examples/ 同级）。因此 crate 内保留一份
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${0}")/.." && pwd)"
-SRC="${ROOT}/._schema"
+SRC="${ROOT}/.str.schema"
 DST="${ROOT}/str-cli/schema"
 
 FILES=(

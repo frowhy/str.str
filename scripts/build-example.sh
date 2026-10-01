@@ -18,15 +18,15 @@ hash_of() { shasum -a 256 "$1" | awk '{print $1}'; }
 size_of() { wc -c < "$1" | tr -d ' '; }
 
 rm -rf "$OUT"
-mkdir -p "$OUT/._schema" \
+mkdir -p "$OUT/.str.schema" \
          "$OUT/$N1/attachments" \
          "$OUT/$N1/$L1/$L2" \
          "$OUT/$N2" \
          "$OUT/$N3"
 
 # ── bundle 级 Schema ────────────────────────────────────────────
-cp "$ROOT"/._schema/*.json "$OUT/._schema/"
-python3 - "$OUT/._schema/customer.schema.json" <<'PY'
+cp "$ROOT"/.str.schema/*.json "$OUT/.str.schema/"
+python3 - "$OUT/.str.schema/customer.schema.json" <<'PY'
 import json, sys
 schema = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -74,12 +74,12 @@ printf 'order_id,sku,qty,amount,placed_at\nA-1001,SKU-01,2,398.00,2026-03-12\nA-
 printf '{\n  "tags": ["华东区", "vip", "制造业", "2024-新签"]\n}\n' \
   > "$OUT/$N3/tags.json"
 
-# ── 各分支 `._meta` ─────────────────────────────────────────────
-cat > "$OUT/._meta" <<EOF
+# ── 各分支 `.str.toml` ─────────────────────────────────────────────
+cat > "$OUT/.str.toml" <<EOF
 # ── STR bundle 根元数据 ──────────────────────────────────────────
 # ROOT 的 [[entries]] 中 role = "node" 的条目即一级分支结构。
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "root"
 id = "$ROOT_ID"
 name = "客户运营"
@@ -147,9 +147,9 @@ MD_SIZE=$(size_of "$OUT/$N1/$L1/$L2/2026-09-10.md");  MD_HASH=$(hash_of "$OUT/$N
 CSV_SIZE=$(size_of "$OUT/$N2/orders.csv");         CSV_HASH=$(hash_of "$OUT/$N2/orders.csv")
 TAGS_SIZE=$(size_of "$OUT/$N3/tags.json");         TAGS_HASH=$(hash_of "$OUT/$N3/tags.json")
 
-cat > "$OUT/$N1/._meta" <<EOF
+cat > "$OUT/$N1/.str.toml" <<EOF
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "node"
 id = "$N1"
 type = "crm.customer"
@@ -159,7 +159,7 @@ tags = ["华东区", "vip"]
 revision = 8
 created_at = 2026-09-01T09:20:00+08:00
 updated_at = 2026-09-14T10:03:11+08:00
-schema = "._schema/customer.schema.json"
+schema = ".str.schema/customer.schema.json"
 
 [[refs]]
 id = "$REF1"
@@ -175,7 +175,7 @@ role = "payload"
 media_type = "application/json"
 size = $PROFILE_SIZE
 sha256 = "$PROFILE_HASH"
-schema = "._schema/customer.schema.json"
+schema = ".str.schema/customer.schema.json"
 
 [[entries]]
 path = "avatar.png"
@@ -202,10 +202,10 @@ order = 1
 [ext]
 EOF
 
-cat > "$OUT/$N1/$L1/._meta" <<EOF
+cat > "$OUT/$N1/$L1/.str.toml" <<EOF
 # 深度 2 的关联分支同样承载真实数据（payload 直接放在本目录内）
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "branch"
 id = "$L1"
 type = "crm.followup_log"
@@ -235,9 +235,9 @@ order = 1
 [ext]
 EOF
 
-cat > "$OUT/$N1/$L1/$L2/._meta" <<EOF
+cat > "$OUT/$N1/$L1/$L2/.str.toml" <<EOF
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "branch"
 id = "$L2"
 type = "doc.meeting_note"
@@ -258,9 +258,9 @@ sha256 = "$MD_HASH"
 [ext]
 EOF
 
-cat > "$OUT/$N2/._meta" <<EOF
+cat > "$OUT/$N2/.str.toml" <<EOF
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "node"
 id = "$N2"
 type = "crm.order_dataset"
@@ -281,9 +281,9 @@ sha256 = "$CSV_HASH"
 [ext]
 EOF
 
-cat > "$OUT/$N3/._meta" <<EOF
+cat > "$OUT/$N3/.str.toml" <<EOF
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "node"
 id = "$N3"
 type = "crm.tag_system"

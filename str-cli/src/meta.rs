@@ -1,4 +1,4 @@
-//! `._meta` 的解析、类型化提取与**归一化**（TOML → 规范 JSON）。
+//! `.str.toml` 的解析、类型化提取与**归一化**（TOML → 规范 JSON）。
 //!
 //! 保注释写回与新建模板见 [`crate::meta_edit`]。
 
@@ -267,7 +267,7 @@ impl Entry {
     }
 }
 
-/// 一份 `._meta` 的完整内容：保序文档 + 类型化视图。
+/// 一份 `.str.toml` 的完整内容：保序文档 + 类型化视图。
 #[derive(Debug)]
 pub struct Meta {
     /// 保注释、保顺序的 TOML 文档（写回用）。
@@ -318,7 +318,7 @@ pub enum MetaLoad {
     Failed(Vec<Issue>),
 }
 
-/// 从磁盘读取并解析一份 `._meta`。
+/// 从磁盘读取并解析一份 `.str.toml`。
 pub fn load(path: &Path, rel: &str) -> Result<MetaLoad> {
     let bytes = std::fs::read(path).map_err(|e| Error::io(path, e))?;
     let mut issues = Vec::new();
@@ -415,7 +415,7 @@ pub fn extract(doc: DocumentMut, rel: &str) -> (Meta, Vec<Issue>) {
                 if kind != Some(Kind::Root) {
                     cx.err(
                         code::SCHEMA_FIELD,
-                        "`[policies]` 只能出现在 root 的 `._meta` 中",
+                        "`[policies]` 只能出现在 root 的 `.str.toml` 中",
                     );
                 }
                 cx.check_unknown(pt, POLICIES_KEYS);

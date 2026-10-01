@@ -1,15 +1,15 @@
 str = 1
-spec = "1.16.0"
+spec = "1.17.0"
 kind = "node"
 id = "01928f3a-7c4b-7001-8a01-000000000001"
 type = "crm.customer"
 title = "客户档案 · 张伟"
 summary = "2024 年 3 月签约的企业客户，归属华东区，当前为 VIP 等级。"
 tags = ["华东区", "vip"]
-revision = 10
+revision = 9
 created_at = 2026-09-01T09:20:00+08:00
-updated_at = 2026-09-30T19:04:05+00:00
-schema = "._schema/customer.schema.json"
+updated_at = 2026-09-30T23:46:09+00:00
+schema = ".str.schema/customer.schema.json"
 
 [[refs]]
 id = "01928f3a-7c4b-7201-8d01-000000000201"
@@ -47,6 +47,6 @@ role = "payload"
 media_type = "application/json"
 size = 87
 sha256 = "852fa7846c3b3a70e053cf1b00ad8503a5f04b804cc4d1259404585260b8037f"
-schema = "._schema/customer.schema.json"
+schema = ".str.schema/customer.schema.json"
 
 [ext]

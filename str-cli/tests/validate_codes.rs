@@ -44,7 +44,7 @@ fn w(root: &Path, rel: &str, body: &str) {
     std::fs::write(p, body).unwrap();
 }
 
-/// `._meta` 骨架（裸键在前，表在后 —— TOML 要求）。
+/// `.str.toml` 骨架（裸键在前，表在后 —— TOML 要求）。
 fn meta_text(kind: &str, id: &str, extra_bare: &str, tables: &str) -> String {
     format!(
         "str = 1\nspec = \"1.5.0\"\nkind = \"{kind}\"\nid = \"{id}\"\nname = \"T\"\nrevision = 1\ncreated_at = 2026-09-01T09:00:00+08:00\nupdated_at = 2026-09-01T09:00:00+08:00\n{extra_bare}\n{tables}\n"
@@ -71,13 +71,13 @@ fn link_entry(path: &str, extra: &str) -> String {
 fn two_nodes(name: &str) -> PathBuf {
     let root = baseline(name);
     let body = "{\"b\":2}\n";
-    let root_meta = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let root_meta = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     // B 与 A 同属 ROOT 的 entries（插入点就在 A 那条之前，避免误嵌进 `[policies]`）
     let node_b = node_entry(B, "type = \"crm.tag\"\nsummary = \"s\"");
-    w(&root, "._meta", &root_meta.replace(&node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""), &format!("{node_b}{}", node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""))).as_str());
+    w(&root, ".str.toml", &root_meta.replace(&node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""), &format!("{node_b}{}", node_entry(A, "type = \"crm.customer\"\nsummary = \"s\""))).as_str());
     w(
         &root,
-        &format!("{B}/._meta"),
+        &format!("{B}/.str.toml"),
         &meta_text(
             "node",
             B,
@@ -89,9 +89,9 @@ fn two_nodes(name: &str) -> PathBuf {
     root
 }
 
-/// 往某分支的 `._meta` 末尾追加一段 `[[entries]]`（该分支的表区只有 entries，安全）。
+/// 往某分支的 `.str.toml` 末尾追加一段 `[[entries]]`（该分支的表区只有 entries，安全）。
 fn append_entries(root: &Path, branch: &str, extra: &str) {
-    let p = root.join(branch).join("._meta");
+    let p = root.join(branch).join(".str.toml");
     let text = std::fs::read_to_string(&p).unwrap();
     std::fs::write(&p, format!("{text}{extra}\n")).unwrap();
 }
@@ -110,7 +110,7 @@ fn baseline(name: &str) -> PathBuf {
     let body = "{\"a\":1}\n";
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -120,7 +120,7 @@ fn baseline(name: &str) -> PathBuf {
     );
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &meta_text(
             "node",
             A,
@@ -178,24 +178,24 @@ fn baseline_is_clean() {
 #[test]
 fn e_parse_invalid_toml() {
     let root = tmp_bundle("parse");
-    w(&root, "._meta", "str = = 1\n");
+    w(&root, ".str.toml", "str = = 1\n");
     assert_code(&root, "E_PARSE");
 }
 
 #[test]
 fn e_parse_bom_and_string_datetime() {
     let root = baseline("bom");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
-    std::fs::write(root.join("._meta"), format!("\u{feff}{text}")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
+    std::fs::write(root.join(".str.toml"), format!("\u{feff}{text}")).unwrap();
     assert_code(&root, "E_PARSE");
 
     let root = baseline("dtstr");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     let bad = text.replace(
         "created_at = 2026-09-01T09:00:00+08:00",
         "created_at = \"2026-09-01T09:00:00+08:00\"",
     );
-    w(&root, "._meta", &bad);
+    w(&root, ".str.toml", &bad);
     assert_code(&root, "E_PARSE");
 }
 
@@ -205,7 +205,7 @@ fn e_meta_missing_root_and_declared_branch() {
     assert_code(&root, "E_META_MISSING");
 
     let root = baseline("nometa2");
-    std::fs::remove_file(root.join(A).join("._meta")).unwrap();
+    std::fs::remove_file(root.join(A).join(".str.toml")).unwrap();
     assert_code(&root, "E_META_MISSING");
 }
 
@@ -215,7 +215,7 @@ fn e_meta_missing_when_meta_is_inside_non_branch_dir() {
     std::fs::create_dir_all(root.join(A).join("attachments").join("deep")).unwrap();
     w(
         &root,
-        &format!("{A}/attachments/deep/._meta"),
+        &format!("{A}/attachments/deep/.str.toml"),
         &meta_text("branch", B, "", ""),
     );
     assert_code(&root, "E_META_MISSING");
@@ -224,57 +224,57 @@ fn e_meta_missing_when_meta_is_inside_non_branch_dir() {
 #[test]
 fn e_spec_unsupported() {
     let root = baseline("spec");
-    let text = std::fs::read_to_string(root.join("._meta"))
+    let text = std::fs::read_to_string(root.join(".str.toml"))
         .unwrap()
         .replace("str = 1", "str = 2");
-    w(&root, "._meta", &text);
+    w(&root, ".str.toml", &text);
     assert_code(&root, "E_SPEC_UNSUPPORTED");
 }
 
 #[test]
 fn e_kind_invalid() {
     let root = baseline("kindinv");
-    let text = std::fs::read_to_string(root.join(A).join("._meta"))
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml"))
         .unwrap()
         .replace("kind = \"node\"", "kind = \"foo\"");
-    w(&root, &format!("{A}/._meta"), &text);
+    w(&root, &format!("{A}/.str.toml"), &text);
     assert_code(&root, "E_KIND_INVALID");
 }
 
 #[test]
 fn e_kind_depth() {
     let root = baseline("kinddepth");
-    let text = std::fs::read_to_string(root.join(A).join("._meta"))
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml"))
         .unwrap()
         .replace("kind = \"node\"", "kind = \"branch\"");
-    w(&root, &format!("{A}/._meta"), &text);
+    w(&root, &format!("{A}/.str.toml"), &text);
     assert_code(&root, "E_KIND_DEPTH");
 
     // ROOT 写成 node
     let root = baseline("kinddepth2");
-    let text = std::fs::read_to_string(root.join("._meta"))
+    let text = std::fs::read_to_string(root.join(".str.toml"))
         .unwrap()
         .replace("kind = \"root\"", "kind = \"node\"");
-    w(&root, "._meta", &text);
+    w(&root, ".str.toml", &text);
     assert_code(&root, "E_KIND_DEPTH");
 }
 
 #[test]
 fn e_schema_field_unknown_and_wrong_type() {
     let root = baseline("fieldunknown");
-    let text = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &text.replace("kind = \"node\"", "kind = \"node\"\nvendor_extra = 1"),
     );
     assert_code(&root, "E_SCHEMA_FIELD");
 
     let root = baseline("fieldtype");
-    let text = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &text.replace("revision = 1", "revision = \"one\""),
     );
     assert_code(&root, "E_SCHEMA_FIELD");
@@ -285,10 +285,10 @@ fn e_schema_field_unknown_and_wrong_type() {
 #[test]
 fn policies_unknown_entry_is_rejected() {
     let root = baseline("policyunknown");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]\n", "[policies]\nunknown_entry = \"deny\"\n"),
     );
     assert_code(&root, "E_SCHEMA_FIELD");
@@ -297,10 +297,10 @@ fn policies_unknown_entry_is_rejected() {
 #[test]
 fn e_id_mismatch() {
     let root = baseline("idmismatch");
-    let text = std::fs::read_to_string(root.join(A).join("._meta"))
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml"))
         .unwrap()
         .replace(&format!("id = \"{A}\""), &format!("id = \"{B}\""));
-    w(&root, &format!("{A}/._meta"), &text);
+    w(&root, &format!("{A}/.str.toml"), &text);
     assert_code(&root, "E_ID_MISMATCH");
 }
 
@@ -309,7 +309,7 @@ fn e_id_not_uuid() {
     let root = tmp_bundle("idnotuuid");
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -319,7 +319,7 @@ fn e_id_not_uuid() {
     );
     w(
         &root,
-        "users/._meta",
+        "users/.str.toml",
         &meta_text("node", "users", "type = \"crm.customer\"\nsummary = \"s\"", ""),
     );
     assert_code(&root, "E_ID_NOT_UUID");
@@ -330,7 +330,7 @@ fn e_id_version() {
     let root = tmp_bundle("idversion");
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -340,7 +340,7 @@ fn e_id_version() {
     );
     w(
         &root,
-        &format!("{V4}/._meta"),
+        &format!("{V4}/.str.toml"),
         &meta_text("node", V4, "type = \"x\"\nsummary = \"s\"", ""),
     );
     assert_code(&root, "E_ID_VERSION");
@@ -349,11 +349,11 @@ fn e_id_version() {
 #[test]
 fn e_id_dup() {
     let root = baseline("iddup");
-    let text = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     // B 与 A 同级；A 下再嵌一个同名目录 B，两处 id 均为 B
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -365,31 +365,31 @@ fn e_id_dup() {
             ),
         ),
     );
-    w(&root, &format!("{B}/._meta"), &meta_text("node", B, "type = \"x\"\nsummary = \"s\"", ""));
+    w(&root, &format!("{B}/.str.toml"), &meta_text("node", B, "type = \"x\"\nsummary = \"s\"", ""));
     let a_text = text.replace(
         "[ext]",
         "",
     );
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n{}",
             a_text,
             branch_entry(B, "type = \"x\"\nsummary = \"s\"")
         ),
     );
-    w(&root, &format!("{A}/{B}/._meta"), &meta_text("branch", B, "type = \"x\"\nsummary = \"s\"", ""));
+    w(&root, &format!("{A}/{B}/.str.toml"), &meta_text("branch", B, "type = \"x\"\nsummary = \"s\"", ""));
     assert_code(&root, "E_ID_DUP");
 }
 
 #[test]
 fn e_entry_role_depth_dir_holding_meta() {
     let root = baseline("roledepth");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("role = \"node\"", "role = \"dir\""),
     );
     assert_code(&root, "E_ENTRY_ROLE_DEPTH");
@@ -398,33 +398,33 @@ fn e_entry_role_depth_dir_holding_meta() {
 #[test]
 fn e_entry_id_mismatch() {
     let root = baseline("entryid");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     let bad = text.replace(
         &format!("id = \"{A}\"\ntype = \"crm.customer\""),
         &format!("id = \"{B}\"\ntype = \"crm.customer\""),
     );
-    w(&root, "._meta", &bad);
+    w(&root, ".str.toml", &bad);
     assert_code(&root, "E_ENTRY_ID_MISMATCH");
 }
 
 #[test]
 fn e_depth_exceeded() {
     let root = baseline("depthex");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\nmax_depth = 1"),
     );
     w(
         &root,
-        &format!("{A}/x/._meta"),
+        &format!("{A}/x/.str.toml"),
         &meta_text("branch", "01928f3a-7c4b-7101-8b01-000000000101", "type = \"x\"\nsummary = \"s\"", ""),
     );
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n{}",
             a.replace("[ext]", ""),
@@ -439,10 +439,10 @@ fn e_depth_exceeded() {
 #[test]
 fn e_ref_no_target_and_self() {
     let root = baseline("refno");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n[[refs]]\nid = \"01928f3a-7c4b-7201-8d01-000000000201\"\ntarget = \"01928f3a-7c4b-7909-8909-000000000909\"\nrel = \"related\"\n",
             a
@@ -451,10 +451,10 @@ fn e_ref_no_target_and_self() {
     assert_code(&root, "E_REF_NO_TARGET");
 
     let root = baseline("refself");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n[[refs]]\nid = \"01928f3a-7c4b-7201-8d01-000000000201\"\ntarget = \"{A}\"\nrel = \"related\"\n",
             a
@@ -466,10 +466,10 @@ fn e_ref_no_target_and_self() {
 #[test]
 fn e_ref_cycle() {
     let root = baseline("refcycle");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -483,7 +483,7 @@ fn e_ref_cycle() {
     );
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n[[refs]]\nid = \"01928f3a-7c4b-7201-8d01-000000000201\"\ntarget = \"{B}\"\nrel = \"related\"\n",
             a
@@ -491,7 +491,7 @@ fn e_ref_cycle() {
     );
     w(
         &root,
-        &format!("{B}/._meta"),
+        &format!("{B}/.str.toml"),
         &format!(
             "{}\n[[refs]]\nid = \"01928f3a-7c4b-7202-8d02-000000000202\"\ntarget = \"{A}\"\nrel = \"related\"\n",
             meta_text("node", B, "type = \"x\"\nsummary = \"s\"", "")
@@ -509,29 +509,29 @@ fn e_manifest_missing_and_ghost_and_hash_and_dup() {
     assert_code(&root, "E_MANIFEST_MISSING");
 
     let root = baseline("m2");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!("{a}\n{}", payload_entry("ghost.json", "{}\n", "application/json")),
     );
     assert_code(&root, "E_MANIFEST_GHOST");
 
     let root = baseline("m3");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     let real = util::sha256_bytes(b"{\"a\":1}\n");
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace(&real, &"0".repeat(64)),
     );
     assert_code(&root, "E_MANIFEST_HASH");
 
     let root = baseline("m4");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!("{a}\n{}", payload_entry("data.json", "x", "text/plain")),
     );
     assert_code(&root, "E_MANIFEST_DUP");
@@ -540,10 +540,10 @@ fn e_manifest_missing_and_ghost_and_hash_and_dup() {
 #[test]
 fn e_manifest_digest_missing() {
     let root = baseline("digest");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace("sha256 = \"", "sha256x = \""),
     );
     assert_code(&root, "E_MANIFEST_DIGEST_MISSING");
@@ -557,10 +557,10 @@ fn e_reserved_name_dir_and_declared_file() {
 
     let root = baseline("reserved2");
     w(&root, &format!("{A}/._orders.csv"), "a\n");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!("{a}\n{}", payload_entry("._orders.csv", "a\n", "text/csv")),
     );
     assert_code(&root, "E_RESERVED_NAME");
@@ -569,17 +569,17 @@ fn e_reserved_name_dir_and_declared_file() {
 #[test]
 fn e_revision_stale() {
     let root = baseline("rev1");
-    let text = std::fs::read_to_string(root.join("._meta"))
+    let text = std::fs::read_to_string(root.join(".str.toml"))
         .unwrap()
         .replace("revision = 1", "revision = 0");
-    w(&root, "._meta", &text);
+    w(&root, ".str.toml", &text);
     assert_code(&root, "E_REVISION_STALE");
 
     let root = baseline("rev2");
-    let text = std::fs::read_to_string(root.join("._meta"))
+    let text = std::fs::read_to_string(root.join(".str.toml"))
         .unwrap()
         .replace("updated_at = 2026-09-01T09:00:00+08:00", "updated_at = 2026-01-01T09:00:00+08:00");
-    w(&root, "._meta", &text);
+    w(&root, ".str.toml", &text);
     assert_code(&root, "E_REVISION_STALE");
 }
 
@@ -588,23 +588,23 @@ fn e_schema_fail_payload() {
     let root = baseline("schemafail");
     w(
         &root,
-        "._schema/x.schema.json",
+        ".str.schema/x.schema.json",
         "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"type\":\"object\",\"required\":[\"missing\"]}",
     );
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace("[ext]", "").to_string(),
     );
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace(
             &payload_entry("data.json", "{\"a\":1}\n", "application/json"),
             &payload_entry("data.json", "{\"a\":1}\n", "application/json")
-                .replace("size =", "schema = \"._schema/x.schema.json\"\nsize ="),
+                .replace("size =", "schema = \".str.schema/x.schema.json\"\nsize ="),
         ),
     );
     assert_code(&root, "E_SCHEMA_FAIL");
@@ -617,7 +617,7 @@ fn w_bundle_suffix() {
     let root = tmp_plain("suffix");
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text("root", ROOT_ID, "title = \"T\"\nsummary = \"s\"", ""),
     );
     assert_code(&root, "W_BUNDLE_SUFFIX");
@@ -649,7 +649,7 @@ fn w_dotfile_and_root_stray() {
 
     // VCS 元数据豁免：`.git/` 与 `.gitignore` 不报任何码（规范 3.4）
     let root = baseline("vcs");
-    w(&root, ".gitignore", "._cache/\n");
+    w(&root, ".gitignore", ".str.cache/\n");
     w(&root, ".git/HEAD", "ref: refs/heads/main\n");
     let (set, report) = codes(&root);
     assert!(!set.contains("W_DOTFILE"), "VCS 元数据应豁免：\n{report}");
@@ -671,10 +671,10 @@ fn w_dotfile_and_root_stray() {
     let root = baseline("rootstray2");
     let body = "x\n";
     w(&root, "notes.md", body);
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &format!("{text}\n{}", payload_entry("notes.md", body, "text/markdown")),
     );
     let (set, report) = codes(&root);
@@ -691,7 +691,7 @@ fn dod_nested_bundle_is_hard_boundary() {
     let sub = "子集.str";
     w(
         &root,
-        &format!("{sub}/._meta"),
+        &format!("{sub}/.str.toml"),
         &meta_text("root", "01928f3a-7c4b-7000-8000-00000000000f", "title = \"嵌套\"\nsummary = \"s\"", ""),
     );
     w(&root, &format!("{sub}/data.txt"), "inner\n");
@@ -704,10 +704,10 @@ fn dod_nested_bundle_is_hard_boundary() {
     assert!(set.contains("E_MANIFEST_MISSING"), "未登记应报：\n{report}");
 
     // 登记为 role = "bundle" → 全绿
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &format!(
             "{text}\n[[entries]]\npath = \"{sub}\"\nrole = \"bundle\"\ntitle = \"嵌套子 bundle\"\n"
         ),
@@ -718,13 +718,13 @@ fn dod_nested_bundle_is_hard_boundary() {
     let root2 = baseline("nested2");
     w(
         &root2,
-        &format!("{sub}/._meta"),
+        &format!("{sub}/.str.toml"),
         &meta_text("root", "01928f3a-7c4b-7000-8000-00000000000f", "title = \"嵌套\"\nsummary = \"s\"", ""),
     );
-    let text = std::fs::read_to_string(root2.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root2.join(".str.toml")).unwrap();
     w(
         &root2,
-        "._meta",
+        ".str.toml",
         &format!("{text}\n[[entries]]\npath = \"{sub}\"\nrole = \"dir\"\n"),
     );
     assert_code(&root2, "E_ENTRY_ROLE_DEPTH");
@@ -733,10 +733,10 @@ fn dod_nested_bundle_is_hard_boundary() {
 #[test]
 fn w_no_summary_and_no_type() {
     let root = baseline("nosummary");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace("type = \"crm.customer\"\nsummary = \"s\"\n", ""),
     );
     assert_code(&root, "W_NO_SUMMARY");
@@ -746,21 +746,21 @@ fn w_no_summary_and_no_type() {
 #[test]
 fn w_deep_tree_and_large_asset() {
     let root = baseline("deeptree");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\ndeep_tree_warn = 1"),
     );
     w(
         &root,
-        &format!("{A}/x/._meta"),
+        &format!("{A}/x/.str.toml"),
         &meta_text("branch", "01928f3a-7c4b-7101-8b01-000000000101", "type = \"x\"\nsummary = \"s\"", ""),
     );
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n{}",
             a.replace("[ext]", ""),
@@ -770,10 +770,10 @@ fn w_deep_tree_and_large_asset() {
     assert_code(&root, "W_DEEP_TREE");
 
     let root = baseline("large");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\nlarge_asset_bytes = 1"),
     );
     assert_code(&root, "W_LARGE_ASSET");
@@ -782,10 +782,10 @@ fn w_deep_tree_and_large_asset() {
 #[test]
 fn w_optional_missing() {
     let root = baseline("optional");
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{a}\n{}",
             payload_entry("maybe.json", "{}\n", "application/json").replace(
@@ -800,10 +800,10 @@ fn w_optional_missing() {
 #[test]
 fn w_manifest_advisory_downgrades() {
     let root = baseline("advisory");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\nmanifest = \"advisory\""),
     );
     w(&root, &format!("{A}/extra.txt"), "x");
@@ -821,10 +821,10 @@ fn w_manifest_advisory_downgrades() {
 
     // advisory 下的幽灵条目
     let root = baseline("advisory2");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\nmanifest = \"advisory\""),
     );
     std::fs::remove_file(root.join(A).join("data.json")).unwrap();
@@ -833,17 +833,17 @@ fn w_manifest_advisory_downgrades() {
 
     // advisory 下的指纹不符
     let root = baseline("advisory3");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]", "[policies]\nmanifest = \"advisory\""),
     );
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     let real = util::sha256_bytes(b"{\"a\":1}\n");
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &a.replace(&real, &"0".repeat(64)),
     );
     let (set, report) = codes(&root);
@@ -856,7 +856,7 @@ fn w_manifest_advisory_downgrades() {
 fn dod_os_noise_is_exempt() {
     let root = baseline("osnoise");
     w(&root, &format!("{A}/._data.json"), "junk");
-    w(&root, &format!("{A}/._._meta"), "junk");
+    w(&root, &format!("{A}/._.str.toml"), "junk");
     w(&root, &format!("{A}/.DS_Store"), "junk");
     let (set, report) = codes(&root);
     assert!(
@@ -872,10 +872,10 @@ fn dod_any_depth_can_hold_data() {
     let l1 = "01928f3a-7c4b-7101-8b01-000000000101";
     let l2 = "01928f3a-7c4b-7102-8b02-000000000102";
     let body = "{\"deep\":true}\n";
-    let a = std::fs::read_to_string(root.join(A).join("._meta")).unwrap();
+    let a = std::fs::read_to_string(root.join(A).join(".str.toml")).unwrap();
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &format!(
             "{}\n{}",
             a.replace("[ext]", ""),
@@ -884,7 +884,7 @@ fn dod_any_depth_can_hold_data() {
     );
     w(
         &root,
-        &format!("{A}/{l1}/._meta"),
+        &format!("{A}/{l1}/.str.toml"),
         &meta_text(
             "branch",
             l1,
@@ -899,7 +899,7 @@ fn dod_any_depth_can_hold_data() {
     w(&root, &format!("{A}/{l1}/f1.json"), body);
     w(
         &root,
-        &format!("{A}/{l1}/{l2}/._meta"),
+        &format!("{A}/{l1}/{l2}/.str.toml"),
         &meta_text(
             "branch",
             l2,
@@ -975,7 +975,7 @@ fn e_link_cycle_and_self_and_ancestor() {
     );
     w(
         &root,
-        &format!("{A}/{c}/._meta"),
+        &format!("{A}/{c}/.str.toml"),
         &meta_text(
             "branch",
             c,
@@ -1002,7 +1002,7 @@ fn e_link_dup() {
 /// 同样合法（1.15.0 撤回「不得挂载自己的后代」：硬链接不渲染目标结构、内容只读，
 /// 不存在自嵌套）；`mode` 非法值与非链接行写 `mode` 都报 `E_SCHEMA_FIELD`。
 /// 在 `parent` 分支下创建一个合法的硬链接分支（C1 语义：`path` = `id` = 自身
-/// 目录名，目录 + 自有 `._meta` 存在，自有 entries 只有子分支 / 空），并在父
+/// 目录名，目录 + 自有 `.str.toml` 存在，自有 entries 只有子分支 / 空），并在父
 /// 分支 `entries` 追加对应 `role = "link"` 行。
 fn hard_link_branch(root: &Path, parent: &str, lid: &str, target: &str, extra: &str) {
     let parent_rel = if parent == "." { String::new() } else { format!("{parent}/") };
@@ -1010,7 +1010,7 @@ fn hard_link_branch(root: &Path, parent: &str, lid: &str, target: &str, extra: &
     let kind = if parent == "." { "node" } else { "branch" };
     w(
         root,
-        &format!("{parent_rel}{lid}/._meta"),
+        &format!("{parent_rel}{lid}/.str.toml"),
         &meta_text(
             kind,
             lid,
@@ -1044,7 +1044,7 @@ fn link_hard_mode_rules() {
     // 硬链接缺 `id`（有身份的真实分支必须写 id）
     let root = two_nodes("linkhardnoid");
     hard_link_branch(&root, A, HARD_LID, B, "mode = \"hard\"\n");
-    let p = root.join(A).join("._meta");
+    let p = root.join(A).join(".str.toml");
     let text = std::fs::read_to_string(&p).unwrap().replace(
         &format!("[[entries]]\npath = \"{HARD_LID}\"\nrole = \"link\"\nid = \"{HARD_LID}\""),
         &format!("[[entries]]\npath = \"{HARD_LID}\"\nrole = \"link\""),

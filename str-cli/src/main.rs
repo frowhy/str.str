@@ -11,7 +11,7 @@ use str_format::error::{Error, Result};
     name = "str",
     version,
     about = "STR 结构化树资源格式（.str）工具链",
-    long_about = "STR 是目录 bundle 式的结构化树资源格式：深度 1 为独立节点，深度 ≥2 为关联分支，\n任意层级均可承载任意文件；每个分支的 `._meta`（TOML）记录元信息与内容清单。"
+    long_about = "STR 是目录 bundle 式的结构化树资源格式：深度 1 为独立节点，深度 ≥2 为关联分支，\n任意层级均可承载任意文件；每个分支的 `.str.toml`（TOML）记录元信息与内容清单。"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 创建新的 .str bundle（生成 ROOT `._meta` 与 `._schema/`）
+    /// 创建新的 .str bundle（生成 ROOT `.str.toml` 与 `.str.schema/`）
     Init {
         /// 目标目录（缺省为当前路径；未以 .str 结尾时自动追加 `.str`）
         dir: Option<PathBuf>,
@@ -84,7 +84,7 @@ enum Cmd {
         #[arg(long)]
         raw: bool,
     },
-    /// 打印某分支的 `._meta`（归一化 JSON）
+    /// 打印某分支的 `.str.toml`（归一化 JSON）
     Show {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
@@ -130,7 +130,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AuthorCmd,
     },
-    /// 规范版本声明（bundle 级：`._meta.spec`）
+    /// 规范版本声明（bundle 级：`.str.toml.spec`）
     Spec {
         #[command(subcommand)]
         cmd: SpecCmd,
@@ -157,7 +157,7 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// 按规范键序 / 表序重写 `._meta`（保注释）
+    /// 按规范键序 / 表序重写 `.str.toml`（保注释）
     Fmt {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
@@ -209,7 +209,7 @@ enum Cmd {
         #[arg(long)]
         out: Option<String>,
     },
-    /// 平台适配：macOS 设置 bundle 位并让 `._meta` 可见
+    /// 平台适配：macOS 设置 bundle 位并让 `.str.toml` 可见
     Reveal {
         /// bundle 目录（缺省为当前目录）
         #[arg(default_value = ".")]
@@ -587,7 +587,7 @@ enum AuthorCmd {
 
 #[derive(Subcommand)]
 enum SpecCmd {
-    /// 把整份 bundle 的 `spec` 统一改写为目标版本（幂等；从此改 `spec` 不再需要手改 `._meta`）
+    /// 把整份 bundle 的 `spec` 统一改写为目标版本（幂等；从此改 `spec` 不再需要手改 `.str.toml`）
     Set {
         /// 目标规范版本，如 1.10.0（`str` 主版本固定为 1；可用 `v` 前缀）
         version: String,

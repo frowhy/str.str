@@ -36,9 +36,10 @@ struct Layer {
     patterns: Vec<Pattern>,
 }
 
-/// 系统级忽略层的固定模式（规范 3.4 豁免清单 + `._` 保留命名空间 + `.lock`）。
+/// 系统级忽略层的固定模式（规范 3.4 豁免清单 + `.str.` 保留命名空间 + AppleDouble + `.lock`）。
 const SYSTEM_IGNORE_PATTERNS: &str = "\
 ._*
+.str.*
 .lock
 .DS_Store
 Thumbs.db
@@ -137,8 +138,8 @@ impl IgnoreSet {
         });
     }
 
-    /// 追加**系统级忽略层**（规范 4.7）：`._meta` / `._schema/` / `._cache/` 与整个
-    /// `._` 保留命名空间、`.lock`，以及 OS / VCS 元数据。该层必须**最后**入栈
+    /// 追加**系统级忽略层**（规范 4.7）：`.str.toml` / `.str.schema/` / `.str.cache/` 与整个
+    /// `.str.` 保留命名空间、AppleDouble `._*` 噪声、`.lock`，以及 OS / VCS 元数据。该层必须**最后**入栈
     /// （恒为最内层）：不受 `policies.gitignore` 开关影响，用户 `.gitignore` /
     /// `policies.ignore` 的 `!` 取反**不能**恢复这些条目。
     pub fn push_system_layer(&mut self) {
@@ -254,12 +255,12 @@ mod tests {
     fn system_layer_is_innermost_and_unresurrectable() {
         let mut s = IgnoreSet::default();
         // 用户层尝试用取反恢复系统条目 → 系统层（最内层）覆盖回来。
-        s.push_layer("", "!._cache\n!._meta\n!._schema\n");
+        s.push_layer("", "!.str.cache\n!.str.toml\n!.str.schema\n");
         s.push_system_layer();
-        assert!(s.is_ignored("._meta", false));
-        assert!(s.is_ignored("._schema", true));
-        assert!(s.is_ignored("._cache", true));
-        assert!(s.is_ignored("a/._cache", true));
+        assert!(s.is_ignored(".str.toml", false));
+        assert!(s.is_ignored(".str.schema", true));
+        assert!(s.is_ignored(".str.cache", true));
+        assert!(s.is_ignored("a/.str.cache", true));
         assert!(s.is_ignored(".DS_Store", false));
         assert!(s.is_ignored(".git", true));
         assert!(s.is_ignored("x/.lock", false));

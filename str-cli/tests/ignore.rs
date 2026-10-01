@@ -36,7 +36,7 @@ fn w(root: &Path, rel: &str, body: &str) {
     std::fs::write(p, body).unwrap();
 }
 
-/// `._meta` 骨架。
+/// `.str.toml` 骨架。
 fn meta_text(kind: &str, id: &str, extra_bare: &str, tables: &str) -> String {
     format!(
         "str = 1\nspec = \"1.5.0\"\nkind = \"{kind}\"\nid = \"{id}\"\nname = \"T\"\nrevision = 1\ncreated_at = 2026-09-01T09:00:00+08:00\nupdated_at = 2026-09-01T09:00:00+08:00\n{extra_bare}\n{tables}\n"
@@ -61,7 +61,7 @@ fn baseline(name: &str) -> PathBuf {
     let body = "{\"a\":1}\n";
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &meta_text(
             "root",
             ROOT_ID,
@@ -71,7 +71,7 @@ fn baseline(name: &str) -> PathBuf {
     );
     w(
         &root,
-        &format!("{A}/._meta"),
+        &format!("{A}/.str.toml"),
         &meta_text(
             "node",
             A,
@@ -137,10 +137,10 @@ fn policies_ignore_exempts_and_overrides() {
     w(&root, ".gitignore", "!dist\n");
     assert_contains(&root, "E_MANIFEST_MISSING");
 
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]\n", "[policies]\nignore = [\"dist\"]\n"),
     );
     assert_clean(&root);
@@ -152,10 +152,10 @@ fn gitignore_can_be_disabled() {
     let root = baseline("gi-off");
     w(&root, &format!("{A}/build/out.o"), "binary");
     w(&root, ".gitignore", "build/\n");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace("[policies]\n", "[policies]\ngitignore = false\n"),
     );
     assert_contains(&root, "E_MANIFEST_MISSING");
@@ -184,21 +184,21 @@ fn outer_repo_gitignore_applies() {
     );
 }
 
-/// 系统级忽略（规范 4.7）：`._meta` / `._schema/` / `._cache/` 等系统条目恒被忽略，
+/// 系统级忽略（规范 4.7）：`.str.toml` / `.str.schema/` / `.str.cache/` 等系统条目恒被忽略，
 /// 用户 `.gitignore` / `policies.ignore` 的 `!` 取反不能恢复它们。
 #[test]
 fn system_entries_cannot_be_resurrected() {
     let root = baseline("sys-ignore");
-    w(&root, "._cache/rev.json", "{}");
-    w(&root, "._schema/extra.json", "{}");
+    w(&root, ".str.cache/rev.json", "{}");
+    w(&root, ".str.schema/extra.json", "{}");
     w(&root, ".gitignore", "!._*\n");
-    let text = std::fs::read_to_string(root.join("._meta")).unwrap();
+    let text = std::fs::read_to_string(root.join(".str.toml")).unwrap();
     w(
         &root,
-        "._meta",
+        ".str.toml",
         &text.replace(
             "[policies]\n",
-            "[policies]\nignore = [\"!._cache\", \"!._schema\"]\n",
+            "[policies]\nignore = [\"!.str.cache\", \"!.str.schema\"]\n",
         ),
     );
     assert_clean(&root);
